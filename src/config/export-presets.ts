@@ -1,0 +1,68 @@
+import type { ExportPreset } from '@/types/project';
+
+export const EXPORT_PRESETS: ExportPreset[] = [
+  {
+    id: 'youtube_4k',
+    name: 'YouTube 4K',
+    description: '3840x2160, 30fps, H.264, high quality',
+    width: 3840,
+    height: 2160,
+    fps: 30,
+    codec: 'h264',
+    crf: 18,
+    audioBitrate: '320k',
+    orientation: 'horizontal',
+  },
+  {
+    id: 'youtube_1080',
+    name: 'YouTube 1080p',
+    description: '1920x1080, 30fps, H.264',
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    codec: 'h264',
+    crf: 20,
+    audioBitrate: '256k',
+    orientation: 'horizontal',
+  },
+  {
+    id: 'reels',
+    name: 'Reels / TikTok',
+    description: '1080x1920 vertical, 30fps',
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    codec: 'h264',
+    crf: 22,
+    audioBitrate: '192k',
+    orientation: 'vertical',
+  },
+  {
+    id: 'instagram',
+    name: 'Instagram Square',
+    description: '1080x1080 square, 30fps',
+    width: 1080,
+    height: 1080,
+    fps: 30,
+    codec: 'h264',
+    crf: 22,
+    audioBitrate: '192k',
+    orientation: 'horizontal',
+  },
+  {
+    id: 'preview',
+    name: 'Preview (Fast)',
+    description: '854x480, 24fps, fast render',
+    width: 854,
+    height: 480,
+    fps: 24,
+    codec: 'h264',
+    crf: 28,
+    audioBitrate: '128k',
+    orientation: 'horizontal',
+  },
+];
+
+export function getPreset(id: string): ExportPreset | undefined {
+  return EXPORT_PRESETS.find((p) => p.id === id);
+}

@@ -1,0 +1,113 @@
+'use client';
+
+import { useProjectStore } from '@/stores/project-store';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Music, Radio, Subtitles, Download, Film } from 'lucide-react';
+import { formatFileSize } from '@/lib/utils';
+import Link from 'next/link';
+import { useParams } from 'next/navigation';
+
+export default function ProjectOverviewPage() {
+  const { currentProject } = useProjectStore();
+  const params = useParams();
+  const projectId = params.id as string;
+
+  if (!currentProject) return null;
+
+  const modules = [
+    {
+      href: `/project/${projectId}/audio-prep`,
+      icon: Music,
+      title: 'Audio Prep',
+      description: 'Upload files, extract audio, separate stems',
+      status: currentProject.audio.extractedTracks.length > 0 ? 'done' : 'pending',
+    },
+    {
+      href: `/project/${projectId}/sync`,
+      icon: Radio,
+      title: 'Sync',
+      description: 'Align camera audio with board audio',
+      status: currentProject.sync.status === 'done' ? 'done' : 'pending',
+    },
+    {
+      href: `/project/${projectId}/subtitles`,
+      icon: Subtitles,
+      title: 'Subtitles',
+      description: 'Transcribe and style subtitles',
+      status: currentProject.transcription.segments.length > 0 ? 'done' : 'pending',
+    },
+    {
+      href: `/project/${projectId}/export`,
+      icon: Download,
+      title: 'Export',
+      description: 'Render final video with subtitles',
+      status: currentProject.exports.some((e) => e.status === 'done') ? 'done' : 'pending',
+    },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-xl font-semibold">{currentProject.name}</h2>
+        <p className="text-sm text-muted-foreground">
+          {currentProject.sources.length} source files
+        </p>
+      </div>
+
+      {/* Source files summary */}
+      {currentProject.sources.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-medium">Source Files</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {currentProject.sources.map((src) => (
+                <div
+                  key={src.id}
+                  className="flex items-center gap-3 text-sm"
+                >
+                  <Film className="h-4 w-4 text-muted-foreground" />
+                  <span className="flex-1 truncate">{src.originalName}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {formatFileSize(src.size)}
+                  </span>
+                  <span className="rounded bg-secondary px-2 py-0.5 text-xs">
+                    {src.role}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Module cards */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        {modules.map((mod) => (
+          <Link key={mod.href} href={mod.href}>
+            <Card className="transition-colors hover:border-primary/30">
+              <CardContent className="flex items-start gap-4 pt-6">
+                <div
+                  className={`rounded-lg p-2 ${
+                    mod.status === 'done'
+                      ? 'bg-green-500/10 text-green-500'
+                      : 'bg-secondary text-muted-foreground'
+                  }`}
+                >
+                  <mod.icon className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="font-medium">{mod.title}</h3>
+                  <p className="text-sm text-muted-foreground">
+                    {mod.description}
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+}

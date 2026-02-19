@@ -1,0 +1,10 @@
+# Python dependencies for video_procesor
+# Install with: pip3 install -r requirements.txt
+
+numpy
+
+# Optional: local transcription (alternative to Groq API)
+# pip3 install openai-whisper
+
+# Optional: audio source separation (legacy feature)
+# pip3 install demucs
