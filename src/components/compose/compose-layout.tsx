@@ -6,6 +6,7 @@ import { MediaBin } from './media-bin';
 import { ComposePreview } from './compose-preview';
 import { ClipProperties } from './clip-properties';
 import { MultiTrackTimeline } from './multi-track-timeline';
+import { YouTubeSubtitlePanel } from './youtube-subtitle-panel';
 import type { SubtitleStyle } from '@/types/project';
 
 interface ComposeLayoutProps {
@@ -22,6 +23,8 @@ export function ComposeLayout({
   subtitleStyle,
 }: ComposeLayoutProps) {
   const [saving, setSaving] = useState(false);
+  const [rightPanel, setRightPanel] = useState<'properties' | 'subtitles'>('properties');
+
   const getCompositionState = useComposeStore((s) => s.getCompositionState);
   const subtitleSegments = useComposeStore((s) => s.subtitleSegments);
   const markClean = useComposeStore((s) => s.markClean);
@@ -37,7 +40,7 @@ export function ComposeLayout({
         body: JSON.stringify(compositionState),
       });
 
-      // Also save subtitle changes back to the project
+      // Also save subtitle segment changes
       await fetch(`/api/projects/${projectId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -57,7 +60,6 @@ export function ComposeLayout({
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if typing in an input
       if (
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement
@@ -92,6 +94,13 @@ export function ComposeLayout({
         e.preventDefault();
         handleSave();
       }
+
+      // S key for split
+      if (e.key === 's' || e.key === 'S') {
+        if (!e.ctrlKey && !e.metaKey) {
+          useComposeStore.getState().splitClipAtPlayhead();
+        }
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -100,14 +109,14 @@ export function ComposeLayout({
 
   return (
     <div className="flex h-full flex-col">
-      {/* Top section: Media Bin + Preview + Properties */}
+      {/* Top section: Media Bin + Preview + Right Panel */}
       <div className="flex flex-1 min-h-0">
         {/* Media Bin */}
         <div className="w-56 flex-shrink-0">
           <MediaBin projectId={projectId} />
         </div>
 
-        {/* Preview */}
+        {/* Preview area (16:9 YouTube only) */}
         <div className="flex-1 flex flex-col min-w-0">
           <ComposePreview
             projectId={projectId}
@@ -117,12 +126,44 @@ export function ComposeLayout({
           />
         </div>
 
-        {/* Clip Properties */}
-        {selectedClipId && (
-          <div className="w-56 flex-shrink-0 border-l border-border bg-card overflow-auto">
-            <ClipProperties />
+        {/* Right Panel: Clip Properties or Subtitle Style */}
+        <div className="w-64 flex-shrink-0 border-l border-border bg-card overflow-auto flex flex-col">
+          {/* Tab switcher */}
+          <div className="flex border-b border-border">
+            <button
+              className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                rightPanel === 'properties'
+                  ? 'border-b-2 border-primary text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setRightPanel('properties')}
+            >
+              Properties
+            </button>
+            <button
+              className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                rightPanel === 'subtitles'
+                  ? 'border-b-2 border-primary text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setRightPanel('subtitles')}
+            >
+              Subtitles
+            </button>
           </div>
-        )}
+
+          <div className="flex-1 overflow-auto">
+            {rightPanel === 'properties' && selectedClipId ? (
+              <ClipProperties />
+            ) : rightPanel === 'properties' && !selectedClipId ? (
+              <div className="p-3 text-xs text-muted-foreground text-center mt-8">
+                Select a clip to edit properties
+              </div>
+            ) : (
+              <YouTubeSubtitlePanel />
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Bottom section: Timeline */}

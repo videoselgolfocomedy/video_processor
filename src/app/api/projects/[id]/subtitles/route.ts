@@ -13,8 +13,8 @@ export async function GET(
 
   return NextResponse.json({
     segments: project.transcription.segments,
-    style: project.transcription.style,
-    stylePreset: project.transcription.stylePreset,
+    style: project.youtubeSubtitles.style,
+    stylePreset: project.youtubeSubtitles.stylePreset,
   });
 }
 
@@ -30,14 +30,27 @@ export async function PUT(
 
   const body = await request.json();
 
-  await updateProject(id, {
-    transcription: {
+  const updates: Record<string, unknown> = {};
+
+  // Update transcription (segments + constraints only)
+  if (body.segments || body.constraints) {
+    updates.transcription = {
       ...project.transcription,
       segments: body.segments ?? project.transcription.segments,
-      style: body.style ?? project.transcription.style,
-      stylePreset: body.stylePreset ?? project.transcription.stylePreset,
-    },
-  });
+      constraints: body.constraints ?? project.transcription.constraints,
+    };
+  }
+
+  // Update youtube subtitle style (separate from transcription)
+  if (body.style || body.stylePreset) {
+    updates.youtubeSubtitles = {
+      ...project.youtubeSubtitles,
+      style: body.style ?? project.youtubeSubtitles.style,
+      stylePreset: body.stylePreset ?? project.youtubeSubtitles.stylePreset,
+    };
+  }
+
+  await updateProject(id, updates);
 
   return NextResponse.json({ ok: true });
 }

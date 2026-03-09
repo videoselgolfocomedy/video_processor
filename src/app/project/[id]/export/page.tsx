@@ -1,12 +1,15 @@
 'use client';
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { useProjectStore } from '@/stores/project-store';
 import { ExportPanel } from '@/components/export/export-panel';
 import { RenderQueue } from '@/components/export/render-queue';
 import { useToast } from '@/hooks/use-toast';
 import { getPresetById } from '@/config/subtitle-styles';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Smartphone } from 'lucide-react';
 import type { ExportPreset } from '@/types/project';
 
 export default function ExportPage() {
@@ -21,13 +24,36 @@ export default function ExportPage() {
         const res = await fetch(`/api/projects/${projectId}/export`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ presetId: preset.id, includeSubtitles, trimInMs, trimOutMs }),
+          body: JSON.stringify({ presetId: preset.id, includeSubtitles, trimInMs, trimOutMs, targetType: 'youtube' }),
         });
         if (!res.ok) throw new Error('Failed to start export');
         await fetchProject(projectId);
         toast({ title: `Export started: ${preset.name}${includeSubtitles ? '' : ' (sin subtítulos)'}` });
       } catch {
         toast({ title: 'Failed to start export', variant: 'destructive' });
+      }
+    },
+    [projectId, fetchProject, toast]
+  );
+
+  const handleExportReel = useCallback(
+    async (reelId: string, reelName: string, includeSubtitles: boolean) => {
+      try {
+        const res = await fetch(`/api/projects/${projectId}/export`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            presetId: 'reels',
+            includeSubtitles,
+            targetType: 'reel',
+            reelId,
+          }),
+        });
+        if (!res.ok) throw new Error('Failed to start reel export');
+        await fetchProject(projectId);
+        toast({ title: `Reel export started: ${reelName}${includeSubtitles ? '' : ' (sin subtítulos)'}` });
+      } catch {
+        toast({ title: 'Failed to start reel export', variant: 'destructive' });
       }
     },
     [projectId, fetchProject, toast]
@@ -61,7 +87,7 @@ export default function ExportPage() {
     currentProject.sources.length > 0 ||
     currentProject.transcription.segments.length > 0;
 
-  const stylePreset = getPresetById(currentProject.transcription.stylePreset);
+  const stylePreset = getPresetById(currentProject.youtubeSubtitles.stylePreset);
 
   return (
     <div className="space-y-6">
@@ -76,12 +102,20 @@ export default function ExportPage() {
         onExport={handleExport}
         disabled={!hasContent}
         segments={currentProject.transcription.segments}
-        subtitleStyle={currentProject.transcription.style}
+        subtitleStyle={currentProject.youtubeSubtitles.style}
         stylePresetName={stylePreset?.name}
         videoSource={videoSource}
         videoSrc={videoSrc}
         durationMs={videoDurationMs}
       />
+
+      {/* Reels Export */}
+      {currentProject.reels.length > 0 && (
+        <ReelsExportCard
+          reels={currentProject.reels}
+          onExport={handleExportReel}
+        />
+      )}
 
       <RenderQueue
         exports={currentProject.exports}
@@ -89,5 +123,75 @@ export default function ExportPage() {
         onRefresh={() => fetchProject(projectId)}
       />
     </div>
+  );
+}
+
+/* ── Reels Export Card ──────────────────────────────────────────────── */
+
+import type { ReelDefinition } from '@/types/project';
+
+function ReelsExportCard({
+  reels,
+  onExport,
+}: {
+  reels: ReelDefinition[];
+  onExport: (reelId: string, reelName: string, includeSubtitles: boolean) => void;
+}) {
+  const [subtitlesMap, setSubtitlesMap] = useState<Record<string, boolean>>(() => {
+    const map: Record<string, boolean> = {};
+    reels.forEach((r) => { map[r.id] = true; });
+    return map;
+  });
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <Smartphone className="h-4 w-4" />
+          Reels (9:16)
+        </CardTitle>
+        <p className="text-[10px] text-muted-foreground">
+          1080 x 1920 &middot; 30fps &middot; H.264 &middot; CRF 22
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {reels.map((reel) => {
+          const durationSec = (reel.endMs - reel.startMs) / 1000;
+          const clipCount = reel.composition.clips.filter((c) => c.trackId === 'rv1').length;
+          const withSubs = subtitlesMap[reel.id] ?? true;
+
+          return (
+            <div
+              key={reel.id}
+              className="flex items-center justify-between rounded-md border border-border p-3"
+            >
+              <div className="space-y-0.5">
+                <div className="text-xs font-medium">{reel.name}</div>
+                <div className="text-[10px] text-muted-foreground">
+                  {durationSec.toFixed(1)}s &middot; {clipCount} clip{clipCount !== 1 ? 's' : ''} &middot; {reel.subtitleSegments.length} subs
+                </div>
+                <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={withSubs}
+                    onChange={(e) => setSubtitlesMap((m) => ({ ...m, [reel.id]: e.target.checked }))}
+                    className="h-3 w-3 rounded"
+                  />
+                  Include subtitles
+                </label>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="text-xs"
+                onClick={() => onExport(reel.id, reel.name, withSubs)}
+              >
+                Export
+              </Button>
+            </div>
+          );
+        })}
+      </CardContent>
+    </Card>
   );
 }

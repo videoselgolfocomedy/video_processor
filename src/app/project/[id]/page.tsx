@@ -2,7 +2,7 @@
 
 import { useProjectStore } from '@/stores/project-store';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Music, Radio, Subtitles, Download, Film } from 'lucide-react';
+import { Music, Subtitles, Download, Film, Layers, Smartphone } from 'lucide-react';
 import { formatFileSize } from '@/lib/utils';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
@@ -18,29 +18,36 @@ export default function ProjectOverviewPage() {
     {
       href: `/project/${projectId}/audio-prep`,
       icon: Music,
-      title: 'Audio Prep',
-      description: 'Upload files, extract audio, separate stems',
-      status: currentProject.audio.extractedTracks.length > 0 ? 'done' : 'pending',
+      title: 'Audio',
+      description: 'Extract, subtract, detect laughter, sync & mix',
+      status: currentProject.sync.status === 'done' || currentProject.audio.extractedTracks.length > 0 ? 'done' : 'pending',
     },
     {
-      href: `/project/${projectId}/sync`,
-      icon: Radio,
-      title: 'Sync',
-      description: 'Align camera audio with board audio',
-      status: currentProject.sync.status === 'done' ? 'done' : 'pending',
-    },
-    {
-      href: `/project/${projectId}/subtitles`,
+      href: `/project/${projectId}/transcription`,
       icon: Subtitles,
-      title: 'Subtitles',
-      description: 'Transcribe and style subtitles',
+      title: 'Transcription',
+      description: 'Transcribe, refine with AI, auto-split',
       status: currentProject.transcription.segments.length > 0 ? 'done' : 'pending',
+    },
+    {
+      href: `/project/${projectId}/compose`,
+      icon: Layers,
+      title: 'Compose (YouTube)',
+      description: 'Timeline, cutaways, subtitle styling (16:9)',
+      status: currentProject.composition.clips.length > 0 ? 'done' : 'pending',
+    },
+    {
+      href: `/project/${projectId}/reels`,
+      icon: Smartphone,
+      title: 'Reels (9:16)',
+      description: 'Create reels with crop, timeline & subtitles',
+      status: currentProject.reels.length > 0 ? 'done' : 'pending',
     },
     {
       href: `/project/${projectId}/export`,
       icon: Download,
       title: 'Export',
-      description: 'Render final video with subtitles',
+      description: 'Render YouTube + individual reels',
       status: currentProject.exports.some((e) => e.status === 'done') ? 'done' : 'pending',
     },
   ];

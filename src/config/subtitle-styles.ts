@@ -154,8 +154,66 @@ export const STYLE_PRESETS: StylePreset[] = [
       shadowColor: 'rgba(0,0,0,0.9)',
     },
   },
+  {
+    id: 'reel-punchline',
+    name: 'Reel Punchline',
+    description: 'Line-by-line reveal for reels, punchline appears last',
+    thumbnail: 'PL',
+    style: {
+      ...baseStyle,
+      fontFamily: 'Impact',
+      fontSize: 60,
+      fontWeight: 900,
+      color: '#FFFFFF',
+      strokeWidth: 4,
+      strokeColor: '#000000',
+      animation: 'punchline',
+      position: 'center',
+      marginBottom: 100,
+      maxWidth: 800,
+      textTransform: 'uppercase',
+      shadowBlur: 10,
+      shadowColor: 'rgba(0,0,0,0.9)',
+    },
+  },
 ];
 
+export const REEL_DEFAULT_CONSTRAINTS: SubtitleConstraints = {
+  maxCharsPerBlock: 38,
+  maxDurationMs: 5000,
+};
+
 export function getPresetById(id: string): StylePreset | undefined {
-  return STYLE_PRESETS.find((p) => p.id === id);
+  return STYLE_PRESETS.find((p) => p.id === id) ?? getCustomPresets().find((p) => p.id === id);
+}
+
+const CUSTOM_PRESETS_KEY = 'video-processor-custom-presets';
+
+export function getCustomPresets(): StylePreset[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(CUSTOM_PRESETS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveCustomPreset(name: string, style: SubtitleStyle): StylePreset {
+  const presets = getCustomPresets();
+  const preset: StylePreset = {
+    id: `custom-${Date.now()}`,
+    name,
+    description: 'Custom preset',
+    thumbnail: name.slice(0, 2).toUpperCase(),
+    style: { ...style },
+  };
+  presets.push(preset);
+  localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(presets));
+  return preset;
+}
+
+export function deleteCustomPreset(id: string): void {
+  const presets = getCustomPresets().filter((p) => p.id !== id);
+  localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(presets));
 }

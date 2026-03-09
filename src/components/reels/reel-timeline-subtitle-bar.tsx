@@ -2,14 +2,21 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { cn } from '@/lib/utils';
-import { useComposeStore } from '@/stores/compose-store';
+import { useReelStore } from '@/stores/reel-store';
+import type { SubtitleSegment } from '@/types/project';
 
-export function TimelineSubtitleTrack() {
-  const segments = useComposeStore((s) => s.subtitleSegments);
-  const zoomLevel = useComposeStore((s) => s.zoomLevel);
-  const scrollOffsetMs = useComposeStore((s) => s.scrollOffsetMs);
-  const updateSubtitleSegment = useComposeStore((s) => s.updateSubtitleSegment);
-  const setCurrentTime = useComposeStore((s) => s.setCurrentTime);
+interface ReelTimelineSubtitleBarProps {
+  reelId: string;
+  segments: SubtitleSegment[];
+}
+
+export function ReelTimelineSubtitleBar({ reelId, segments }: ReelTimelineSubtitleBarProps) {
+  const zoomLevel = useReelStore((s) => s.zoomLevel);
+  const scrollOffsetMs = useReelStore((s) => s.scrollOffsetMs);
+  const selectedSubtitleId = useReelStore((s) => s.selectedSubtitleId);
+  const selectSubtitle = useReelStore((s) => s.selectSubtitle);
+  const updateReelSubtitleSegment = useReelStore((s) => s.updateReelSubtitleSegment);
+  const setCurrentTime = useReelStore((s) => s.setCurrentTime);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
@@ -17,7 +24,6 @@ export function TimelineSubtitleTrack() {
   const trimOrigin = useRef({ mouseX: 0, origMs: 0 });
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Handle inline text editing
   const startEdit = useCallback((segId: string, text: string) => {
     setEditingId(segId);
     setEditText(text);
@@ -26,16 +32,16 @@ export function TimelineSubtitleTrack() {
 
   const commitEdit = useCallback(() => {
     if (editingId && editText.trim()) {
-      updateSubtitleSegment(editingId, { text: editText.trim() });
+      updateReelSubtitleSegment(reelId, editingId, { text: editText.trim() });
     }
     setEditingId(null);
-  }, [editingId, editText, updateSubtitleSegment]);
+  }, [editingId, editText, reelId, updateReelSubtitleSegment]);
 
-  // Handle trim dragging
   const handleTrimMouseDown = useCallback(
     (e: React.MouseEvent, segId: string, edge: 'start' | 'end', origMs: number) => {
       e.preventDefault();
       e.stopPropagation();
+      useReelStore.getState().saveSnapshot();
       trimOrigin.current = { mouseX: e.clientX, origMs };
       setTrimming({ segId, edge });
     },
@@ -49,9 +55,9 @@ export function TimelineSubtitleTrack() {
       const deltaMs = (e.clientX - trimOrigin.current.mouseX) / zoomLevel;
       const newMs = Math.max(0, trimOrigin.current.origMs + deltaMs);
       if (trimming.edge === 'start') {
-        updateSubtitleSegment(trimming.segId, { startMs: newMs });
+        updateReelSubtitleSegment(reelId, trimming.segId, { startMs: newMs });
       } else {
-        updateSubtitleSegment(trimming.segId, { endMs: newMs });
+        updateReelSubtitleSegment(reelId, trimming.segId, { endMs: newMs });
       }
     };
 
@@ -63,7 +69,7 @@ export function TimelineSubtitleTrack() {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [trimming, zoomLevel, updateSubtitleSegment]);
+  }, [trimming, zoomLevel, reelId, updateReelSubtitleSegment]);
 
   return (
     <>
@@ -71,6 +77,7 @@ export function TimelineSubtitleTrack() {
         const leftPx = (seg.startMs - scrollOffsetMs) * zoomLevel;
         const widthPx = (seg.endMs - seg.startMs) * zoomLevel;
         const isEditing = editingId === seg.id;
+        const isSelected = selectedSubtitleId === seg.id;
 
         return (
           <div
@@ -78,11 +85,14 @@ export function TimelineSubtitleTrack() {
             className={cn(
               'absolute top-1 bottom-1 rounded bg-yellow-600/70 border border-yellow-400/50',
               'flex items-center overflow-hidden select-none',
-              isEditing && 'ring-1 ring-yellow-300'
+              isEditing && 'ring-1 ring-yellow-300',
+              isSelected && 'ring-2 ring-white/60'
             )}
             style={{ left: leftPx, width: Math.max(4, widthPx) }}
             onClick={(e) => {
               e.stopPropagation();
+              selectSubtitle(seg.id);
+              useReelStore.getState().selectClip(null);
               setCurrentTime(seg.startMs);
             }}
             onDoubleClick={(e) => {

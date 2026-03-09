@@ -1,30 +1,29 @@
 'use client';
 
 import { useRef, useCallback, useEffect, useState } from 'react';
-import { Film, ImageIcon, Music } from 'lucide-react';
+import { Film, Music } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useComposeStore } from '@/stores/compose-store';
+import { useReelStore } from '@/stores/reel-store';
 import type { CompositionClip } from '@/types/project';
 
-interface TimelineClipProps {
+interface ReelTimelineClipProps {
+  reelId: string;
   clip: CompositionClip;
   trackLocked: boolean;
 }
 
 type DragMode = 'move' | 'trim-in' | 'trim-out' | null;
 
-export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
-  const clipRef = useRef<HTMLDivElement>(null);
+export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClipProps) {
   const [dragMode, setDragMode] = useState<DragMode>(null);
   const dragOrigin = useRef({ mouseX: 0, startMs: 0, endMs: 0, sourceInMs: 0, sourceOutMs: 0 });
 
-  const zoomLevel = useComposeStore((s) => s.zoomLevel);
-  const scrollOffsetMs = useComposeStore((s) => s.scrollOffsetMs);
-  const selectedClipId = useComposeStore((s) => s.selectedClipId);
-  const selectClip = useComposeStore((s) => s.selectClip);
-  const moveClip = useComposeStore((s) => s.moveClip);
-  const trimClip = useComposeStore((s) => s.trimClip);
-  const pushUndo = useComposeStore((s) => s.pushUndo);
+  const zoomLevel = useReelStore((s) => s.zoomLevel);
+  const scrollOffsetMs = useReelStore((s) => s.scrollOffsetMs);
+  const selectedClipId = useReelStore((s) => s.selectedClipId);
+  const selectClip = useReelStore((s) => s.selectClip);
+  const moveClip = useReelStore((s) => s.moveClip);
+  const trimClip = useReelStore((s) => s.trimClip);
 
   const isSelected = selectedClipId === clip.id;
   const leftPx = (clip.timelineStartMs - scrollOffsetMs) * zoomLevel;
@@ -32,12 +31,12 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent, mode: DragMode) => {
-      if (trackLocked) return;
+      // All interactions allowed on all tracks
       e.preventDefault();
       e.stopPropagation();
+      useReelStore.getState().saveSnapshot();
       selectClip(clip.id);
-
-      pushUndo();
+      useReelStore.getState().selectSubtitle(null);
 
       dragOrigin.current = {
         mouseX: e.clientX,
@@ -48,7 +47,7 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
       };
       setDragMode(mode);
     },
-    [clip, trackLocked, selectClip, pushUndo]
+    [clip, selectClip]
   );
 
   useEffect(() => {
@@ -57,9 +56,11 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
     const SNAP_THRESHOLD_MS = 200;
 
     const getSnapTargets = (): number[] => {
-      const store = useComposeStore.getState();
-      const targets: number[] = [store.currentTimeMs]; // snap to playhead
-      for (const c of store.clips) {
+      const store = useReelStore.getState();
+      const reel = store.reels.find((r) => r.id === reelId);
+      if (!reel) return [store.currentTimeMs];
+      const targets: number[] = [store.currentTimeMs];
+      for (const c of reel.composition.clips) {
         if (c.id === clip.id) continue;
         targets.push(c.timelineStartMs, c.timelineEndMs);
       }
@@ -83,17 +84,16 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
         const duration = dragOrigin.current.endMs - dragOrigin.current.startMs;
         const snappedStart = snap(rawStart);
         const snappedEnd = snap(rawStart + duration);
-        // Use whichever edge snapped (prefer start)
         const finalStart = snappedStart !== rawStart ? snappedStart
           : snappedEnd !== rawStart + duration ? snappedEnd - duration
-          : rawStart;
-        moveClip(clip.id, finalStart);
+            : rawStart;
+        moveClip(reelId, clip.id, finalStart);
       } else if (dragMode === 'trim-in') {
         const rawStart = Math.max(0, dragOrigin.current.startMs + deltaMs);
-        trimClip(clip.id, 'in', snap(rawStart));
+        trimClip(reelId, clip.id, 'in', snap(rawStart));
       } else if (dragMode === 'trim-out') {
         const rawEnd = Math.max(0, dragOrigin.current.endMs + deltaMs);
-        trimClip(clip.id, 'out', snap(rawEnd));
+        trimClip(reelId, clip.id, 'out', snap(rawEnd));
       }
     };
 
@@ -105,29 +105,18 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [dragMode, clip.id, zoomLevel, moveClip, trimClip]);
+  }, [dragMode, clip.id, reelId, zoomLevel, moveClip, trimClip]);
 
-  const icon =
-    clip.type === 'video' ? (
-      <Film className="h-3 w-3 flex-shrink-0" />
-    ) : clip.type === 'image' ? (
-      <ImageIcon className="h-3 w-3 flex-shrink-0" />
-    ) : (
-      <Music className="h-3 w-3 flex-shrink-0" />
-    );
+  const icon = clip.type === 'video'
+    ? <Film className="h-3 w-3 flex-shrink-0" />
+    : <Music className="h-3 w-3 flex-shrink-0" />;
 
-  const clipColor =
-    clip.type === 'video'
-      ? clip.mode === 'overlay'
-        ? 'bg-purple-600/80 border-purple-400'
-        : 'bg-blue-600/80 border-blue-400'
-      : clip.type === 'image'
-        ? 'bg-teal-600/80 border-teal-400'
-        : 'bg-green-600/80 border-green-400';
+  const clipColor = clip.type === 'video'
+    ? 'bg-blue-600/80 border-blue-400'
+    : 'bg-green-600/80 border-green-400';
 
   return (
     <div
-      ref={clipRef}
       className={cn(
         'absolute top-1 bottom-1 rounded border cursor-grab select-none flex items-center gap-1 px-1 overflow-hidden',
         clipColor,
@@ -143,11 +132,12 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
       onClick={(e) => {
         e.stopPropagation();
         selectClip(clip.id);
+        useReelStore.getState().selectSubtitle(null);
       }}
     >
       {/* Trim-in handle */}
       <div
-        className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize z-10 group/trim"
+        className="absolute left-0 top-0 bottom-0 w-3 cursor-ew-resize z-10 group/trim"
         onMouseDown={(e) => handleMouseDown(e, 'trim-in')}
       >
         <div className="absolute left-0.5 top-1 bottom-1 w-1 rounded-full bg-white/40 transition-colors group-hover/trim:bg-white/80" />
@@ -161,7 +151,7 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
 
       {/* Trim-out handle */}
       <div
-        className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize z-10 group/trim"
+        className="absolute right-0 top-0 bottom-0 w-3 cursor-ew-resize z-10 group/trim"
         onMouseDown={(e) => handleMouseDown(e, 'trim-out')}
       >
         <div className="absolute right-0.5 top-1 bottom-1 w-1 rounded-full bg-white/40 transition-colors group-hover/trim:bg-white/80" />

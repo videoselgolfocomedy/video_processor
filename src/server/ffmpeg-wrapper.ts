@@ -281,6 +281,9 @@ export interface RenderVideoOptions {
   audioBitrate: string;
   trimStartMs?: number;
   trimEndMs?: number;
+  cropRegion?: { centerX: number; centerY: number; scale: number };
+  sourceWidth?: number;
+  sourceHeight?: number;
   onProgress?: (percent: number) => void;
 }
 
@@ -316,12 +319,45 @@ export function renderVideo(options: RenderVideoOptions): {
     }
   }
 
-  // Video filter chain: scale → pad → ass (subtitles applied after scaling)
+  // Video filter chain
   const filters: string[] = [];
-  filters.push(
-    `scale=${options.width}:${options.height}:force_original_aspect_ratio=decrease`,
-    `pad=${options.width}:${options.height}:(ow-iw)/2:(oh-ih)/2`
-  );
+
+  if (options.cropRegion && options.sourceWidth && options.sourceHeight) {
+    // Crop mode: extract 9:16 region from source, then scale to output
+    const srcW = options.sourceWidth;
+    const srcH = options.sourceHeight;
+    const { centerX, centerY, scale } = options.cropRegion;
+
+    let cropH = Math.round(srcH * scale);
+    let cropW = Math.round(cropH * (9 / 16));
+
+    // Clamp to source dimensions
+    if (cropW > srcW) {
+      cropW = srcW;
+      cropH = Math.round(cropW * (16 / 9));
+    }
+
+    // Round to even for H.264 compatibility
+    cropW = cropW % 2 === 0 ? cropW : cropW - 1;
+    cropH = cropH % 2 === 0 ? cropH : cropH - 1;
+
+    // Compute top-left offsets, clamped to source bounds
+    let cropX = Math.round(centerX * srcW - cropW / 2);
+    let cropY = Math.round(centerY * srcH - cropH / 2);
+    cropX = Math.max(0, Math.min(srcW - cropW, cropX));
+    cropY = Math.max(0, Math.min(srcH - cropH, cropY));
+
+    filters.push(`crop=${cropW}:${cropH}:${cropX}:${cropY}`);
+    filters.push(`scale=${options.width}:${options.height}`);
+  } else {
+    // Standard scale + pad (letterbox)
+    filters.push(
+      `scale=${options.width}:${options.height}:force_original_aspect_ratio=decrease`
+    );
+    filters.push(
+      `pad=${options.width}:${options.height}:(ow-iw)/2:(oh-ih)/2`
+    );
+  }
 
   if (options.assFilePath) {
     // Escape special chars in path for ffmpeg filter syntax (: \ ' [ ])
@@ -405,6 +441,187 @@ export function renderVideo(options: RenderVideoOptions): {
     proc.on('close', (code) => {
       if (code === 0) resolve();
       else reject(new Error(`FFmpeg render exited with code ${code}`));
+    });
+
+    proc.on('error', reject);
+  });
+
+  return { promise, process: proc };
+}
+
+/* ── Reel rendering: concatenate edited clip segments ────────────────── */
+
+export interface RenderReelOptions {
+  videoInputPath: string;
+  audioInputPath?: string;
+  clips: { sourceInMs: number; sourceOutMs: number }[];
+  assFilePath?: string;
+  fontsDirPath?: string;
+  outputPath: string;
+  width: number;
+  height: number;
+  fps: number;
+  crf: number;
+  audioBitrate: string;
+  cropRegion?: { centerX: number; centerY: number; scale: number };
+  sourceWidth?: number;
+  sourceHeight?: number;
+  onProgress?: (percent: number) => void;
+}
+
+/**
+ * Render a reel by concatenating clip segments from the source video.
+ * Each clip gets its own input with -ss for fast seeking (avoids slow sequential decode).
+ * The clips are concatenated in order to produce the final output.
+ */
+export function renderReelVideo(options: RenderReelOptions): {
+  promise: Promise<void>;
+  process: ChildProcess;
+} {
+  const ffmpeg = getFFmpegPath();
+  const args: string[] = [];
+  const { clips } = options;
+  const hasAudio = !!options.audioInputPath;
+
+  // Each clip gets its own input pair (video + audio) with -ss fast-seek.
+  // This avoids the slow sequential decode that trim= causes.
+  // Input layout: [v0, a0, v1, a1, v2, a2, ...] or [v0, v1, ...] if no separate audio
+  for (let i = 0; i < clips.length; i++) {
+    const clip = clips[i];
+    const seekSec = clip.sourceInMs / 1000;
+    const durSec = (clip.sourceOutMs - clip.sourceInMs) / 1000;
+
+    // Video input with seek
+    args.push('-ss', String(seekSec), '-t', String(durSec), '-i', options.videoInputPath);
+
+    // Audio input with seek (same time range)
+    if (hasAudio) {
+      args.push('-ss', String(seekSec), '-t', String(durSec), '-i', options.audioInputPath!);
+    }
+  }
+
+  // Build crop filter string
+  let cropFilter = '';
+  if (options.cropRegion && options.sourceWidth && options.sourceHeight) {
+    const srcW = options.sourceWidth;
+    const srcH = options.sourceHeight;
+    const { centerX, centerY, scale } = options.cropRegion;
+    let cropH = Math.round(srcH * scale);
+    let cropW = Math.round(cropH * (9 / 16));
+    if (cropW > srcW) { cropW = srcW; cropH = Math.round(cropW * (16 / 9)); }
+    cropW = cropW % 2 === 0 ? cropW : cropW - 1;
+    cropH = cropH % 2 === 0 ? cropH : cropH - 1;
+    let cropX = Math.round(centerX * srcW - cropW / 2);
+    let cropY = Math.round(centerY * srcH - cropH / 2);
+    cropX = Math.max(0, Math.min(srcW - cropW, cropX));
+    cropY = Math.max(0, Math.min(srcH - cropH, cropY));
+    cropFilter = `,crop=${cropW}:${cropH}:${cropX}:${cropY}`;
+  }
+
+  // Build filter_complex
+  const filterParts: string[] = [];
+
+  // Input indices: if hasAudio, inputs are [v0=0, a0=1, v1=2, a1=3, ...]
+  // If no separate audio, inputs are [v0=0, v1=1, v2=2, ...]
+  const inputsPerClip = hasAudio ? 2 : 1;
+
+  for (let i = 0; i < clips.length; i++) {
+    const vidIdx = i * inputsPerClip;
+    const audIdx = hasAudio ? vidIdx + 1 : vidIdx;
+
+    // Process video: setpts + crop
+    filterParts.push(
+      `[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter}[v${i}]`
+    );
+
+    // Process audio: reset pts
+    filterParts.push(
+      `[${audIdx}:a]asetpts=PTS-STARTPTS[a${i}]`
+    );
+  }
+
+  // Concat all segments (interleaved: v0 a0 v1 a1 ... as concat expects)
+  const concatInputs = clips.map((_, i) => `[v${i}][a${i}]`).join('');
+  filterParts.push(
+    `${concatInputs}concat=n=${clips.length}:v=1:a=1[outv][outa]`
+  );
+
+  // Scale to output size + optional ASS subtitles
+  let finalFilter = `[outv]scale=${options.width}:${options.height}`;
+  if (options.assFilePath) {
+    const escapedAssPath = options.assFilePath
+      .replace(/\\/g, '\\\\\\\\')
+      .replace(/:/g, '\\\\:')
+      .replace(/'/g, "\\\\'")
+      .replace(/\[/g, '\\\\[')
+      .replace(/\]/g, '\\\\]');
+    let assFilter = `ass='${escapedAssPath}'`;
+    if (options.fontsDirPath) {
+      const escapedFontsDir = options.fontsDirPath
+        .replace(/\\/g, '\\\\\\\\')
+        .replace(/:/g, '\\\\:')
+        .replace(/'/g, "\\\\'");
+      assFilter = `ass='${escapedAssPath}':fontsdir='${escapedFontsDir}'`;
+    }
+    finalFilter += `,${assFilter}`;
+  }
+  finalFilter += '[finalv]';
+  filterParts.push(finalFilter);
+
+  args.push('-filter_complex', filterParts.join(';'));
+  args.push('-map', '[finalv]', '-map', '[outa]');
+
+  // Encoding
+  args.push(
+    '-c:v', 'libx264',
+    '-preset', 'medium',
+    '-crf', String(options.crf),
+    '-r', String(options.fps),
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac',
+    '-b:a', options.audioBitrate,
+    '-movflags', '+faststart',
+    '-y', '-progress', 'pipe:1',
+    options.outputPath,
+  );
+
+  console.log(`[ffmpeg-render-reel] ${ffmpeg} ${args.join(' ')}`);
+
+  const proc = execFile(ffmpeg, args);
+
+  const promise = new Promise<void>((resolve, reject) => {
+    let duration = 0;
+    // Compute expected duration from clips
+    const expectedDurSec = clips.reduce((sum, c) => sum + (c.sourceOutMs - c.sourceInMs) / 1000, 0);
+    duration = expectedDurSec;
+
+    let stderrLog = '';
+
+    proc.stdout?.on('data', (data: Buffer) => {
+      const lines = data.toString().split('\n');
+      for (const line of lines) {
+        if (line.startsWith('out_time_us=')) {
+          const us = parseInt(line.split('=')[1], 10);
+          if (duration > 0 && options.onProgress) {
+            const percent = Math.min(100, (us / 1_000_000 / duration) * 100);
+            options.onProgress(percent);
+          }
+        }
+      }
+    });
+
+    proc.stderr?.on('data', (data: Buffer) => {
+      stderrLog += data.toString();
+    });
+
+    proc.on('close', (code) => {
+      if (code === 0) resolve();
+      else {
+        // Log last 500 chars of stderr for debugging
+        const tail = stderrLog.slice(-500);
+        console.error(`[ffmpeg-render-reel] FFmpeg exited with code ${code}. stderr tail:\n${tail}`);
+        reject(new Error(`FFmpeg reel render exited with code ${code}`));
+      }
     });
 
     proc.on('error', reject);

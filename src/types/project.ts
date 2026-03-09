@@ -10,12 +10,75 @@ export interface ProjectState {
   audio: AudioState;
   // Sync state
   sync: SyncState;
-  // Transcription state
+  // Transcription state (text + timing only, no formatting)
   transcription: TranscriptionState;
+  // YouTube subtitle formatting (separate from transcription)
+  youtubeSubtitles: YouTubeSubtitleConfig;
   // Export state
   exports: ExportRecord[];
-  // Composition timeline
+  // Composition timeline (YouTube 16:9)
   composition: CompositionState;
+  // Reels (9:16) — each with own timeline, crop, subtitles
+  reels: ReelDefinition[];
+  // Punchline detection hints
+  punchlineHints?: PunchlineHint[];
+  // DEPRECATED: old single reel settings (kept for migration only)
+  reelSettings?: ReelSettings;
+}
+
+export interface CropRegion {
+  centerX: number;  // 0-1, crop center in source (default 0.5)
+  centerY: number;  // 0-1 (default 0.5)
+  scale: number;    // 0.1-1.0, 1.0 = full source height visible (default 1.0)
+}
+
+/** @deprecated Use ReelDefinition[] instead. Kept for migration only. */
+export interface ReelSettings {
+  cropRegion: CropRegion;
+  videoPositionY?: number;
+  subtitleStyle: SubtitleStyle;
+  subtitleStylePreset: string;
+  subtitleConstraints: SubtitleConstraints;
+  reelSubtitleSegments?: SubtitleSegment[];
+}
+
+export interface YouTubeSubtitleConfig {
+  style: SubtitleStyle;
+  stylePreset: string;
+  segments?: SubtitleSegment[];  // null/undefined = use transcription.segments
+}
+
+export interface ReelVersion {
+  id: string;
+  label: string;
+  createdAt: string;
+  clips: CompositionClip[];
+  subtitleSegments: SubtitleSegment[];
+  subtitleStyle: SubtitleStyle;
+}
+
+export interface ReelDefinition {
+  id: string;
+  name: string;
+  createdAt: string;
+  startMs: number;
+  endMs: number;
+  cropRegion: CropRegion;
+  composition: CompositionState;
+  subtitleStyle: SubtitleStyle;
+  subtitleStylePreset: string;
+  subtitleConstraints: SubtitleConstraints;
+  subtitleSegments: SubtitleSegment[];
+  punchlineSegmentIds: string[];
+  versions?: ReelVersion[];
+}
+
+export interface PunchlineHint {
+  id: string;
+  timestampMs: number;
+  laughterSegmentId: string;
+  confidence: number;  // 0-1
+  suggestedLabel?: string;
 }
 
 export interface SourceFile {
@@ -133,9 +196,10 @@ export interface TranscriptionState {
   language: string;
   model: string;
   segments: SubtitleSegment[];
-  style: SubtitleStyle;
-  stylePreset: string;
   constraints: SubtitleConstraints;
+  // DEPRECATED: style/stylePreset moved to youtubeSubtitles (kept for migration)
+  style?: SubtitleStyle;
+  stylePreset?: string;
 }
 
 export interface SubtitleConstraints {
@@ -169,7 +233,7 @@ export interface SubtitleStyle {
   backgroundRadius: number;
   position: 'bottom' | 'center' | 'top';
   marginBottom: number;
-  animation: 'none' | 'fade' | 'typewriter' | 'word-highlight' | 'pop';
+  animation: 'none' | 'fade' | 'typewriter' | 'word-highlight' | 'pop' | 'punchline';
   highlightColor: string;
   textTransform: 'none' | 'uppercase' | 'lowercase';
   maxWidth: number;
@@ -203,6 +267,8 @@ export interface ExportRecord {
   completedAt?: string;
   progress?: number;
   error?: string;
+  targetType: 'youtube' | 'reel';
+  reelId?: string;
 }
 
 // --- Composition Timeline ---

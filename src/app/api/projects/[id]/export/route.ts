@@ -27,6 +27,9 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid preset' }, { status: 400 });
   }
 
+  const targetType: 'youtube' | 'reel' = body.targetType ?? 'youtube';
+  const reelId: string | undefined = body.reelId;
+
   const exportId = uuidv4();
   const job = jobManager.createJob(id, 'render');
   jobManager.startJob(job.id);
@@ -39,6 +42,8 @@ export async function POST(
     jobId: job.id,
     startedAt: new Date().toISOString(),
     progress: 0,
+    targetType,
+    reelId,
   };
 
   await updateProject(id, {
@@ -54,6 +59,8 @@ export async function POST(
     includeSubtitles,
     trimInMs,
     trimOutMs,
+    targetType,
+    reelId,
   });
 
   return NextResponse.json({ jobId: job.id, exportId });

@@ -65,7 +65,66 @@ export const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
     containerStyle.transform = 'translate(-50%, -50%)';
   }
 
-  if (style.animation !== 'none' && segment.words && segment.words.length > 0) {
+  // Punchline animation: line-by-line reveal
+  if (style.animation === 'punchline' && segment.words && segment.words.length > 0) {
+    // Estimate chars per line from maxWidth and average char width
+    const avgCharWidth = style.fontSize * 0.55;
+    const charsPerLine = Math.max(10, Math.floor(style.maxWidth / avgCharWidth));
+
+    // Group words into visual lines
+    const lines: { words: typeof segment.words; appearFrame: number }[] = [];
+    let currentLine: typeof segment.words = [];
+    let currentLineChars = 0;
+
+    for (const word of segment.words) {
+      const wordLen = word.text.length + (currentLine.length > 0 ? 1 : 0);
+      if (currentLine.length > 0 && currentLineChars + wordLen > charsPerLine) {
+        // Finish current line: appears when its last word starts being spoken
+        const lastWord = currentLine[currentLine.length - 1];
+        lines.push({
+          words: currentLine,
+          appearFrame: Math.round((lastWord.startMs / 1000) * fps),
+        });
+        currentLine = [word];
+        currentLineChars = word.text.length;
+      } else {
+        currentLine.push(word);
+        currentLineChars += wordLen;
+      }
+    }
+    if (currentLine.length > 0) {
+      const lastWord = currentLine[currentLine.length - 1];
+      lines.push({
+        words: currentLine,
+        appearFrame: Math.round((lastWord.startMs / 1000) * fps),
+      });
+    }
+
+    return (
+      <div style={containerStyle}>
+        {lines.map((line, lineIdx) => {
+          const visible = frame >= line.appearFrame;
+          if (!visible) return null;
+          const lineText = line.words
+            .map((w) =>
+              textTransform === 'uppercase'
+                ? w.text.toUpperCase()
+                : textTransform === 'lowercase'
+                  ? w.text.toLowerCase()
+                  : w.text
+            )
+            .join(' ');
+          return (
+            <div key={lineIdx} style={{ opacity: 1 }}>
+              {lineText}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  if (style.animation !== 'none' && style.animation !== 'punchline' && segment.words && segment.words.length > 0) {
     return (
       <div style={containerStyle}>
         {segment.words.map((word, i) => {

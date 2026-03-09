@@ -5,12 +5,12 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   Music,
-  Radio,
   Subtitles,
   Download,
   LayoutDashboard,
   FolderInput,
   Layers,
+  Smartphone,
   Menu,
   X,
 } from 'lucide-react';
@@ -24,9 +24,9 @@ const navItems = [
   { href: '', label: 'Overview', icon: LayoutDashboard },
   { href: '/import', label: 'Importar', icon: FolderInput },
   { href: '/audio-prep', label: 'Audio', icon: Music },
-  { href: '/sync', label: 'Sync', icon: Radio },
-  { href: '/subtitles', label: 'Subtitles', icon: Subtitles },
+  { href: '/transcription', label: 'Transcription', icon: Subtitles },
   { href: '/compose', label: 'Compose', icon: Layers },
+  { href: '/reels', label: 'Reels', icon: Smartphone },
   { href: '/export', label: 'Export', icon: Download },
 ];
 

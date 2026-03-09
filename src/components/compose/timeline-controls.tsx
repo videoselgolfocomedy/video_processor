@@ -1,6 +1,6 @@
 'use client';
 
-import { Play, Pause, Undo2, Redo2, Save, ZoomIn, ZoomOut } from 'lucide-react';
+import { Play, Pause, Undo2, Redo2, Save, ZoomIn, ZoomOut, Scissors } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { useComposeStore } from '@/stores/compose-store';
@@ -23,6 +23,15 @@ export function TimelineControls({ onSave, saving }: TimelineControlsProps) {
   const undoStack = useComposeStore((s) => s.undoStack);
   const redoStack = useComposeStore((s) => s.redoStack);
   const dirty = useComposeStore((s) => s.dirty);
+  const selectedClipId = useComposeStore((s) => s.selectedClipId);
+  const clips = useComposeStore((s) => s.clips);
+  const splitClipAtPlayhead = useComposeStore((s) => s.splitClipAtPlayhead);
+
+  // Check if split is possible
+  const selectedClip = selectedClipId ? clips.find((c) => c.id === selectedClipId) : null;
+  const canSplit = selectedClip
+    ? currentTimeMs > selectedClip.timelineStartMs && currentTimeMs < selectedClip.timelineEndMs
+    : false;
 
   // Zoom slider: map 0-100 to 0.01-1 logarithmically
   const zoomToSlider = (z: number) => Math.round(Math.log(z / 0.01) / Math.log(1 / 0.01) * 100);
@@ -60,6 +69,18 @@ export function TimelineControls({ onSave, saving }: TimelineControlsProps) {
       <ZoomIn className="h-3 w-3 text-muted-foreground" />
 
       <div className="mx-2 h-4 w-px bg-border" />
+
+      {/* Split */}
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-7 w-7 p-0"
+        onClick={splitClipAtPlayhead}
+        disabled={!canSplit}
+        title="Split clip at playhead (S)"
+      >
+        <Scissors className="h-3.5 w-3.5" />
+      </Button>
 
       {/* Undo/Redo */}
       <Button

@@ -24,6 +24,7 @@ export default function ComposePage() {
     if (!currentProject || loaded) return;
 
     const durationMs = getDurationMs(currentProject);
+
     loadComposition(
       currentProject.composition,
       currentProject.transcription.segments,
@@ -43,7 +44,7 @@ export default function ComposePage() {
   // Build video/audio source URLs
   const videoSrc = getVideoSrc(currentProject, projectId);
   const audioSrc = getAudioSrc(currentProject, projectId);
-  const subtitleStyle = currentProject.transcription.style;
+  const subtitleStyle = currentProject.youtubeSubtitles.style;
 
   return (
     <ComposeLayout

@@ -77,6 +77,7 @@ interface ComposeStore {
   removeClip: (id: string) => void;
   moveClip: (id: string, newStartMs: number, newTrackId?: string) => void;
   trimClip: (id: string, edge: 'in' | 'out', newMs: number) => void;
+  splitClipAtPlayhead: () => void;
 
   // Tracks
   addTrack: (track: CompositionTrack) => void;
@@ -219,6 +220,42 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
     }));
   },
 
+  splitClipAtPlayhead: () => {
+    const state = get();
+    if (!state.selectedClipId) return;
+    const clip = state.clips.find((c) => c.id === state.selectedClipId);
+    if (!clip) return;
+    const t = state.currentTimeMs;
+    if (t <= clip.timelineStartMs || t >= clip.timelineEndMs) return;
+
+    state.pushUndo();
+    const sourceOffset = t - clip.timelineStartMs;
+    const splitSourceMs = clip.sourceInMs + sourceOffset;
+
+    const leftClip: CompositionClip = {
+      ...clip,
+      id: uuidv4(),
+      timelineEndMs: t,
+      sourceOutMs: splitSourceMs,
+    };
+    const rightClip: CompositionClip = {
+      ...clip,
+      id: uuidv4(),
+      timelineStartMs: t,
+      sourceInMs: splitSourceMs,
+    };
+
+    set((s) => ({
+      clips: [
+        ...s.clips.filter((c) => c.id !== clip.id),
+        leftClip,
+        rightClip,
+      ],
+      selectedClipId: rightClip.id,
+      dirty: true,
+    }));
+  },
+
   addTrack: (track) => set((s) => ({ tracks: [...s.tracks, track], dirty: true })),
 
   toggleTrackMute: (id) =>
@@ -292,7 +329,7 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
       };
     }),
 
-  loadComposition: (state, subtitles, durationMs) =>
+  loadComposition: (state, subtitles, durationMs) => {
     set({
       tracks: state.tracks,
       clips: state.clips,
@@ -305,7 +342,8 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
       selectedClipId: null,
       currentTimeMs: 0,
       scrollOffsetMs: 0,
-    }),
+    });
+  },
 
   getCompositionState: () => {
     const s = get();

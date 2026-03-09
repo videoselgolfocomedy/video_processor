@@ -3,7 +3,7 @@
  * Used by the FFmpeg render pipeline to burn subtitles directly into the video.
  */
 
-import type { SubtitleSegment, SubtitleStyle } from '@/types/project';
+import type { SubtitleSegment, SubtitleStyle, SubtitleWord } from '@/types/project';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -337,6 +337,74 @@ function generatePop(
   return lines;
 }
 
+function generatePunchline(
+  segments: SubtitleSegment[],
+  style: SubtitleStyle,
+): DialogueLine[] {
+  const lines: DialogueLine[] = [];
+  // Estimate chars per line from maxWidth and average char width
+  const avgCharWidth = style.fontSize * 0.55;
+  const charsPerLine = Math.max(10, Math.floor(style.maxWidth / avgCharWidth));
+
+  for (const seg of segments) {
+    const words = seg.words;
+    if (!words || words.length === 0) {
+      lines.push({
+        start: seg.startMs,
+        end: seg.endMs,
+        text: escapeASSText(applyTransform(seg.text, style.textTransform)),
+      });
+      continue;
+    }
+
+    // Group words into visual lines
+    type VisualLine = { words: SubtitleWord[]; text: string; appearMs: number };
+    const visualLines: VisualLine[] = [];
+    let currentWords: SubtitleWord[] = [];
+    let currentChars = 0;
+
+    for (const word of words) {
+      const wordLen = word.text.length + (currentWords.length > 0 ? 1 : 0);
+      if (currentWords.length > 0 && currentChars + wordLen > charsPerLine) {
+        const lastWord = currentWords[currentWords.length - 1];
+        visualLines.push({
+          words: currentWords,
+          text: currentWords.map((w) => applyTransform(w.text, style.textTransform)).join(' '),
+          appearMs: lastWord.startMs,
+        });
+        currentWords = [word];
+        currentChars = word.text.length;
+      } else {
+        currentWords.push(word);
+        currentChars += wordLen;
+      }
+    }
+    if (currentWords.length > 0) {
+      const lastWord = currentWords[currentWords.length - 1];
+      visualLines.push({
+        words: currentWords,
+        text: currentWords.map((w) => applyTransform(w.text, style.textTransform)).join(' '),
+        appearMs: lastWord.startMs,
+      });
+    }
+
+    // For each visual line reveal step, emit a dialogue line that shows
+    // all lines revealed so far (joined with \N for ASS line breaks).
+    // Each step starts when that line's last word begins and lasts until
+    // either the next line reveals or the segment ends.
+    for (let i = 0; i < visualLines.length; i++) {
+      const start = visualLines[i].appearMs;
+      const end = i + 1 < visualLines.length ? visualLines[i + 1].appearMs : seg.endMs;
+      const revealedText = visualLines
+        .slice(0, i + 1)
+        .map((vl) => escapeASSText(vl.text))
+        .join('\\N');
+      lines.push({ start, end, text: revealedText });
+    }
+  }
+  return lines;
+}
+
 // ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
@@ -395,6 +463,9 @@ export function generateASS(
       break;
     case 'pop':
       dialogueLines = generatePop(segments, style, fps);
+      break;
+    case 'punchline':
+      dialogueLines = generatePunchline(segments, style);
       break;
     default:
       dialogueLines = generateNone(segments, style);
