@@ -1,7 +1,7 @@
 'use client';
 
 import { useRef, useCallback, useEffect, useState } from 'react';
-import { Film, Music } from 'lucide-react';
+import { Film, Music, ImageIcon, Type } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useReelStore } from '@/stores/reel-store';
 import type { CompositionClip } from '@/types/project';
@@ -16,16 +16,21 @@ type DragMode = 'move' | 'trim-in' | 'trim-out' | null;
 
 export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClipProps) {
   const [dragMode, setDragMode] = useState<DragMode>(null);
-  const dragOrigin = useRef({ mouseX: 0, startMs: 0, endMs: 0, sourceInMs: 0, sourceOutMs: 0 });
+  const [editingText, setEditingText] = useState(false);
+  const [textValue, setTextValue] = useState(clip.textContent ?? '');
+  const textInputRef = useRef<HTMLInputElement>(null);
+  const dragOrigin = useRef<{ mouseX: number; startMs: number; endMs: number; sourceInMs: number; sourceOutMs: number; _prevDelta?: number }>({ mouseX: 0, startMs: 0, endMs: 0, sourceInMs: 0, sourceOutMs: 0 });
 
   const zoomLevel = useReelStore((s) => s.zoomLevel);
   const scrollOffsetMs = useReelStore((s) => s.scrollOffsetMs);
-  const selectedClipId = useReelStore((s) => s.selectedClipId);
+  const selectedClipIds = useReelStore((s) => s.selectedClipIds);
   const selectClip = useReelStore((s) => s.selectClip);
   const moveClip = useReelStore((s) => s.moveClip);
+  const moveSelectedClips = useReelStore((s) => s.moveSelectedClips);
   const trimClip = useReelStore((s) => s.trimClip);
 
-  const isSelected = selectedClipId === clip.id;
+  const isSelected = selectedClipIds.includes(clip.id);
+  const isMultiSelected = selectedClipIds.length > 1;
   const leftPx = (clip.timelineStartMs - scrollOffsetMs) * zoomLevel;
   const widthPx = (clip.timelineEndMs - clip.timelineStartMs) * zoomLevel;
 
@@ -35,7 +40,14 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
       e.preventDefault();
       e.stopPropagation();
       useReelStore.getState().saveSnapshot();
-      selectClip(clip.id);
+
+      const addToSelection = e.shiftKey || e.metaKey || e.ctrlKey;
+      // For move mode: if this clip is already in multi-selection, keep selection
+      if (mode === 'move' && isSelected && isMultiSelected) {
+        // Don't change selection, just start dragging the group
+      } else {
+        selectClip(clip.id, addToSelection);
+      }
       useReelStore.getState().selectSubtitle(null);
 
       dragOrigin.current = {
@@ -47,7 +59,7 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
       };
       setDragMode(mode);
     },
-    [clip, selectClip]
+    [clip, selectClip, isSelected, isMultiSelected]
   );
 
   useEffect(() => {
@@ -80,14 +92,21 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
       const deltaMs = deltaX / zoomLevel;
 
       if (dragMode === 'move') {
-        const rawStart = Math.max(0, dragOrigin.current.startMs + deltaMs);
-        const duration = dragOrigin.current.endMs - dragOrigin.current.startMs;
-        const snappedStart = snap(rawStart);
-        const snappedEnd = snap(rawStart + duration);
-        const finalStart = snappedStart !== rawStart ? snappedStart
-          : snappedEnd !== rawStart + duration ? snappedEnd - duration
-            : rawStart;
-        moveClip(reelId, clip.id, finalStart);
+        const store = useReelStore.getState();
+        if (store.selectedClipIds.length > 1 && store.selectedClipIds.includes(clip.id)) {
+          // Multi-drag: move all selected clips by deltaMs
+          moveSelectedClips(reelId, deltaMs - (dragOrigin.current._prevDelta ?? 0));
+          dragOrigin.current._prevDelta = deltaMs;
+        } else {
+          const rawStart = Math.max(0, dragOrigin.current.startMs + deltaMs);
+          const duration = dragOrigin.current.endMs - dragOrigin.current.startMs;
+          const snappedStart = snap(rawStart);
+          const snappedEnd = snap(rawStart + duration);
+          const finalStart = snappedStart !== rawStart ? snappedStart
+            : snappedEnd !== rawStart + duration ? snappedEnd - duration
+              : rawStart;
+          moveClip(reelId, clip.id, finalStart);
+        }
       } else if (dragMode === 'trim-in') {
         const rawStart = Math.max(0, dragOrigin.current.startMs + deltaMs);
         trimClip(reelId, clip.id, 'in', snap(rawStart));
@@ -97,7 +116,10 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
       }
     };
 
-    const handleMouseUp = () => setDragMode(null);
+    const handleMouseUp = () => {
+      dragOrigin.current._prevDelta = undefined;
+      setDragMode(null);
+    };
 
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
@@ -105,15 +127,45 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [dragMode, clip.id, reelId, zoomLevel, moveClip, trimClip]);
+  }, [dragMode, clip.id, reelId, zoomLevel, moveClip, moveSelectedClips, trimClip]);
+
+  const updateClip = useReelStore((s) => s.updateClip);
 
   const icon = clip.type === 'video'
     ? <Film className="h-3 w-3 flex-shrink-0" />
-    : <Music className="h-3 w-3 flex-shrink-0" />;
+    : clip.type === 'audio'
+      ? <Music className="h-3 w-3 flex-shrink-0" />
+      : clip.type === 'image' || clip.type === 'gif'
+        ? <ImageIcon className="h-3 w-3 flex-shrink-0" />
+        : <Type className="h-3 w-3 flex-shrink-0" />;
 
   const clipColor = clip.type === 'video'
     ? 'bg-blue-600/80 border-blue-400'
-    : 'bg-green-600/80 border-green-400';
+    : clip.type === 'audio'
+      ? 'bg-green-600/80 border-green-400'
+      : clip.type === 'image' || clip.type === 'gif'
+        ? 'bg-purple-600/80 border-purple-400'
+        : 'bg-orange-600/80 border-orange-400';
+
+  const isTextClip = clip.type === 'text';
+  const hasSourceTrim = clip.type === 'video' || clip.type === 'audio';
+
+  const handleDoubleClick = useCallback(() => {
+    if (isTextClip) {
+      setTextValue(clip.textContent ?? '');
+      setEditingText(true);
+      setTimeout(() => textInputRef.current?.focus(), 0);
+    }
+  }, [isTextClip, clip.textContent]);
+
+  const handleTextConfirm = useCallback(() => {
+    updateClip(reelId, clip.id, { textContent: textValue });
+    setEditingText(false);
+  }, [updateClip, reelId, clip.id, textValue]);
+
+  const displayLabel = isTextClip
+    ? (clip.textContent || 'Text')
+    : clip.originalName;
 
   return (
     <div
@@ -129,30 +181,45 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
         width: Math.max(4, widthPx),
       }}
       onMouseDown={(e) => handleMouseDown(e, 'move')}
-      onClick={(e) => {
-        e.stopPropagation();
-        selectClip(clip.id);
-        useReelStore.getState().selectSubtitle(null);
-      }}
+      onDoubleClick={handleDoubleClick}
     >
-      {/* Trim-in handle */}
-      <div
-        className="absolute left-0 top-0 bottom-0 w-3 cursor-ew-resize z-10 group/trim"
-        onMouseDown={(e) => handleMouseDown(e, 'trim-in')}
-      >
-        <div className="absolute left-0.5 top-1 bottom-1 w-1 rounded-full bg-white/40 transition-colors group-hover/trim:bg-white/80" />
-      </div>
+      {/* Trim-in handle (only for source-based clips) */}
+      {hasSourceTrim && (
+        <div
+          className="absolute left-0 top-0 bottom-0 w-3 cursor-ew-resize z-10 group/trim"
+          onMouseDown={(e) => handleMouseDown(e, 'trim-in')}
+        >
+          <div className="absolute left-0.5 top-1 bottom-1 w-1 rounded-full bg-white/40 transition-colors group-hover/trim:bg-white/80" />
+        </div>
+      )}
 
       {/* Content */}
       <div className="flex items-center gap-1 min-w-0 pointer-events-none">
         {icon}
-        <span className="text-[9px] text-white/90 truncate">{clip.originalName}</span>
+        {editingText ? (
+          <input
+            ref={textInputRef}
+            className="text-[9px] text-white bg-transparent border-b border-white/50 outline-none min-w-[40px] pointer-events-auto"
+            value={textValue}
+            onChange={(e) => setTextValue(e.target.value)}
+            onBlur={handleTextConfirm}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Enter') handleTextConfirm();
+              if (e.key === 'Escape') setEditingText(false);
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+          />
+        ) : (
+          <span className="text-[9px] text-white/90 truncate">{displayLabel}</span>
+        )}
       </div>
 
       {/* Trim-out handle */}
       <div
         className="absolute right-0 top-0 bottom-0 w-3 cursor-ew-resize z-10 group/trim"
-        onMouseDown={(e) => handleMouseDown(e, 'trim-out')}
+        onMouseDown={(e) => handleMouseDown(e, hasSourceTrim ? 'trim-out' : 'trim-out')}
       >
         <div className="absolute right-0.5 top-1 bottom-1 w-1 rounded-full bg-white/40 transition-colors group-hover/trim:bg-white/80" />
       </div>

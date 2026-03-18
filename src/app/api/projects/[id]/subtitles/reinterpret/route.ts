@@ -73,7 +73,7 @@ export async function POST(
     // Run reinterpretation in background, writing progress to stream
     (async () => {
       try {
-        const corrected = await reinterpretSubtitles({
+        const { segments: corrected, bits } = await reinterpretSubtitles({
           segments,
           language: language || 'auto',
           context,
@@ -86,6 +86,7 @@ export async function POST(
         await send({
           type: 'done',
           segments: corrected,
+          bits,
           provider: chosen.id,
           model: chosen.model,
         });

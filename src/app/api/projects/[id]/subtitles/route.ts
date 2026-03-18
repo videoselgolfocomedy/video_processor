@@ -50,6 +50,10 @@ export async function PUT(
     };
   }
 
+  if (body.bits !== undefined) {
+    updates.bits = body.bits;
+  }
+
   await updateProject(id, updates);
 
   return NextResponse.json({ ok: true });

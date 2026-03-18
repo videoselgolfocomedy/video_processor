@@ -305,6 +305,22 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
         }
       }
 
+      // Mute audio during gaps in audio clips
+      if (isTimelinePhase) {
+        const freshReel2 = useReelStore.getState().reels.find((r) => r.id === reelId);
+        const audioClips = freshReel2?.composition.clips.filter(
+          (c) => c.trackId === 'ra1' || c.trackId === 'ra2'
+        ) ?? [];
+        const storeTime = useReelStore.getState().currentTimeMs;
+        const inAudioClip = audioClips.some(
+          (c) => storeTime >= c.timelineStartMs && storeTime < c.timelineEndMs
+        );
+        const vol = inAudioClip ? 1 : 0;
+        if (audioRef.current) audioRef.current.volume = vol;
+        // If no separate audio, mute/unmute video's embedded audio via volume
+        if (!audioRef.current) video.volume = vol;
+      }
+
       syncAudio();
       animFrameRef.current = requestAnimationFrame(tick);
     };
@@ -337,6 +353,17 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
     if (Math.abs(video.currentTime - targetSec) > 0.05) {
       video.currentTime = targetSec;
       if (audioRef.current) audioRef.current.currentTime = targetSec;
+    }
+
+    // Mute audio during gaps when seeking
+    if (audioRef.current && isTimelinePhase) {
+      const audioClips = currentClips.filter(
+        (c) => c.trackId === 'ra1' || c.trackId === 'ra2'
+      );
+      const inAudioClip = audioClips.some(
+        (c) => currentTimeMs >= c.timelineStartMs && currentTimeMs < c.timelineEndMs
+      );
+      audioRef.current.volume = inAudioClip ? 1 : 0;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTimeMs, startSec, isTimelinePhase, reel?.startMs, reel?.composition.clips]);

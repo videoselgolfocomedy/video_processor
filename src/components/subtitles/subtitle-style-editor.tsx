@@ -213,7 +213,7 @@ export function SubtitleStyleEditor({
               label="Size"
               value={style.fontSize}
               min={16}
-              max={120}
+              max={300}
               step={1}
               unit="px"
               onChange={(v) => update('fontSize', v)}

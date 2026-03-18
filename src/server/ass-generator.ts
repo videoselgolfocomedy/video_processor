@@ -90,6 +90,26 @@ function escapeASSText(text: string): string {
     .replace(/\n/g, '\\N');
 }
 
+// ---------------------------------------------------------------------------
+// Emoji font fallback
+// ---------------------------------------------------------------------------
+
+const EMOJI_FONT = 'Noto Emoji';
+
+// RegExp constructor bypasses TypeScript's regex literal target check (TS1501).
+// Node.js runtime supports Unicode property escapes with the 'u' flag.
+const EMOJI_RE = new RegExp(
+  '(?:\\p{Emoji_Presentation}|\\p{Emoji}\\uFE0F)(?:\\uFE0F|\\u200D(?:\\p{Emoji_Presentation}|\\p{Emoji}\\uFE0F))*',
+  'gu'
+);
+
+/** Wrap emoji characters with ASS font override tags to use Noto Emoji */
+function wrapEmojiWithFont(text: string, originalFont: string): string {
+  return text.replace(EMOJI_RE, (match) =>
+    `{\\fn${EMOJI_FONT}}${match}{\\fn${originalFont}}`
+  );
+}
+
 /** Apply textTransform to text */
 function applyTransform(text: string, transform: SubtitleStyle['textTransform']): string {
   switch (transform) {
@@ -97,6 +117,34 @@ function applyTransform(text: string, transform: SubtitleStyle['textTransform'])
     case 'lowercase': return text.toLowerCase();
     default: return text;
   }
+}
+
+/**
+ * Split text into words while tracking which word indices are preceded by a newline.
+ * Returns the words array and a Set of indices where a newline separator should be used.
+ */
+function splitWordsWithNewlines(text: string): { words: string[]; newlineBefore: Set<number> } {
+  const words: string[] = [];
+  const newlineBefore = new Set<number>();
+  const lines = text.split('\n');
+  for (let li = 0; li < lines.length; li++) {
+    const lineWords = lines[li].split(/\s+/).filter(Boolean);
+    for (let wi = 0; wi < lineWords.length; wi++) {
+      if (li > 0 && wi === 0 && words.length > 0) {
+        newlineBefore.add(words.length);
+      }
+      words.push(lineWords[wi]);
+    }
+  }
+  return { words, newlineBefore };
+}
+
+/** Join an array of ASS-formatted word strings using \\N at newline positions, space otherwise */
+function joinWordsASS(parts: string[], newlineBefore: Set<number>): string {
+  return parts.map((p, i) => {
+    if (i === 0) return p;
+    return (newlineBefore.has(i) ? '\\N' : ' ') + p;
+  }).join('');
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +234,59 @@ function buildASSStyle(style: SubtitleStyle, width: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// Per-word style override tags
+// ---------------------------------------------------------------------------
+
+/** Build ASS override tag string for a word's custom style */
+function buildWordOverride(ws: SubtitleWord['style']): string {
+  if (!ws) return '';
+  const tags: string[] = [];
+  if (ws.color) tags.push(`\\c${cssColorToASS(ws.color)}`);
+  if (ws.fontSize) tags.push(`\\fs${ws.fontSize}`);
+  if (ws.fontWeight != null && ws.fontWeight >= 700) tags.push('\\b1');
+  return tags.length ? `{${tags.join('')}}` : '';
+}
+
+/** Build ASS override tag string that resets to the default subtitle style */
+function buildDefaultOverride(style: SubtitleStyle): string {
+  return `{\\c${cssColorToASS(style.color)}\\fs${style.fontSize}\\b${style.fontWeight >= 700 ? 1 : 0}}`;
+}
+
+/** Apply per-word style: returns override prefix + text (no suffix reset) */
+function styledWord(ws: SubtitleWord | undefined, text: string, style: SubtitleStyle, hasAnyStyles: boolean): string {
+  if (!hasAnyStyles) return text;
+  const override = ws?.style ? (buildWordOverride(ws.style) || buildDefaultOverride(style)) : buildDefaultOverride(style);
+  return override + text;
+}
+
+/**
+ * Build ASS text for a segment using seg.text as source of truth.
+ * Maps per-word styles from seg.words[] by index.
+ * Each word gets an explicit override tag (no suffix resets needed).
+ * Preserves user-entered newlines as \\N (ASS line break).
+ */
+function buildSegTextWithStyles(seg: SubtitleSegment, style: SubtitleStyle): string {
+  const { words: displayWords, newlineBefore } = splitWordsWithNewlines(seg.text);
+  const wordStyles = seg.words ?? [];
+  const hasAnyStyle = wordStyles.some((w) => w.style);
+
+  if (!hasAnyStyle) {
+    return escapeASSText(applyTransform(seg.text, style.textTransform));
+  }
+
+  const defaultOverride = buildDefaultOverride(style);
+
+  return displayWords.map((dw, i) => {
+    const ws = i < wordStyles.length ? wordStyles[i] : undefined;
+    const transformed = escapeASSText(applyTransform(dw, style.textTransform));
+    const sep = i > 0 ? (newlineBefore.has(i) ? '\\N' : ' ') : '';
+    // Each word gets explicit tags: custom style override OR default style reset
+    const override = ws?.style ? (buildWordOverride(ws.style) || defaultOverride) : defaultOverride;
+    return sep + override + transformed;
+  }).join('');
+}
+
+// ---------------------------------------------------------------------------
 // Event generators per animation type
 // ---------------------------------------------------------------------------
 
@@ -202,7 +303,7 @@ function generateNone(
   return segments.map((seg) => ({
     start: seg.startMs,
     end: seg.endMs,
-    text: escapeASSText(applyTransform(seg.text, style.textTransform)),
+    text: buildSegTextWithStyles(seg, style),
   }));
 }
 
@@ -215,7 +316,7 @@ function generateFade(
   return segments.map((seg) => ({
     start: seg.startMs,
     end: seg.endMs,
-    text: `{\\fad(${fadeMs},0)}` + escapeASSText(applyTransform(seg.text, style.textTransform)),
+    text: `{\\fad(${fadeMs},0)}` + buildSegTextWithStyles(seg, style),
   }));
 }
 
@@ -227,27 +328,30 @@ function generateTypewriter(
   for (const seg of segments) {
     const words = seg.words;
     if (!words || words.length === 0) {
-      // Fallback to none
       lines.push({
         start: seg.startMs,
         end: seg.endMs,
-        text: escapeASSText(applyTransform(seg.text, style.textTransform)),
+        text: buildSegTextWithStyles(seg, style),
       });
       continue;
     }
 
-    for (let i = 0; i < words.length; i++) {
-      const accumulated = words
-        .slice(0, i + 1)
-        .map((w) => applyTransform(w.text, style.textTransform))
-        .join(' ');
-      const start = words[i].startMs;
-      const end = i + 1 < words.length ? words[i + 1].startMs : seg.endMs;
-      lines.push({
-        start,
-        end,
-        text: escapeASSText(accumulated),
+    const { words: displayWords, newlineBefore } = splitWordsWithNewlines(seg.text);
+    const wordCount = displayWords.length;
+    const hasStyles = words.some((w) => w.style);
+
+    for (let i = 0; i < wordCount; i++) {
+      const accParts = displayWords.slice(0, i + 1).map((dw, j) => {
+        const ws = j < words.length ? words[j] : undefined;
+        const t = escapeASSText(applyTransform(dw, style.textTransform));
+        return styledWord(ws, t, style, hasStyles);
       });
+      const accumulated = joinWordsASS(accParts, newlineBefore);
+      const wi = i < words.length ? words[i] : words[words.length - 1];
+      const nextWi = i + 1 < words.length ? words[i + 1] : null;
+      const start = wi.startMs;
+      const end = nextWi ? nextWi.startMs : seg.endMs;
+      lines.push({ start, end, text: accumulated });
     }
   }
   return lines;
@@ -259,7 +363,6 @@ function generateWordHighlight(
 ): DialogueLine[] {
   const lines: DialogueLine[] = [];
   const highlightASS = cssColorToASS(style.highlightColor);
-  const baseASS = cssColorToASS(style.color);
 
   for (const seg of segments) {
     const words = seg.words;
@@ -267,27 +370,34 @@ function generateWordHighlight(
       lines.push({
         start: seg.startMs,
         end: seg.endMs,
-        text: escapeASSText(applyTransform(seg.text, style.textTransform)),
+        text: buildSegTextWithStyles(seg, style),
       });
       continue;
     }
 
-    for (let i = 0; i < words.length; i++) {
-      const start = words[i].startMs;
-      const end = i + 1 < words.length ? words[i + 1].startMs : seg.endMs;
+    const { words: displayWords, newlineBefore } = splitWordsWithNewlines(seg.text);
+    const wordCount = displayWords.length;
+    const hasStyles = words.some((w) => w.style);
 
-      // Build text with override on active word
+    for (let i = 0; i < wordCount; i++) {
+      const wi = i < words.length ? words[i] : words[words.length - 1];
+      const nextWi = i + 1 < words.length ? words[i + 1] : null;
+      const start = wi.startMs;
+      const end = nextWi ? nextWi.startMs : seg.endMs;
+
       const parts: string[] = [];
-      for (let j = 0; j < words.length; j++) {
-        const w = escapeASSText(applyTransform(words[j].text, style.textTransform));
+      for (let j = 0; j < wordCount; j++) {
+        const ws = j < words.length ? words[j] : undefined;
+        let w = escapeASSText(applyTransform(displayWords[j], style.textTransform));
+        w = styledWord(ws, w, style, hasStyles);
         if (j === i) {
-          parts.push(`{\\1c${highlightASS}}${w}{\\1c${baseASS}}`);
+          parts.push(`{\\1c${highlightASS}}${w}`);
         } else {
           parts.push(w);
         }
       }
 
-      lines.push({ start, end, text: parts.join(' ') });
+      lines.push({ start, end, text: joinWordsASS(parts, newlineBefore) });
     }
   }
   return lines;
@@ -308,30 +418,36 @@ function generatePop(
       lines.push({
         start: seg.startMs,
         end: seg.endMs,
-        text: escapeASSText(applyTransform(seg.text, style.textTransform)),
+        text: buildSegTextWithStyles(seg, style),
       });
       continue;
     }
 
-    for (let i = 0; i < words.length; i++) {
-      const start = words[i].startMs;
-      const end = i + 1 < words.length ? words[i + 1].startMs : seg.endMs;
+    const { words: displayWords, newlineBefore } = splitWordsWithNewlines(seg.text);
+    const wordCount = displayWords.length;
+    const hasStyles = words.some((w) => w.style);
 
-      // All words up to current
+    for (let i = 0; i < wordCount; i++) {
+      const wi = i < words.length ? words[i] : words[words.length - 1];
+      const nextWi = i + 1 < words.length ? words[i + 1] : null;
+      const start = wi.startMs;
+      const end = nextWi ? nextWi.startMs : seg.endMs;
+
       const parts: string[] = [];
       for (let j = 0; j <= i; j++) {
-        const w = escapeASSText(applyTransform(words[j].text, style.textTransform));
+        const ws = j < words.length ? words[j] : undefined;
+        let w = escapeASSText(applyTransform(displayWords[j], style.textTransform));
+        w = styledWord(ws, w, style, hasStyles);
         if (j === i) {
-          // Pop animation on the new word: scale 50→120→100
           parts.push(
-            `{\\fscx50\\fscy50\\t(0,${halfMs},\\fscx120\\fscy120)\\t(${halfMs},${fullMs},\\fscx100\\fscy100)}${w}{\\fscx100\\fscy100}`
+            `{\\fscx50\\fscy50\\t(0,${halfMs},\\fscx120\\fscy120)\\t(${halfMs},${fullMs},\\fscx100\\fscy100)}${w}`
           );
         } else {
           parts.push(w);
         }
       }
 
-      lines.push({ start, end, text: parts.join(' ') });
+      lines.push({ start, end, text: joinWordsASS(parts, newlineBefore) });
     }
   }
   return lines;
@@ -342,9 +458,6 @@ function generatePunchline(
   style: SubtitleStyle,
 ): DialogueLine[] {
   const lines: DialogueLine[] = [];
-  // Estimate chars per line from maxWidth and average char width
-  const avgCharWidth = style.fontSize * 0.55;
-  const charsPerLine = Math.max(10, Math.floor(style.maxWidth / avgCharWidth));
 
   for (const seg of segments) {
     const words = seg.words;
@@ -352,54 +465,31 @@ function generatePunchline(
       lines.push({
         start: seg.startMs,
         end: seg.endMs,
-        text: escapeASSText(applyTransform(seg.text, style.textTransform)),
+        text: buildSegTextWithStyles(seg, style),
       });
       continue;
     }
 
-    // Group words into visual lines
-    type VisualLine = { words: SubtitleWord[]; text: string; appearMs: number };
-    const visualLines: VisualLine[] = [];
-    let currentWords: SubtitleWord[] = [];
-    let currentChars = 0;
+    // Word-by-word accumulation — preserves user newlines as \\N
+    const { words: displayWords, newlineBefore } = splitWordsWithNewlines(seg.text);
+    const wordCount = displayWords.length;
+    const hasStyles = words.some((w) => w.style);
 
-    for (const word of words) {
-      const wordLen = word.text.length + (currentWords.length > 0 ? 1 : 0);
-      if (currentWords.length > 0 && currentChars + wordLen > charsPerLine) {
-        const lastWord = currentWords[currentWords.length - 1];
-        visualLines.push({
-          words: currentWords,
-          text: currentWords.map((w) => applyTransform(w.text, style.textTransform)).join(' '),
-          appearMs: lastWord.startMs,
-        });
-        currentWords = [word];
-        currentChars = word.text.length;
-      } else {
-        currentWords.push(word);
-        currentChars += wordLen;
-      }
-    }
-    if (currentWords.length > 0) {
-      const lastWord = currentWords[currentWords.length - 1];
-      visualLines.push({
-        words: currentWords,
-        text: currentWords.map((w) => applyTransform(w.text, style.textTransform)).join(' '),
-        appearMs: lastWord.startMs,
+    for (let i = 0; i < wordCount; i++) {
+      // Timing: use words[i] if available, else last known word
+      const wi = i < words.length ? words[i] : words[words.length - 1];
+      const start = wi.startMs;
+      const nextWi = i + 1 < words.length ? words[i + 1] : null;
+      const end = nextWi ? nextWi.startMs : seg.endMs;
+
+      // Accumulate all words up to i
+      const parts = displayWords.slice(0, i + 1).map((dw, j) => {
+        const ws = j < words.length ? words[j] : undefined;
+        const t = escapeASSText(applyTransform(dw, style.textTransform));
+        return styledWord(ws, t, style, hasStyles);
       });
-    }
 
-    // For each visual line reveal step, emit a dialogue line that shows
-    // all lines revealed so far (joined with \N for ASS line breaks).
-    // Each step starts when that line's last word begins and lasts until
-    // either the next line reveals or the segment ends.
-    for (let i = 0; i < visualLines.length; i++) {
-      const start = visualLines[i].appearMs;
-      const end = i + 1 < visualLines.length ? visualLines[i + 1].appearMs : seg.endMs;
-      const revealedText = visualLines
-        .slice(0, i + 1)
-        .map((vl) => escapeASSText(vl.text))
-        .join('\\N');
-      lines.push({ start, end, text: revealedText });
+      lines.push({ start, end, text: joinWordsASS(parts, newlineBefore) });
     }
   }
   return lines;
@@ -423,12 +513,32 @@ function generatePunchline(
  * @param height   Output video height (used as PlayResY)
  * @returns Complete ASS file content as a string
  */
+export interface ASSTextOverlay {
+  text: string;
+  startMs: number;
+  endMs: number;
+  x: number;         // 0-1 fraction
+  y: number;         // 0-1 fraction
+  width?: number;    // 0-1 fraction (max width)
+  fontSize: number;
+  fontFamily?: string;
+  fontWeight?: number;
+  color: string;
+  backgroundColor?: string;
+  shadowX?: number;
+  shadowY?: number;
+  shadowBlur?: number;
+  shadowColor?: string;
+  lineHeight?: number;
+}
+
 export function generateASS(
   segments: SubtitleSegment[],
   style: SubtitleStyle,
   fps: number,
   width: number,
   height: number,
+  textOverlays?: ASSTextOverlay[],
 ): string {
   const PLAY_RES_X = width;
   const PLAY_RES_Y = height;
@@ -438,6 +548,7 @@ export function generateASS(
     'ScriptType: v4.00+',
     `PlayResX: ${PLAY_RES_X}`,
     `PlayResY: ${PLAY_RES_Y}`,
+    'WrapStyle: 1',
     'ScaledBorderAndShadow: yes',
     'YCbCr Matrix: TV.709',
     '',
@@ -449,33 +560,141 @@ export function generateASS(
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
   ];
 
+  // De-overlap segments: clamp each segment's endMs to the next segment's startMs.
+  // Without this, libass stacks overlapping subtitles vertically causing "dancing" heights.
+  const deoverlapped = segments.map((seg, i) => {
+    if (i < segments.length - 1) {
+      const nextStart = segments[i + 1].startMs;
+      if (seg.endMs > nextStart) {
+        return { ...seg, endMs: nextStart };
+      }
+    }
+    return seg;
+  }).filter((seg) => seg.endMs > seg.startMs);
+
   // Generate dialogue lines based on animation type
   let dialogueLines: DialogueLine[];
   switch (style.animation) {
     case 'fade':
-      dialogueLines = generateFade(segments, style, fps);
+      dialogueLines = generateFade(deoverlapped, style, fps);
       break;
     case 'typewriter':
-      dialogueLines = generateTypewriter(segments, style);
+      dialogueLines = generateTypewriter(deoverlapped, style);
       break;
     case 'word-highlight':
-      dialogueLines = generateWordHighlight(segments, style);
+      dialogueLines = generateWordHighlight(deoverlapped, style);
       break;
     case 'pop':
-      dialogueLines = generatePop(segments, style, fps);
+      dialogueLines = generatePop(deoverlapped, style, fps);
       break;
     case 'punchline':
-      dialogueLines = generatePunchline(segments, style);
+      dialogueLines = generatePunchline(deoverlapped, style);
       break;
     default:
-      dialogueLines = generateNone(segments, style);
+      dialogueLines = generateNone(deoverlapped, style);
       break;
   }
 
   const events = dialogueLines.map(
-    (line) =>
-      `Dialogue: 0,${msToASS(line.start)},${msToASS(line.end)},Default,,0,0,0,,${line.text}`
+    (line) => {
+      const text = wrapEmojiWithFont(line.text, style.fontFamily);
+      return `Dialogue: 0,${msToASS(line.start)},${msToASS(line.end)},Default,,0,0,0,,${text}`;
+    }
   );
+
+  // Add text overlay styles and events if provided
+  if (textOverlays && textOverlays.length > 0) {
+    const overlayStyles: string[] = [];
+    for (let i = 0; i < textOverlays.length; i++) {
+      const ov = textOverlays[i];
+      const styleName = `TextOv${i}`;
+      const bold = (ov.fontWeight ?? 400) >= 700 ? -1 : 0;
+      const primaryColour = cssColorToASS(ov.color);
+
+      const hasBg = ov.backgroundColor && ov.backgroundColor !== 'transparent';
+      const borderStyle = hasBg ? 3 : 1;
+      const outlineVal = hasBg ? 8 : 0;
+      const backColour = hasBg ? cssColorToASS(ov.backgroundColor!) : '&H00000000';
+      const outlineColour = hasBg ? cssColorToASS(ov.backgroundColor!) : '&H00000000';
+
+      let shadow = 0;
+      if (ov.shadowX || ov.shadowY || ov.shadowBlur) {
+        const fromOffset = Math.max(Math.abs(ov.shadowX ?? 0), Math.abs(ov.shadowY ?? 0));
+        const fromBlur = ov.shadowBlur ? Math.ceil(ov.shadowBlur / 3) : 0;
+        shadow = Math.max(fromOffset, fromBlur);
+      }
+      const shadowBackColour = ov.shadowColor ? cssColorToASS(ov.shadowColor) : backColour;
+
+      // Position: use alignment + per-event margin overrides for proper text wrapping
+      // \pos breaks text wrapping in ASS, so we use margins instead
+      const maxWidthPx = Math.round((ov.width ?? 0.8) * width);
+      const halfW = maxWidthPx / 2;
+
+      // Horizontal margins: center the text area around ov.x
+      const marginL = Math.max(0, Math.round(ov.x * width - halfW));
+      const marginR = Math.max(0, Math.round((1 - ov.x) * width - halfW));
+
+      // Vertical alignment and margin based on Y position
+      let alignment: number;
+      let marginV: number;
+      if (ov.y <= 0.33) {
+        // Top: alignment 8 (top-center), marginV from top
+        alignment = 8;
+        marginV = Math.round(ov.y * height);
+      } else if (ov.y >= 0.67) {
+        // Bottom: alignment 2 (bottom-center), marginV from bottom
+        alignment = 2;
+        marginV = Math.round((1 - ov.y) * height);
+      } else {
+        // Middle: alignment 5 (center), marginV adjusts center offset
+        alignment = 5;
+        // MarginV for center alignment doesn't offset in ASS — use \pos for Y only
+        marginV = 0;
+      }
+
+      overlayStyles.push([
+        `Style: ${styleName}`,
+        ov.fontFamily ?? 'Inter',
+        ov.fontSize,
+        primaryColour,
+        primaryColour,
+        outlineColour,
+        shadow > 0 ? shadowBackColour : backColour,
+        bold,
+        0, 0, 0,
+        100, 100,
+        0, 0,
+        borderStyle,
+        outlineVal,
+        shadow,
+        alignment,
+        marginL,
+        marginR,
+        marginV,
+        1,
+      ].join(','));
+
+      const escapedText = wrapEmojiWithFont(escapeASSText(ov.text), ov.fontFamily ?? 'Inter');
+
+      // For center-Y positions, we need \pos for vertical placement since MarginV
+      // doesn't offset center alignment. For top/bottom, margins handle everything.
+      let overrideTags = '';
+      if (ov.y > 0.33 && ov.y < 0.67) {
+        const posX = Math.round(ov.x * width);
+        const posY = Math.round(ov.y * height);
+        overrideTags = `{\\pos(${posX},${posY})}`;
+      }
+
+      // Per-event margin overrides (columns 5-7 in Dialogue line)
+      events.push(
+        `Dialogue: 1,${msToASS(ov.startMs)},${msToASS(ov.endMs)},${styleName},,${marginL},${marginR},${marginV},,${overrideTags}${escapedText}`
+      );
+    }
+
+    // Insert all overlay styles before the empty line before [Events]
+    const eventsIdx = header.indexOf('[Events]');
+    header.splice(eventsIdx, 0, ...overlayStyles);
+  }
 
   return header.join('\n') + '\n' + events.join('\n') + '\n';
 }

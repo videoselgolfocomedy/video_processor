@@ -2,14 +2,21 @@ import path from 'path';
 import fs from 'fs/promises';
 import { jobManager } from '@/server/job-manager';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
-import { renderVideo, renderReelVideo } from '@/server/ffmpeg-wrapper';
+import { renderVideo, renderReelVideo, type ImageOverlayInput } from '@/server/ffmpeg-wrapper';
 import { generateASS } from '@/server/ass-generator';
+import type { ASSTextOverlay } from '@/server/ass-generator';
 import type { ExportPreset, SubtitleStyle, SubtitleSegment, CropRegion, CompositionClip } from '@/types/project';
 
-const BASE_HEIGHT = 1080;
+/**
+ * Subtitle styles are designed at 1080px width base (the "design canvas").
+ * For vertical 1080x1920: output width = 1080 → scale = 1 (no scaling).
+ * For horizontal 1920x1080: output width = 1920 → scale = 1.78 (scales up).
+ * For 4K 3840x2160: output width = 3840 → scale = 3.56 (scales up).
+ */
+const BASE_WIDTH = 1080;
 
-function scaleStyleForOutput(style: SubtitleStyle, outputHeight: number): SubtitleStyle {
-  const s = outputHeight / BASE_HEIGHT;
+function scaleStyleForOutput(style: SubtitleStyle, outputWidth: number): SubtitleStyle {
+  const s = outputWidth / BASE_WIDTH;
   if (s === 1) return style;
   return {
     ...style,
@@ -69,17 +76,34 @@ function remapSubtitlesToClips(segments: SubtitleSegment[], clips: CompositionCl
         // This segment is (partially) within this clip
         const outStart = cm.outputStart + (overlapStart - cm.timelineStart);
         const outEnd = cm.outputStart + (overlapEnd - cm.timelineStart);
+        // Remap words: include any word that overlaps with the clip range
+        let remappedWords = seg.words
+          ?.filter((w) => w.startMs < overlapEnd + 50 && w.endMs > overlapStart - 50)
+          .map((w) => ({
+            ...w,
+            startMs: Math.max(outStart, cm.outputStart + (w.startMs - cm.timelineStart)),
+            endMs: Math.min(outEnd, cm.outputStart + (w.endMs - cm.timelineStart)),
+          }));
+
+        // If all words were filtered out but original had words (possibly with styles),
+        // the word timing is corrupted (outside segment range). Redistribute words
+        // within the segment timing to preserve per-word styles.
+        if ((!remappedWords || remappedWords.length === 0) && seg.words && seg.words.length > 0) {
+          const segDur = outEnd - outStart;
+          const wc = seg.words.length;
+          remappedWords = seg.words.map((w, i) => ({
+            ...w,
+            startMs: outStart + Math.round(i * segDur / wc),
+            endMs: outStart + Math.round((i + 1) * segDur / wc),
+          }));
+        }
+
         result.push({
           ...seg,
           id: seg.id + '_' + cm.outputStart,
           startMs: outStart,
           endMs: outEnd,
-          words: seg.words?.filter((w) => w.startMs >= overlapStart && w.endMs <= overlapEnd)
-            .map((w) => ({
-              ...w,
-              startMs: cm.outputStart + (w.startMs - cm.timelineStart),
-              endMs: cm.outputStart + (w.endMs - cm.timelineStart),
-            })),
+          words: remappedWords,
         });
       }
     }
@@ -175,16 +199,158 @@ export async function startRender(options: RenderOptions): Promise<void> {
       const remappedSegments = remapSubtitlesToClips(reel.subtitleSegments, videoClips);
       console.log(`[render] Remapped ${remappedSegments.length} subtitle segments for concat output`);
 
-      // Generate ASS for the concatenated output
+      // Extract text overlay clips and remap to concat output timeline
+      const textClips = reel.composition.clips
+        .filter((c) => c.type === 'text' && c.textContent)
+        .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+
+      let assTextOverlays: ASSTextOverlay[] | undefined;
+      if (textClips.length > 0) {
+        let concatOffset = 0;
+        const clipTimeMap = videoClips.map((vc) => {
+          const entry = {
+            timelineStart: vc.timelineStartMs,
+            timelineEnd: vc.timelineEndMs,
+            outputStart: concatOffset,
+          };
+          concatOffset += vc.timelineEndMs - vc.timelineStartMs;
+          return entry;
+        });
+
+        assTextOverlays = [];
+        const scale = preset.width / BASE_WIDTH;
+        for (const tc of textClips) {
+          for (const cm of clipTimeMap) {
+            const overlapStart = Math.max(tc.timelineStartMs, cm.timelineStart);
+            const overlapEnd = Math.min(tc.timelineEndMs, cm.timelineEnd);
+            if (overlapStart < overlapEnd) {
+              const outStart = cm.outputStart + (overlapStart - cm.timelineStart);
+              const outEnd = cm.outputStart + (overlapEnd - cm.timelineStart);
+              assTextOverlays.push({
+                text: tc.textContent!,
+                startMs: outStart,
+                endMs: outEnd,
+                x: tc.overlayPosition?.x ?? 0.5,
+                y: tc.overlayPosition?.y ?? 0.5,
+                width: tc.overlayPosition?.width ?? 0.8,
+                fontSize: Math.round((tc.textStyle?.fontSize ?? 40) * scale),
+                fontFamily: tc.textStyle?.fontFamily ?? 'Inter',
+                fontWeight: tc.textStyle?.fontWeight ?? 400,
+                color: tc.textStyle?.color ?? '#ffffff',
+                backgroundColor: tc.textStyle?.backgroundColor,
+                shadowX: tc.textStyle?.shadowX,
+                shadowY: tc.textStyle?.shadowY,
+                shadowBlur: tc.textStyle?.shadowBlur,
+                shadowColor: tc.textStyle?.shadowColor,
+                lineHeight: tc.textStyle?.lineHeight,
+              });
+            }
+          }
+        }
+        console.log(`[render] ${assTextOverlays.length} text overlay(s) for ASS export`);
+      }
+
+      // Generate ASS for the concatenated output (subtitles + text overlays)
       let assFilePath2: string | undefined;
-      if (includeSubtitles && remappedSegments.length > 0 && subtitleStyle) {
-        const scaledStyle = scaleStyleForOutput(subtitleStyle, preset.height);
-        const assContent = generateASS(remappedSegments, scaledStyle, preset.fps, preset.width, preset.height);
+      const hasSubtitles = includeSubtitles && remappedSegments.length > 0 && subtitleStyle;
+      const hasTextOverlays = assTextOverlays && assTextOverlays.length > 0;
+      if (hasSubtitles || hasTextOverlays) {
+        const scaledStyle = subtitleStyle
+          ? scaleStyleForOutput(subtitleStyle, preset.width)
+          : scaleStyleForOutput(reel.subtitleStyle, preset.width);
+        const segs = hasSubtitles ? remappedSegments : [];
+        const assContent = generateASS(segs, scaledStyle, preset.fps, preset.width, preset.height, assTextOverlays);
         assFilePath2 = path.join(exportDir, `subs_${exportId}.ass`);
         await fs.writeFile(assFilePath2, assContent, 'utf-8');
         const debugAssPath = path.join(exportDir, `debug_subs_${preset.id}.ass`);
         await fs.writeFile(debugAssPath, assContent, 'utf-8');
         console.log(`[render] ASS debug: ${debugAssPath}`);
+      }
+
+      // Compute audio clip ranges remapped to concat output timeline
+      // This allows muting audio during gaps where audio clips were removed
+      const audioClips = reel.composition.clips
+        .filter((c) => c.trackId === 'ra1' || c.trackId === 'ra2')
+        .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+
+      let audioClipRanges: { startMs: number; endMs: number }[] | undefined;
+      if (audioClips.length > 0) {
+        // Build same clipTimeMap as for text overlays
+        let concatOff = 0;
+        const vcTimeMap = videoClips.map((vc) => {
+          const entry = {
+            timelineStart: vc.timelineStartMs,
+            timelineEnd: vc.timelineEndMs,
+            outputStart: concatOff,
+          };
+          concatOff += vc.timelineEndMs - vc.timelineStartMs;
+          return entry;
+        });
+
+        audioClipRanges = [];
+        for (const ac of audioClips) {
+          for (const cm of vcTimeMap) {
+            const overlapStart = Math.max(ac.timelineStartMs, cm.timelineStart);
+            const overlapEnd = Math.min(ac.timelineEndMs, cm.timelineEnd);
+            if (overlapStart < overlapEnd) {
+              audioClipRanges.push({
+                startMs: cm.outputStart + (overlapStart - cm.timelineStart),
+                endMs: cm.outputStart + (overlapEnd - cm.timelineStart),
+              });
+            }
+          }
+        }
+
+        // Check if audio covers the full video duration — if so, no gaps to mute
+        const totalConcatMs = concatOff;
+        const totalAudioMs = audioClipRanges.reduce((sum, r) => sum + (r.endMs - r.startMs), 0);
+        if (totalAudioMs >= totalConcatMs - 100) {
+          audioClipRanges = undefined; // No gaps, skip the volume filter
+        } else {
+          console.log(`[render] Audio has gaps: ${audioClipRanges.length} range(s) covering ${totalAudioMs}ms of ${totalConcatMs}ms`);
+        }
+      }
+
+      // Extract image/gif overlay clips and remap to concat output timeline
+      const imageGifClips = reel.composition.clips
+        .filter((c) => (c.type === 'image' || c.type === 'gif') && c.fileName)
+        .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+
+      let imageOverlays: ImageOverlayInput[] | undefined;
+      if (imageGifClips.length > 0) {
+        let concatOff2 = 0;
+        const vcTimeMap2 = videoClips.map((vc) => {
+          const entry = {
+            timelineStart: vc.timelineStartMs,
+            timelineEnd: vc.timelineEndMs,
+            outputStart: concatOff2,
+          };
+          concatOff2 += vc.timelineEndMs - vc.timelineStartMs;
+          return entry;
+        });
+
+        imageOverlays = [];
+        const projectDir = getProjectDir(projectId);
+        for (const ic of imageGifClips) {
+          for (const cm of vcTimeMap2) {
+            const overlapStart = Math.max(ic.timelineStartMs, cm.timelineStart);
+            const overlapEnd = Math.min(ic.timelineEndMs, cm.timelineEnd);
+            if (overlapStart < overlapEnd) {
+              const filePath = path.join(projectDir, ic.fileName!);
+              imageOverlays.push({
+                filePath,
+                startMs: cm.outputStart + (overlapStart - cm.timelineStart),
+                endMs: cm.outputStart + (overlapEnd - cm.timelineStart),
+                x: ic.overlayPosition?.x ?? 0.5,
+                y: ic.overlayPosition?.y ?? 0.5,
+                width: ic.overlayPosition?.width ?? 0.8,
+                opacity: ic.opacity ?? 1,
+              });
+            }
+          }
+        }
+        console.log(`[render] ${imageOverlays.length} image overlay(s) for FFmpeg export`);
+        if (imageOverlays.length === 0) imageOverlays = undefined;
       }
 
       jobManager.updateProgress(jobId, 2, 'Starting FFmpeg render...');
@@ -193,6 +359,8 @@ export async function startRender(options: RenderOptions): Promise<void> {
         videoInputPath: videoSrc,
         audioInputPath: audioSrc,
         clips: videoClips,
+        audioClipRanges,
+        imageOverlays,
         assFilePath: assFilePath2,
         fontsDirPath,
         outputPath,
@@ -272,7 +440,7 @@ export async function startRender(options: RenderOptions): Promise<void> {
   // Generate ASS subtitle file
   let assFilePath: string | undefined;
   if (includeSubtitles && segments.length > 0 && subtitleStyle) {
-    const scaledStyle = scaleStyleForOutput(subtitleStyle, preset.height);
+    const scaledStyle = scaleStyleForOutput(subtitleStyle, preset.width);
 
     // Shift segment timestamps when trimming (skip for reel — already 0-based)
     let shiftedSegments = segments;

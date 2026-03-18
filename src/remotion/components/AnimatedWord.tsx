@@ -9,6 +9,7 @@ interface AnimatedWordProps {
   isActive: boolean;
   style: SubtitleStyle;
   animation: SubtitleStyle['animation'];
+  wordStyle?: { color?: string; fontSize?: number; fontWeight?: number };
 }
 
 export const AnimatedWord: React.FC<AnimatedWordProps> = ({
@@ -17,6 +18,7 @@ export const AnimatedWord: React.FC<AnimatedWordProps> = ({
   isActive,
   style,
   animation,
+  wordStyle,
 }) => {
   const frame = useCurrentFrame();
 
@@ -57,11 +59,18 @@ export const AnimatedWord: React.FC<AnimatedWordProps> = ({
       break;
   }
 
+  // Apply per-word style overrides
+  const finalColor = wordStyle?.color ?? color;
+  const finalFontSize = wordStyle?.fontSize != null ? wordStyle.fontSize : undefined;
+  const finalFontWeight = wordStyle?.fontWeight != null ? wordStyle.fontWeight : undefined;
+
   return (
     <span
       style={{
         opacity,
-        color,
+        color: finalColor,
+        fontSize: finalFontSize,
+        fontWeight: finalFontWeight,
         transform: `scale(${scale})`,
         display: 'inline-block',
         transition: 'color 0.1s',

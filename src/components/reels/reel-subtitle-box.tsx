@@ -1,6 +1,7 @@
 'use client';
 
 import { useRef, useCallback, useEffect, useState } from 'react';
+import { cn } from '@/lib/utils';
 import { useReelStore } from '@/stores/reel-store';
 
 interface ReelSubtitleBoxProps {
@@ -45,13 +46,63 @@ export function ReelSubtitleBox({ reelId, canvasWidth, canvasHeight }: ReelSubti
     (s) => currentTimeMs >= s.startMs && currentTimeMs <= s.endMs
   );
 
-  const displayText = activeSeg && style
-    ? style.textTransform === 'uppercase'
-      ? activeSeg.text.toUpperCase()
+  const applyTextTransform = (text: string) => {
+    if (!style) return text;
+    return style.textTransform === 'uppercase'
+      ? text.toUpperCase()
       : style.textTransform === 'lowercase'
-        ? activeSeg.text.toLowerCase()
-        : activeSeg.text
-    : null;
+        ? text.toLowerCase()
+        : text;
+  };
+
+  const displayText = activeSeg && style ? applyTextTransform(activeSeg.text) : null;
+
+  // Check if the active segment has any per-word styles
+  const hasWordStyles = activeSeg?.words?.some((w) => w.style);
+
+  // Determine current word index for animations
+  const animation = style?.animation;
+  let words = activeSeg?.words;
+
+  // Fix corrupted word timing: if words exist but their timing is outside the segment range,
+  // redistribute them evenly within the segment
+  if (words && words.length > 0 && activeSeg) {
+    const allOutside = words.every(
+      (w) => w.endMs < activeSeg.startMs - 100 || w.startMs > activeSeg.endMs + 100
+    );
+    if (allOutside) {
+      const segDur = activeSeg.endMs - activeSeg.startMs;
+      const wc = words.length;
+      words = words.map((w, i) => ({
+        ...w,
+        startMs: activeSeg.startMs + Math.round(i * segDur / wc),
+        endMs: activeSeg.startMs + Math.round((i + 1) * segDur / wc),
+      }));
+    }
+  }
+
+  let currentWordIdx = -1;
+  if (words && words.length > 0 && animation && animation !== 'none' && animation !== 'fade') {
+    for (let i = 0; i < words.length; i++) {
+      const nextStart = i + 1 < words.length ? words[i + 1].startMs : activeSeg!.endMs;
+      if (currentTimeMs >= words[i].startMs && currentTimeMs < nextStart) {
+        currentWordIdx = i;
+        break;
+      }
+    }
+    if (currentWordIdx === -1 && words.length > 0 && currentTimeMs >= words[words.length - 1].startMs) {
+      currentWordIdx = words.length - 1;
+    }
+  }
+
+  // Should we use word-level rendering?
+  const needsWordRendering = !!(
+    (animation && animation !== 'none' && animation !== 'fade' && words && words.length > 0) ||
+    hasWordStyles
+  );
+
+  // For typewriter/punchline/pop: only show accumulated words up to current
+  const isAccumulating = animation === 'typewriter' || animation === 'punchline' || animation === 'pop';
 
   // Drag vertical handler
   const handleDragStart = useCallback(
@@ -209,9 +260,12 @@ export function ReelSubtitleBox({ reelId, canvasWidth, canvasHeight }: ReelSubti
         onMouseDown={(e) => handleResizeStart(e, 'bottom')}
       />
 
-      {/* Text content */}
+      {/* Text content — align to match ASS: bottom→items-end, top→items-start, center→items-center */}
       <div
-        className="flex items-center justify-center h-full px-2 pointer-events-none overflow-hidden"
+        className={cn(
+          'flex justify-center h-full px-2 pointer-events-none overflow-hidden',
+          style.position === 'top' ? 'items-start' : style.position === 'center' ? 'items-center' : 'items-end'
+        )}
         style={{
           fontSize: style.fontSize * scale,
           fontFamily: `${style.fontFamily}, sans-serif`,
@@ -236,7 +290,59 @@ export function ReelSubtitleBox({ reelId, canvasWidth, canvasHeight }: ReelSubti
             borderRadius: hasBg ? 2 : undefined,
           }}
         >
-          {displayText || 'Subtitle area'}
+          {!displayText && 'Subtitle area'}
+          {displayText && needsWordRendering && activeSeg?.words ? (
+            (() => {
+              // Split preserving newline positions
+              const textLines = activeSeg.text.split('\n');
+              const textWords: string[] = [];
+              const newlineBefore = new Set<number>();
+              for (let li = 0; li < textLines.length; li++) {
+                const lw = textLines[li].split(/\s+/).filter(Boolean);
+                for (let wi = 0; wi < lw.length; wi++) {
+                  if (li > 0 && wi === 0 && textWords.length > 0) {
+                    newlineBefore.add(textWords.length);
+                  }
+                  textWords.push(lw[wi]);
+                }
+              }
+
+              const wordStyles = activeSeg.words;
+              const visibleCount = isAccumulating && currentWordIdx >= 0
+                ? Math.min(textWords.length, currentWordIdx + 1)
+                : textWords.length;
+
+              return textWords.slice(0, visibleCount).map((tw, i) => {
+                const ws = i < wordStyles.length ? wordStyles[i].style : undefined;
+                const isCurrentWord = i === currentWordIdx;
+
+                // Color: per-word style takes priority, then animation highlight
+                let wordColor: string | undefined;
+                if (ws?.color) {
+                  wordColor = ws.color;
+                } else if (animation === 'word-highlight' && isCurrentWord) {
+                  wordColor = style?.highlightColor;
+                }
+
+                const sep = i > 0 ? (newlineBefore.has(i) ? '\n' : ' ') : '';
+
+                return (
+                  <span
+                    key={i}
+                    style={{
+                      color: wordColor ?? undefined,
+                      fontSize: ws?.fontSize != null ? ws.fontSize * scale : undefined,
+                      fontWeight: ws?.fontWeight ?? undefined,
+                    }}
+                  >
+                    {sep}{applyTextTransform(tw)}
+                  </span>
+                );
+              });
+            })()
+          ) : (
+            displayText
+          )}
         </span>
       </div>
     </div>

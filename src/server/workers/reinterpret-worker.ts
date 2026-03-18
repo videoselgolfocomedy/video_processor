@@ -1,4 +1,5 @@
-import type { SubtitleSegment } from '@/types/project';
+import type { SubtitleSegment, BitDefinition } from '@/types/project';
+import { v4 as uuidv4 } from 'uuid';
 import {
   resolveKey,
   resolveOllamaHost,
@@ -88,27 +89,53 @@ export interface ReinterpretOptions {
   onProgress?: (batch: number, total: number, message: string) => void | Promise<void>;
 }
 
+export interface ReinterpretResult {
+  segments: SubtitleSegment[];
+  bits: BitDefinition[];
+}
+
+interface RawBit {
+  label: string;
+  summary: string;
+  startSegmentId: string;
+  endSegmentId: string;
+}
+
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
 }
 
-function buildPrompt(language: string, context?: string): string {
-  return [
+function buildPrompt(language: string, context?: string, includeBits = false): string {
+  const base = [
     `You are a subtitle correction assistant. Fix transcription errors in these subtitles.`,
     `Language: ${language === 'auto' ? 'detect from context' : language}.`,
     `Common errors: misspelled proper nouns, slang misheard by speech-to-text, context-dependent words, numbers, punctuation.`,
     context ? `Context: ${context}` : '',
-    `Return ONLY a JSON array of objects with "id" and "text" fields.`,
-    `Include ONLY the segments whose text you changed. Do NOT include unchanged segments.`,
-    `If nothing needs correction, return an empty array [].`,
-    `Do NOT add any explanation or text outside the JSON array.`,
-  ].filter(Boolean).join(' ');
+  ].filter(Boolean);
+
+  if (includeBits) {
+    base.push(
+      `Return ONLY a JSON object with two keys:`,
+      `1. "corrections": array of {"id", "text"} for segments whose text you changed. Empty array if nothing changed.`,
+      `2. "bits": array of {"label", "summary", "startSegmentId", "endSegmentId"} identifying distinct comedy bits/topics/routines in the content. Each bit should have a short descriptive label, a 1-2 sentence summary, and the IDs of the first and last segment that belong to it. If the content is not comedy or has no clear bits, return an empty array.`,
+      `Do NOT add any explanation or text outside the JSON object.`,
+    );
+  } else {
+    base.push(
+      `Return ONLY a JSON array of objects with "id" and "text" fields.`,
+      `Include ONLY the segments whose text you changed. Do NOT include unchanged segments.`,
+      `If nothing needs correction, return an empty array [].`,
+      `Do NOT add any explanation or text outside the JSON array.`,
+    );
+  }
+
+  return base.join(' ');
 }
 
 export async function reinterpretSubtitles(
   options: ReinterpretOptions
-): Promise<SubtitleSegment[]> {
+): Promise<ReinterpretResult> {
   const { segments, language, context, provider, onProgress } = options;
   const providers = await detectProviders();
   const config = providers.find((p) => p.id === provider);
@@ -120,10 +147,12 @@ export async function reinterpretSubtitles(
 
   const totalBatches = Math.ceil(segments.length / config.batchSize);
   const results: SubtitleSegment[] = [];
+  let rawBits: RawBit[] = [];
 
   for (let i = 0; i < segments.length; i += config.batchSize) {
     const batch = segments.slice(i, i + config.batchSize);
     const batchNum = Math.floor(i / config.batchSize) + 1;
+    const isLastBatch = i + config.batchSize >= segments.length;
 
     if (i > 0 && config.delayMs > 0) {
       console.log(`${TAG} [Batch ${batchNum}/${totalBatches}] Waiting ${config.delayMs}ms (rate limit delay)`);
@@ -135,20 +164,22 @@ export async function reinterpretSubtitles(
       ? `Enviando ${batch.length} segmentos al LLM...`
       : `Enviando batch ${batchNum}/${totalBatches} (${batch.length} segmentos)...`;
     await onProgress?.(batchNum, totalBatches, label);
-    console.log(`${TAG} [Batch ${batchNum}/${totalBatches}] Sending ${batch.length} segments...`);
+    console.log(`${TAG} [Batch ${batchNum}/${totalBatches}] Sending ${batch.length} segments... includeBits=${isLastBatch}`);
     const t0 = Date.now();
-    const corrected = await callProvider(config, batch, language, context, batchNum, totalBatches);
+    const { corrected, bits: batchBits } = await callProvider(config, batch, language, context, batchNum, totalBatches, isLastBatch);
     const elapsed = Date.now() - t0;
-    console.log(`${TAG} [Batch ${batchNum}/${totalBatches}] Done in ${elapsed}ms, got ${corrected.length} segments back`);
+    console.log(`${TAG} [Batch ${batchNum}/${totalBatches}] Done in ${elapsed}ms, got ${corrected.length} segments back, ${batchBits.length} bits`);
     const doneLabel = totalBatches === 1
       ? `Análisis completado (${(elapsed / 1000).toFixed(1)}s)`
       : `Batch ${batchNum}/${totalBatches} completado (${(elapsed / 1000).toFixed(1)}s)`;
     await onProgress?.(batchNum, totalBatches, doneLabel);
     results.push(...corrected);
+    if (batchBits.length > 0) rawBits = batchBits;
   }
 
-  console.log(`${TAG} Reinterpretation complete: ${results.length} total segments returned`);
-  return results;
+  const bits = resolveBits(rawBits, segments);
+  console.log(`${TAG} Reinterpretation complete: ${results.length} total segments, ${bits.length} bits identified`);
+  return { segments: results, bits };
 }
 
 async function callProvider(
@@ -158,14 +189,15 @@ async function callProvider(
   context: string | undefined,
   batchNum: number,
   totalBatches: number,
+  includeBits: boolean,
   retries = 2
-): Promise<SubtitleSegment[]> {
+): Promise<{ corrected: SubtitleSegment[]; bits: RawBit[] }> {
   const logPrefix = `${TAG} [Batch ${batchNum}/${totalBatches}]`;
   const segmentTexts = batch.map((s) => ({ id: s.id, text: s.text }));
-  const systemPrompt = buildPrompt(language, context);
+  const systemPrompt = buildPrompt(language, context, includeBits);
   const userContent = JSON.stringify(segmentTexts);
 
-  console.log(`${logPrefix} Provider=${config.id} model=${config.model}`);
+  console.log(`${logPrefix} Provider=${config.id} model=${config.model} includeBits=${includeBits}`);
   console.log(`${logPrefix} System prompt length: ${systemPrompt.length} chars`);
   console.log(`${logPrefix} User content length: ${userContent.length} chars (${batch.length} segments)`);
 
@@ -227,7 +259,7 @@ async function callProvider(
       console.log(`${logPrefix} Response preview: ${responseText.substring(0, 200)}${responseText.length > 200 ? '...' : ''}`);
     }
 
-    return parseResponse(responseText, batch);
+    return parseResponse(responseText, batch, includeBits);
   } catch (err) {
     const msg = (err as Error).message;
     console.error(`${logPrefix} ERROR: ${msg}`);
@@ -236,7 +268,7 @@ async function callProvider(
       const waitSec = (3 - retries) * 20;
       console.log(`${logPrefix} Rate limited (429), retrying in ${waitSec}s (${retries} retries left)`);
       await sleep(waitSec * 1000);
-      return callProvider(config, batch, language, context, batchNum, totalBatches, retries - 1);
+      return callProvider(config, batch, language, context, batchNum, totalBatches, includeBits, retries - 1);
     }
 
     throw new Error(`[Batch ${batchNum}/${totalBatches}] ${msg}`);
@@ -457,7 +489,11 @@ function extractJson(text: string): string {
   return trimmed;
 }
 
-function parseResponse(text: string, batch: SubtitleSegment[]): SubtitleSegment[] {
+function parseResponse(
+  text: string,
+  batch: SubtitleSegment[],
+  includeBits: boolean
+): { corrected: SubtitleSegment[]; bits: RawBit[] } {
   if (!text.trim()) throw new Error('Empty response from LLM');
 
   const jsonStr = extractJson(text);
@@ -470,34 +506,78 @@ function parseResponse(text: string, batch: SubtitleSegment[]): SubtitleSegment[
     throw new Error(`JSON parse error: ${(e as Error).message}. First 400 chars: ${jsonStr.substring(0, 400)}`);
   }
 
-  // Extract the array of {id, text} corrections
+  // Extract corrections and optional bits
   let corrections: { id: string; text: string }[];
+  let bits: RawBit[] = [];
+
   if (Array.isArray(parsed)) {
+    // Old format: just an array of corrections
     corrections = parsed;
   } else if (parsed && typeof parsed === 'object') {
-    const firstArray = Object.values(parsed).find(Array.isArray);
-    if (!firstArray) {
-      throw new Error(`LLM response is an object but contains no array. Keys: ${Object.keys(parsed as Record<string, unknown>).join(', ')}`);
+    const obj = parsed as Record<string, unknown>;
+
+    // New format: { corrections: [...], bits: [...] }
+    if (Array.isArray(obj.corrections)) {
+      corrections = obj.corrections as { id: string; text: string }[];
+      if (Array.isArray(obj.bits)) {
+        bits = (obj.bits as RawBit[]).filter(
+          (b) => b.label && b.startSegmentId && b.endSegmentId
+        );
+        console.log(`${TAG} parseResponse: found ${bits.length} bits in response`);
+      }
+    } else {
+      // Fallback: find first array in the object
+      const firstArray = Object.values(obj).find(Array.isArray);
+      if (!firstArray) {
+        throw new Error(`LLM response is an object but contains no array. Keys: ${Object.keys(obj).join(', ')}`);
+      }
+      corrections = firstArray as { id: string; text: string }[];
     }
-    corrections = firstArray as { id: string; text: string }[];
   } else {
     throw new Error(`Unexpected LLM response type: ${typeof parsed}`);
   }
 
-  console.log(`${TAG} parseResponse: ${corrections.length} corrections for ${batch.length} batch segments`);
+  console.log(`${TAG} parseResponse: ${corrections.length} corrections for ${batch.length} batch segments, includeBits=${includeBits}`);
 
+  let corrected: SubtitleSegment[];
   if (corrections.length === 0) {
-    // No corrections needed - return originals unchanged
     console.log(`${TAG} parseResponse: No corrections, returning originals`);
-    return batch;
+    corrected = batch;
+  } else {
+    const correctionMap = new Map(corrections.map((c) => [c.id, c.text]));
+    corrected = batch.map((seg) => ({
+      ...seg,
+      text: correctionMap.get(seg.id) ?? seg.text,
+    }));
   }
 
-  // Apply only the corrections, keep rest unchanged
-  const correctionMap = new Map(corrections.map((c) => [c.id, c.text]));
-  return batch.map((seg) => ({
-    ...seg,
-    text: correctionMap.get(seg.id) ?? seg.text,
-  }));
+  return { corrected, bits };
+}
+
+function resolveBits(rawBits: RawBit[], allSegments: SubtitleSegment[]): BitDefinition[] {
+  if (rawBits.length === 0) return [];
+
+  const segMap = new Map(allSegments.map((s) => [s.id, s]));
+  const resolved: BitDefinition[] = [];
+
+  for (const raw of rawBits) {
+    const startSeg = segMap.get(raw.startSegmentId);
+    const endSeg = segMap.get(raw.endSegmentId);
+    if (!startSeg || !endSeg) {
+      console.log(`${TAG} resolveBits: skipping bit "${raw.label}" — invalid segment IDs (start=${raw.startSegmentId}, end=${raw.endSegmentId})`);
+      continue;
+    }
+    resolved.push({
+      id: uuidv4(),
+      label: raw.label,
+      summary: raw.summary || '',
+      startMs: startSeg.startMs,
+      endMs: endSeg.endMs,
+    });
+  }
+
+  console.log(`${TAG} resolveBits: ${resolved.length}/${rawBits.length} bits resolved successfully`);
+  return resolved;
 }
 
 function sleep(ms: number): Promise<void> {

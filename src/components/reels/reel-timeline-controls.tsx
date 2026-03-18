@@ -6,7 +6,8 @@ import {
   Trash2, ChevronsLeftRight, XCircle, ArrowLeftToLine,
   Shrink, SkipBack, SkipForward, ChevronLeft, ChevronRight,
   Gauge, RefreshCw, ListRestart, Undo2, Redo2, Plus, SplitSquareVertical,
-  Bookmark, History, RotateCcw,
+  Bookmark, History, RotateCcw, ChevronsLeft,
+  Film, Music, ImageIcon, Type, Layers,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
@@ -179,8 +180,8 @@ export function ReelTimelineControls({ reelId }: ReelTimelineControlsProps) {
   const zoomLevel = useReelStore((s) => s.zoomLevel);
   const setZoom = useReelStore((s) => s.setZoom);
   const setPhase = useReelStore((s) => s.setPhase);
-  const selectedClipId = useReelStore((s) => s.selectedClipId);
-  const selectedSubtitleId = useReelStore((s) => s.selectedSubtitleId);
+  const selectedClipIds = useReelStore((s) => s.selectedClipIds);
+  const selectedSubtitleIds = useReelStore((s) => s.selectedSubtitleIds);
   const splitClipAtPlayhead = useReelStore((s) => s.splitClipAtPlayhead);
   const splitAllAtPlayhead = useReelStore((s) => s.splitAllAtPlayhead);
   const splitSubtitleAtPlayhead = useReelStore((s) => s.splitSubtitleAtPlayhead);
@@ -188,6 +189,7 @@ export function ReelTimelineControls({ reelId }: ReelTimelineControlsProps) {
   const deleteSelected = useReelStore((s) => s.deleteSelected);
   const rippleDeleteSelected = useReelStore((s) => s.rippleDeleteSelected);
   const collapseGapAtPlayhead = useReelStore((s) => s.collapseGapAtPlayhead);
+  const closeGapForSelected = useReelStore((s) => s.closeGapForSelected);
   const clearTimeline = useReelStore((s) => s.clearTimeline);
   const syncSubtitlesToClips = useReelStore((s) => s.syncSubtitlesToClips);
   const resetTimeline = useReelStore((s) => s.resetTimeline);
@@ -202,6 +204,10 @@ export function ReelTimelineControls({ reelId }: ReelTimelineControlsProps) {
   const [versionMenuOpen, setVersionMenuOpen] = useState(false);
   const versionBtnRef = useRef<HTMLButtonElement>(null);
 
+  const addTrack = useReelStore((s) => s.addTrack);
+  const [addTrackOpen, setAddTrackOpen] = useState(false);
+  const addTrackRef = useRef<HTMLDivElement>(null);
+
   const reelDurationMs = reel ? reel.endMs - reel.startMs : 0;
 
   const canSplit = reel
@@ -214,12 +220,24 @@ export function ReelTimelineControls({ reelId }: ReelTimelineControlsProps) {
     ? reel.subtitleSegments.some((s) => currentTimeMs > s.startMs && currentTimeMs < s.endMs)
     : false;
 
-  const hasSelection = !!selectedClipId || !!selectedSubtitleId;
-  const hasClipSelection = !!selectedClipId;
+  const hasSelection = selectedClipIds.length > 0 || selectedSubtitleIds.length > 0;
+  const hasClipSelection = selectedClipIds.length > 0;
   const hasClips = reel ? reel.composition.clips.length > 0 : false;
 
   const zoomToSlider = (z: number) => Math.round(Math.log(z / 0.01) / Math.log(1 / 0.01) * 100);
   const sliderToZoom = (v: number) => 0.01 * Math.pow(1 / 0.01, v / 100);
+
+  // Close add track menu on outside click
+  useEffect(() => {
+    if (!addTrackOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (addTrackRef.current && !addTrackRef.current.contains(e.target as Node)) {
+        setAddTrackOpen(false);
+      }
+    };
+    window.addEventListener('click', handler);
+    return () => window.removeEventListener('click', handler);
+  }, [addTrackOpen]);
 
   // Close version menu on outside click
   useEffect(() => {
@@ -429,7 +447,7 @@ export function ReelTimelineControls({ reelId }: ReelTimelineControlsProps) {
         <ArrowLeftToLine className="h-3.5 w-3.5" />
       </Button>
 
-      {/* Collapse gap */}
+      {/* Collapse gap at playhead */}
       <Button
         variant="ghost" size="sm" className="h-7 w-7 p-0 text-sky-400 hover:text-sky-300"
         onClick={() => collapseGapAtPlayhead(reelId)}
@@ -437,6 +455,16 @@ export function ReelTimelineControls({ reelId }: ReelTimelineControlsProps) {
         title="Close gap at playhead (G)"
       >
         <Shrink className="h-3.5 w-3.5" />
+      </Button>
+
+      {/* Close gap for selected clips */}
+      <Button
+        variant="ghost" size="sm" className="h-7 w-7 p-0 text-sky-400 hover:text-sky-300"
+        onClick={() => closeGapForSelected(reelId)}
+        disabled={!hasClipSelection}
+        title="Close gap for selected clips (Shift+G)"
+      >
+        <ChevronsLeft className="h-3.5 w-3.5" />
       </Button>
 
       {/* Clear all */}
@@ -497,6 +525,42 @@ export function ReelTimelineControls({ reelId }: ReelTimelineControlsProps) {
       >
         <ListRestart className="h-3.5 w-3.5" />
       </Button>
+
+      <div className="mx-0.5 h-4 w-px bg-border" />
+
+      {/* ── Add Track ── */}
+      <div className="relative" ref={addTrackRef}>
+        <Button
+          variant="ghost" size="sm" className="h-7 px-1.5 text-[10px] gap-0.5 text-purple-400 hover:text-purple-300"
+          onClick={() => setAddTrackOpen(!addTrackOpen)}
+          title="Add track"
+        >
+          <Layers className="h-3.5 w-3.5" />
+          <Plus className="h-2.5 w-2.5" />
+        </Button>
+        {addTrackOpen && (
+          <div className="absolute top-full left-0 mt-1 bg-popover border border-border rounded-md shadow-lg py-1 min-w-[140px] z-50">
+            {[
+              { type: 'video' as const, label: 'Video', icon: Film, color: 'text-blue-400' },
+              { type: 'audio' as const, label: 'Audio', icon: Music, color: 'text-green-400' },
+              { type: 'image' as const, label: 'Image/Photo', icon: ImageIcon, color: 'text-purple-400' },
+              { type: 'text' as const, label: 'Text Overlay', icon: Type, color: 'text-orange-400' },
+            ].map(({ type, label, icon: Icon, color }) => (
+              <button
+                key={type}
+                className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted text-left"
+                onClick={() => {
+                  addTrack(reelId, type, label);
+                  setAddTrackOpen(false);
+                }}
+              >
+                <Icon className={`h-3.5 w-3.5 ${color}`} />
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="flex-1" />
 

@@ -28,8 +28,8 @@ const defaultReelStyle = STYLE_PRESETS.find((p) => p.id === 'reel-punchline')!.s
 
 interface UndoEntry {
   reel: ReelDefinition;
-  selectedClipId: string | null;
-  selectedSubtitleId: string | null;
+  selectedClipIds: string[];
+  selectedSubtitleIds: string[];
 }
 
 const MAX_UNDO = 50;
@@ -43,14 +43,14 @@ interface ReelStore {
   baseDurationMs: number;
   baseSegments: SubtitleSegment[];
   dirty: boolean;
-  selectedClipId: string | null;
+  selectedClipIds: string[];
 
   // Phase & timeline viewport
   phase: 'setup' | 'timeline';
   zoomLevel: number;
   scrollOffsetMs: number;
   viewportWidthPx: number;
-  selectedSubtitleId: string | null;
+  selectedSubtitleIds: string[];
 
   // Undo/redo
   undoStack: UndoEntry[];
@@ -72,6 +72,10 @@ interface ReelStore {
   duplicateReel: (id: string) => string;
   updateReel: (id: string, updates: Partial<ReelDefinition>) => void;
 
+  // Track management
+  addTrack: (reelId: string, type: CompositionTrack['type'], label: string) => string;
+  removeTrack: (reelId: string, trackId: string) => void;
+
   // Timeline
   addClip: (reelId: string, clip: Omit<CompositionClip, 'id'>) => string;
   updateClip: (reelId: string, clipId: string, updates: Partial<CompositionClip>) => void;
@@ -79,7 +83,9 @@ interface ReelStore {
   moveClip: (reelId: string, clipId: string, newStartMs: number) => void;
   trimClip: (reelId: string, clipId: string, edge: 'in' | 'out', newMs: number) => void;
   splitClipAtPlayhead: (reelId: string) => void;
-  selectClip: (clipId: string | null) => void;
+  selectClip: (clipId: string | null, addToSelection?: boolean) => void;
+  moveSelectedClips: (reelId: string, deltaMs: number) => void;
+  closeGapForSelected: (reelId: string) => void;
 
   // Crop
   updateCropRegion: (reelId: string, updates: Partial<CropRegion>) => void;
@@ -97,7 +103,10 @@ interface ReelStore {
   setZoom: (level: number) => void;
   setScrollOffset: (ms: number) => void;
   setViewportWidth: (px: number) => void;
-  selectSubtitle: (id: string | null) => void;
+  selectSubtitle: (id: string | null, addToSelection?: boolean) => void;
+  selectAllSubtitles: (reelId: string) => void;
+  selectSubtitlesFromPlayhead: (reelId: string, direction: 'left' | 'right') => void;
+  moveSelectedSubtitles: (reelId: string, deltaMs: number) => void;
   deleteSubtitleSegment: (reelId: string, segId: string) => void;
   deleteSelected: (reelId: string) => void;
   splitSubtitleAtPlayhead: (reelId: string) => void;
@@ -236,8 +245,8 @@ function pushUndo(state: ReelStore): { undoStack: UndoEntry[]; redoStack: UndoEn
   if (!reel) return { undoStack: state.undoStack, redoStack: state.redoStack };
   const entry: UndoEntry = {
     reel: JSON.parse(JSON.stringify(reel)),
-    selectedClipId: state.selectedClipId,
-    selectedSubtitleId: state.selectedSubtitleId,
+    selectedClipIds: [...state.selectedClipIds],
+    selectedSubtitleIds: [...state.selectedSubtitleIds],
   };
   const stack = [...state.undoStack, entry];
   if (stack.length > MAX_UNDO) stack.shift();
@@ -253,12 +262,12 @@ export const useReelStore = create<ReelStore>((set, get) => ({
   baseDurationMs: 0,
   baseSegments: [],
   dirty: false,
-  selectedClipId: null,
+  selectedClipIds: [],
   phase: 'setup',
   zoomLevel: 0.1,
   scrollOffsetMs: 0,
   viewportWidthPx: 800,
-  selectedSubtitleId: null,
+  selectedSubtitleIds: [],
   undoStack: [],
   redoStack: [],
 
@@ -272,11 +281,11 @@ export const useReelStore = create<ReelStore>((set, get) => ({
       currentTimeMs: 0,
       isPlaying: false,
       dirty: false,
-      selectedClipId: null,
+      selectedClipIds: [],
     });
   },
 
-  selectReel: (id) => set({ activeReelId: id, currentTimeMs: 0, isPlaying: false, selectedClipId: null, selectedSubtitleId: null, phase: 'setup' }),
+  selectReel: (id) => set({ activeReelId: id, currentTimeMs: 0, isPlaying: false, selectedClipIds: [], selectedSubtitleIds: [], phase: 'setup' }),
   markClean: () => set({ dirty: false }),
 
   createReel: (name, startMs, endMs) => {
@@ -330,18 +339,99 @@ export const useReelStore = create<ReelStore>((set, get) => ({
     }));
   },
 
-  // Timeline operations
-  addClip: (reelId, clipData) => {
-    const clipId = uuidv4();
+  // Track management
+  addTrack: (reelId, type, label) => {
+    const state = get();
+    const reel = state.reels.find((r) => r.id === reelId);
+    if (!reel) return '';
+    // Generate unique track ID with prefix based on type
+    const prefix = type === 'video' ? 'rv' : type === 'audio' ? 'ra' : type === 'subtitle' ? 'rs' : type === 'image' ? 'ri' : 'rt';
+    const existingNums = reel.composition.tracks
+      .filter((t) => t.id.startsWith(prefix))
+      .map((t) => parseInt(t.id.slice(prefix.length)) || 0);
+    const nextNum = Math.max(0, ...existingNums) + 1;
+    const trackId = `${prefix}${nextNum}`;
+    const track: CompositionTrack = {
+      id: trackId,
+      type,
+      label,
+      locked: false,
+      muted: false,
+      visible: true,
+    };
+    set((s) => ({
+      reels: updateReelInList(s.reels, reelId, (r) => {
+        const tracks = [...r.composition.tracks];
+        // Insert overlay tracks (image, text) above main video (rv1)
+        // In NLE convention: higher layers render on top, so they go first
+        if (type === 'image' || type === 'text') {
+          const rv1Idx = tracks.findIndex((t) => t.id === 'rv1');
+          if (rv1Idx >= 0) {
+            tracks.splice(rv1Idx, 0, track);
+          } else {
+            tracks.unshift(track);
+          }
+        } else if (type === 'video') {
+          // Additional video tracks go right after rv1
+          const rv1Idx = tracks.findIndex((t) => t.id === 'rv1');
+          if (rv1Idx >= 0) {
+            tracks.splice(rv1Idx + 1, 0, track);
+          } else {
+            tracks.push(track);
+          }
+        } else if (type === 'audio') {
+          // Audio tracks go after main audio (ra1)
+          const ra1Idx = tracks.findIndex((t) => t.id === 'ra1');
+          if (ra1Idx >= 0) {
+            tracks.splice(ra1Idx + 1, 0, track);
+          } else {
+            tracks.push(track);
+          }
+        } else {
+          tracks.push(track);
+        }
+        return {
+          ...r,
+          composition: { ...r.composition, tracks },
+        };
+      }),
+      dirty: true,
+    }));
+    return trackId;
+  },
+
+  removeTrack: (reelId, trackId) => {
+    // Don't allow removing default locked tracks
+    if (['rv1', 'ra1', 'rs1'].includes(trackId)) return;
     set((s) => ({
       reels: updateReelInList(s.reels, reelId, (r) => ({
         ...r,
         composition: {
           ...r.composition,
-          clips: [...r.composition.clips, { ...clipData, id: clipId }],
+          tracks: r.composition.tracks.filter((t) => t.id !== trackId),
+          clips: r.composition.clips.filter((c) => c.trackId !== trackId),
         },
       })),
-      selectedClipId: clipId,
+      dirty: true,
+    }));
+  },
+
+  // Timeline operations
+  addClip: (reelId, clipData) => {
+    const clipId = uuidv4();
+    // Default overlayPosition for image/gif clips
+    const enriched = (clipData.type === 'image' || clipData.type === 'gif') && !clipData.overlayPosition
+      ? { ...clipData, overlayPosition: { x: 0.5, y: 0.5, width: 0.8 } }
+      : clipData;
+    set((s) => ({
+      reels: updateReelInList(s.reels, reelId, (r) => ({
+        ...r,
+        composition: {
+          ...r.composition,
+          clips: [...r.composition.clips, { ...enriched, id: clipId }],
+        },
+      })),
+      selectedClipIds: [clipId],
       dirty: true,
     }));
     return clipId;
@@ -369,7 +459,7 @@ export const useReelStore = create<ReelStore>((set, get) => ({
           clips: r.composition.clips.filter((c) => c.id !== clipId),
         },
       })),
-      selectedClipId: s.selectedClipId === clipId ? null : s.selectedClipId,
+      selectedClipIds: s.selectedClipIds.filter((id) => id !== clipId),
       dirty: true,
     }));
   },
@@ -432,8 +522,9 @@ export const useReelStore = create<ReelStore>((set, get) => ({
     const t = state.currentTimeMs;
 
     // If a clip is selected, use it; otherwise find any clip under playhead
-    let clip = state.selectedClipId
-      ? reel.composition.clips.find((c) => c.id === state.selectedClipId)
+    const firstSelected = state.selectedClipIds[0] ?? null;
+    let clip = firstSelected
+      ? reel.composition.clips.find((c) => c.id === firstSelected)
       : undefined;
     if (!clip || t <= clip.timelineStartMs || t >= clip.timelineEndMs) {
       clip = reel.composition.clips.find((c) => t > c.timelineStartMs && t < c.timelineEndMs);
@@ -458,7 +549,7 @@ export const useReelStore = create<ReelStore>((set, get) => ({
           ],
         },
       })),
-      selectedClipId: rightId,
+      selectedClipIds: [rightId],
       dirty: true,
     }));
   },
@@ -499,12 +590,113 @@ export const useReelStore = create<ReelStore>((set, get) => ({
         ...r,
         subtitleSegments: [...r.subtitleSegments, newSeg].sort((a, b) => a.startMs - b.startMs),
       })),
-      selectedSubtitleId: newSeg.id,
+      selectedSubtitleIds: [newSeg.id],
       dirty: true,
     }));
   },
 
-  selectClip: (clipId) => set({ selectedClipId: clipId }),
+  selectClip: (clipId, addToSelection) => {
+    if (clipId === null) {
+      set({ selectedClipIds: [] });
+      return;
+    }
+    if (addToSelection) {
+      set((s) => {
+        const ids = s.selectedClipIds;
+        if (ids.includes(clipId)) {
+          return { selectedClipIds: ids.filter((id) => id !== clipId) };
+        }
+        return { selectedClipIds: [...ids, clipId] };
+      });
+    } else {
+      set({ selectedClipIds: [clipId] });
+    }
+  },
+
+  moveSelectedClips: (reelId, deltaMs) => {
+    const state = get();
+    if (state.selectedClipIds.length === 0) return;
+    const selectedSet = new Set(state.selectedClipIds);
+    set((s) => ({
+      reels: updateReelInList(s.reels, reelId, (r) => ({
+        ...r,
+        composition: {
+          ...r.composition,
+          clips: r.composition.clips.map((c) => {
+            if (!selectedSet.has(c.id)) return c;
+            const newStart = Math.max(0, c.timelineStartMs + deltaMs);
+            const dur = c.timelineEndMs - c.timelineStartMs;
+            return { ...c, timelineStartMs: newStart, timelineEndMs: newStart + dur };
+          }),
+        },
+      })),
+      dirty: true,
+    }));
+  },
+
+  closeGapForSelected: (reelId) => {
+    set(pushUndo(get()));
+    const state = get();
+    const reel = state.reels.find((r) => r.id === reelId);
+    if (!reel || state.selectedClipIds.length === 0) return;
+
+    const selectedSet = new Set(state.selectedClipIds);
+    const selectedClips = reel.composition.clips.filter((c) => selectedSet.has(c.id));
+    if (selectedClips.length === 0) return;
+
+    // Find the leftmost start of all selected clips
+    const groupStart = Math.min(...selectedClips.map((c) => c.timelineStartMs));
+
+    // For each track that has selected clips, find the rightmost end of
+    // non-selected clips that end before groupStart
+    const tracksWithSelected = Array.from(new Set(selectedClips.map((c) => c.trackId)));
+    let targetStart = 0;
+
+    for (const trackId of tracksWithSelected) {
+      const nonSelectedBefore = reel.composition.clips.filter(
+        (c) => c.trackId === trackId && !selectedSet.has(c.id) && c.timelineEndMs <= groupStart
+      );
+      if (nonSelectedBefore.length > 0) {
+        const maxEnd = Math.max(...nonSelectedBefore.map((c) => c.timelineEndMs));
+        targetStart = Math.max(targetStart, maxEnd);
+      }
+    }
+
+    const deltaMs = groupStart - targetStart;
+    if (deltaMs <= 0) return;
+
+    // Shift all selected clips
+    const shiftedClips = reel.composition.clips.map((c) => {
+      if (!selectedSet.has(c.id)) return c;
+      return {
+        ...c,
+        timelineStartMs: c.timelineStartMs - deltaMs,
+        timelineEndMs: c.timelineEndMs - deltaMs,
+      };
+    });
+
+    // Also shift subtitles in the affected range
+    const groupEnd = Math.max(...selectedClips.map((c) => c.timelineEndMs));
+    const shiftedSegments = reel.subtitleSegments.map((seg) => {
+      if (seg.startMs >= groupStart && seg.endMs <= groupEnd) {
+        return {
+          ...seg,
+          startMs: seg.startMs - deltaMs,
+          endMs: seg.endMs - deltaMs,
+        };
+      }
+      return seg;
+    });
+
+    set((s) => ({
+      reels: updateReelInList(s.reels, reelId, (r) => ({
+        ...r,
+        composition: { ...r.composition, clips: shiftedClips },
+        subtitleSegments: shiftedSegments,
+      })),
+      dirty: true,
+    }));
+  },
 
   updateCropRegion: (reelId, updates) => {
     set((s) => ({
@@ -517,12 +709,41 @@ export const useReelStore = create<ReelStore>((set, get) => ({
   },
 
   regenerateReelSubtitles: (reelId) => {
+    set(pushUndo(get()));
     const state = get();
     const reel = state.reels.find((r) => r.id === reelId);
     if (!reel) return;
-    const segments = filterSegmentsToRange(state.baseSegments, reel.startMs, reel.endMs, reel.subtitleConstraints);
+
+    // Work on the EXISTING edited segments (preserve user text changes, formatting, word styles)
+    let segments = [...reel.subtitleSegments];
+
+    // If timeline has clips, sync subtitles to clip boundaries (trim/remove segments in gaps)
+    const videoClips = reel.composition.clips
+      .filter((c) => c.trackId === 'rv1')
+      .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+
+    if (videoClips.length > 0) {
+      segments = segments
+        .map((seg) => {
+          for (const clip of videoClips) {
+            if (seg.startMs < clip.timelineEndMs && seg.endMs > clip.timelineStartMs) {
+              return {
+                ...seg,
+                startMs: Math.max(seg.startMs, clip.timelineStartMs),
+                endMs: Math.min(seg.endMs, clip.timelineEndMs),
+              };
+            }
+          }
+          return null;
+        })
+        .filter((s): s is SubtitleSegment => s !== null && (s.endMs - s.startMs) > 100);
+    }
+
+    // Re-apply splitting constraints (only splits segments that exceed limits, leaves others intact)
+    const resplit = splitLongSegments(segments, reel.subtitleConstraints.maxCharsPerBlock, reel.subtitleConstraints.maxDurationMs);
+
     set((s) => ({
-      reels: updateReelInList(s.reels, reelId, (r) => ({ ...r, subtitleSegments: segments })),
+      reels: updateReelInList(s.reels, reelId, (r) => ({ ...r, subtitleSegments: resplit })),
       dirty: true,
     }));
   },
@@ -638,8 +859,8 @@ export const useReelStore = create<ReelStore>((set, get) => ({
         scrollOffsetMs: 0,
         currentTimeMs: 0,
         isPlaying: false,
-        selectedClipId: null,
-        selectedSubtitleId: null,
+        selectedClipIds: [],
+        selectedSubtitleIds: [],
       });
     } else {
       // Returning to timeline — preserve all state, just switch phase
@@ -650,12 +871,64 @@ export const useReelStore = create<ReelStore>((set, get) => ({
   setZoom: (level) => set({ zoomLevel: Math.max(0.01, Math.min(1, level)) }),
   setScrollOffset: (ms) => set({ scrollOffsetMs: Math.max(0, ms) }),
   setViewportWidth: (px) => set({ viewportWidthPx: px }),
-  selectSubtitle: (id) => {
-    if (id) {
-      set({ selectedSubtitleId: id, selectedClipId: null });
-    } else {
-      set({ selectedSubtitleId: null });
+  selectSubtitle: (id, addToSelection) => {
+    if (!id) {
+      set({ selectedSubtitleIds: [] });
+      return;
     }
+    if (addToSelection) {
+      const current = get().selectedSubtitleIds;
+      if (current.includes(id)) {
+        set({ selectedSubtitleIds: current.filter((s) => s !== id), selectedClipIds: [] });
+      } else {
+        set({ selectedSubtitleIds: [...current, id], selectedClipIds: [] });
+      }
+    } else {
+      set({ selectedSubtitleIds: [id], selectedClipIds: [] });
+    }
+  },
+
+  selectAllSubtitles: (reelId) => {
+    const reel = get().reels.find((r) => r.id === reelId);
+    if (!reel) return;
+    set({ selectedSubtitleIds: reel.subtitleSegments.map((s) => s.id), selectedClipIds: [] });
+  },
+
+  selectSubtitlesFromPlayhead: (reelId, direction) => {
+    const state = get();
+    const reel = state.reels.find((r) => r.id === reelId);
+    if (!reel) return;
+    const t = state.currentTimeMs;
+    const ids = reel.subtitleSegments
+      .filter((s) => direction === 'left' ? s.endMs <= t : s.startMs >= t)
+      .map((s) => s.id);
+    set({ selectedSubtitleIds: ids, selectedClipIds: [] });
+  },
+
+  moveSelectedSubtitles: (reelId, deltaMs) => {
+    const state = get();
+    const ids = new Set(state.selectedSubtitleIds);
+    if (ids.size === 0) return;
+    set((s) => ({
+      reels: updateReelInList(s.reels, reelId, (r) => ({
+        ...r,
+        subtitleSegments: r.subtitleSegments.map((seg) =>
+          ids.has(seg.id)
+            ? {
+                ...seg,
+                startMs: Math.max(0, seg.startMs + deltaMs),
+                endMs: Math.max(0, seg.endMs + deltaMs),
+                words: seg.words?.map((w) => ({
+                  ...w,
+                  startMs: Math.max(0, w.startMs + deltaMs),
+                  endMs: Math.max(0, w.endMs + deltaMs),
+                })),
+              }
+            : seg
+        ),
+      })),
+      dirty: true,
+    }));
   },
 
   deleteSubtitleSegment: (reelId, segId) => {
@@ -665,7 +938,7 @@ export const useReelStore = create<ReelStore>((set, get) => ({
         ...r,
         subtitleSegments: r.subtitleSegments.filter((seg) => seg.id !== segId),
       })),
-      selectedSubtitleId: s.selectedSubtitleId === segId ? null : s.selectedSubtitleId,
+      selectedSubtitleIds: s.selectedSubtitleIds.filter((id) => id !== segId),
       dirty: true,
     }));
   },
@@ -673,20 +946,30 @@ export const useReelStore = create<ReelStore>((set, get) => ({
   deleteSelected: (reelId) => {
     set(pushUndo(get()));
     const state = get();
-    if (state.selectedClipId) {
+    if (state.selectedClipIds.length > 0) {
+      const selectedSet = new Set(state.selectedClipIds);
       set((s) => ({
         reels: updateReelInList(s.reels, reelId, (r) => ({
           ...r,
           composition: {
             ...r.composition,
-            clips: r.composition.clips.filter((c) => c.id !== state.selectedClipId),
+            clips: r.composition.clips.filter((c) => !selectedSet.has(c.id)),
           },
         })),
-        selectedClipId: null,
+        selectedClipIds: [],
         dirty: true,
       }));
-    } else if (state.selectedSubtitleId) {
-      get().deleteSubtitleSegment(reelId, state.selectedSubtitleId);
+    } else if (state.selectedSubtitleIds.length > 0) {
+      // Delete all selected subtitle segments
+      const idsToDelete = new Set(state.selectedSubtitleIds);
+      set((s) => ({
+        reels: updateReelInList(s.reels, reelId, (r) => ({
+          ...r,
+          subtitleSegments: r.subtitleSegments.filter((seg) => !idsToDelete.has(seg.id)),
+        })),
+        selectedSubtitleIds: [],
+        dirty: true,
+      }));
     }
   },
 
@@ -716,130 +999,166 @@ export const useReelStore = create<ReelStore>((set, get) => ({
         ...r,
         composition: { ...r.composition, clips: newClips },
       })),
-      selectedClipId: null,
+      selectedClipIds: [],
       dirty: true,
     }));
   },
 
   rippleDeleteSelected: (reelId) => {
-    set(pushUndo(get()));
     const state = get();
-    if (!state.selectedClipId) return;
+    if (state.selectedClipIds.length === 0) return;
     const reel = state.reels.find((r) => r.id === reelId);
     if (!reel) return;
-    const clip = reel.composition.clips.find((c) => c.id === state.selectedClipId);
-    if (!clip) return;
 
-    const gapStart = clip.timelineStartMs;
-    const gapEnd = clip.timelineEndMs;
-    const gapDuration = gapEnd - gapStart;
-    const trackId = clip.trackId;
+    const selectedClips = reel.composition.clips
+      .filter((c) => state.selectedClipIds.includes(c.id));
 
-    // Remove the clip
-    let remainingClips = reel.composition.clips.filter((c) => c.id !== clip.id);
+    if (selectedClips.length === 0) return;
 
-    // Find which tracks can shift: a track can shift if NO clip on that track
-    // overlaps the gap region (other than the deleted one, already removed)
-    // We try to shift ALL tracks together. If any track has a clip blocking
-    // (a clip that starts before gapEnd and ends after gapStart), we only shift
-    // the tracks that are free.
-    const trackIdSet: Record<string, boolean> = {};
-    remainingClips.forEach((c) => { trackIdSet[c.trackId] = true; });
-    const trackIds = Object.keys(trackIdSet);
-    const shiftableTracks: Record<string, boolean> = {};
+    set(pushUndo(get()));
 
-    for (let i = 0; i < trackIds.length; i++) {
-      const tid = trackIds[i];
-      const trackClips = remainingClips.filter((c) => c.trackId === tid);
-      const hasBlocker = trackClips.some((c) =>
-        c.timelineStartMs < gapEnd && c.timelineEndMs > gapStart && c.timelineStartMs < gapStart
-      );
-      if (!hasBlocker) {
-        shiftableTracks[tid] = true;
+    // Remove all selected clips
+    let remainingClips = reel.composition.clips.filter(
+      (c) => !state.selectedClipIds.includes(c.id)
+    );
+    let segments = [...reel.subtitleSegments];
+
+    // Deduplicate gap ranges: multiple clips on different tracks at the same
+    // time range should only cause ONE shift. Merge overlapping ranges.
+    const rawGaps = selectedClips
+      .map((c) => ({ start: c.timelineStartMs, end: c.timelineEndMs }))
+      .sort((a, b) => a.start - b.start);
+
+    const mergedGaps: { start: number; end: number }[] = [];
+    for (const g of rawGaps) {
+      const last = mergedGaps[mergedGaps.length - 1];
+      if (last && g.start <= last.end) {
+        last.end = Math.max(last.end, g.end);
+      } else {
+        mergedGaps.push({ ...g });
       }
     }
 
-    // Also add the deleted clip's track
-    shiftableTracks[trackId] = true;
+    // Process gaps from rightmost to leftmost so earlier positions stay valid.
+    for (let gi = mergedGaps.length - 1; gi >= 0; gi--) {
+      const gapStart = mergedGaps[gi].start;
+      const gapEnd = mergedGaps[gi].end;
+      const gapDuration = gapEnd - gapStart;
 
-    // Shift all clips on shiftable tracks that start at or after gapEnd
-    remainingClips = remainingClips.map((c) => {
-      if (shiftableTracks[c.trackId] && c.timelineStartMs >= gapEnd) {
-        return {
-          ...c,
-          timelineStartMs: c.timelineStartMs - gapDuration,
-          timelineEndMs: c.timelineEndMs - gapDuration,
-        };
-      }
-      return c;
-    });
-
-    // Also shift subtitles that start at or after gapEnd
-    const shiftedSegments = reel.subtitleSegments.map((seg) => {
-      if (seg.startMs >= gapEnd) {
-        return {
-          ...seg,
-          startMs: seg.startMs - gapDuration,
-          endMs: seg.endMs - gapDuration,
-        };
-      }
-      // Segments that overlap the gap: trim or remove
-      if (seg.endMs > gapStart && seg.startMs < gapEnd) {
-        if (seg.startMs >= gapStart) {
-          // Starts inside gap - remove
-          return null;
+      // Shift clips that start at or after gapEnd
+      remainingClips = remainingClips.map((c) => {
+        if (c.timelineStartMs >= gapEnd) {
+          return {
+            ...c,
+            timelineStartMs: c.timelineStartMs - gapDuration,
+            timelineEndMs: c.timelineEndMs - gapDuration,
+          };
         }
-        // Ends inside gap - trim
-        return { ...seg, endMs: gapStart };
-      }
-      return seg;
-    }).filter(Boolean) as typeof reel.subtitleSegments;
+        return c;
+      });
+
+      // Shift/trim/remove subtitles
+      segments = segments.map((seg) => {
+        // Entirely after gap → shift back
+        if (seg.startMs >= gapEnd) {
+          return {
+            ...seg,
+            startMs: seg.startMs - gapDuration,
+            endMs: seg.endMs - gapDuration,
+            words: seg.words?.map((w) => ({
+              ...w,
+              startMs: w.startMs - gapDuration,
+              endMs: w.endMs - gapDuration,
+            })),
+          };
+        }
+        // Overlaps with gap
+        if (seg.endMs > gapStart && seg.startMs < gapEnd) {
+          // Entirely within gap → remove
+          if (seg.startMs >= gapStart && seg.endMs <= gapEnd) return null;
+          // Starts before gap, ends within → trim end
+          if (seg.startMs < gapStart && seg.endMs <= gapEnd) {
+            return {
+              ...seg,
+              endMs: gapStart,
+              words: seg.words?.filter((w) => w.startMs < gapStart),
+            };
+          }
+          // Starts within gap, extends past → trim start and shift
+          if (seg.startMs >= gapStart && seg.endMs > gapEnd) {
+            return {
+              ...seg,
+              startMs: gapStart,
+              endMs: seg.endMs - gapDuration,
+              words: seg.words
+                ?.filter((w) => w.endMs > gapEnd)
+                .map((w) => ({
+                  ...w,
+                  startMs: Math.max(gapStart, w.startMs - gapDuration),
+                  endMs: w.endMs - gapDuration,
+                })),
+            };
+          }
+          // Spans entire gap (starts before, ends after) → shrink by gap
+          return {
+            ...seg,
+            endMs: seg.endMs - gapDuration,
+            words: seg.words
+              ?.filter((w) => w.endMs <= gapStart || w.startMs >= gapEnd)
+              .map((w) => {
+                if (w.startMs >= gapEnd) {
+                  return { ...w, startMs: w.startMs - gapDuration, endMs: w.endMs - gapDuration };
+                }
+                return w;
+              }),
+          };
+        }
+        return seg;
+      }).filter(Boolean) as typeof segments;
+    }
 
     set((s) => ({
       reels: updateReelInList(s.reels, reelId, (r) => ({
         ...r,
         composition: { ...r.composition, clips: remainingClips },
-        subtitleSegments: shiftedSegments,
+        subtitleSegments: segments,
       })),
-      selectedClipId: null,
+      selectedClipIds: [],
       dirty: true,
     }));
   },
 
   collapseGapAtPlayhead: (reelId) => {
-    set(pushUndo(get()));
     const state = get();
     const reel = state.reels.find((r) => r.id === reelId);
     if (!reel) return;
 
     const t = state.currentTimeMs;
-
-    // Find the gap at playhead position across all tracks.
-    // A gap exists if no clip covers time t on at least the main tracks.
-    // Find the gap boundaries: gapStart = max end of clips ending before t,
-    // gapEnd = min start of clips starting after t.
     const allClips = reel.composition.clips;
     if (allClips.length === 0) return;
 
-    // Find per-track gaps at playhead
-    const trackGaps: { start: number; end: number }[] = [];
+    // Collect per-track gap boundaries at playhead.
+    // Only tracks that have a gap at playhead contribute.
     const trackIdSet: Record<string, boolean> = {};
     allClips.forEach((c) => { trackIdSet[c.trackId] = true; });
     const trackIds = Object.keys(trackIdSet);
 
-    for (let i = 0; i < trackIds.length; i++) {
-      const tid = trackIds[i];
+    let narrowestStart = 0;
+    let narrowestEnd = Infinity;
+    let anyTrackHasGap = false;
+
+    for (const tid of trackIds) {
       const trackClips = allClips
         .filter((c) => c.trackId === tid)
         .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
 
-      // Check if playhead is in a gap on this track
+      // If a clip covers playhead on this track, skip — no gap here
       const clipAtT = trackClips.find((c) => t >= c.timelineStartMs && t < c.timelineEndMs);
-      if (clipAtT) continue; // No gap on this track at playhead
+      if (clipAtT) continue;
 
-      // Find gap boundaries
+      // Find gap boundaries on this track
       let gapStart = 0;
-      let gapEnd = reel.endMs - reel.startMs;
+      let gapEnd = Infinity;
 
       for (const c of trackClips) {
         if (c.timelineEndMs <= t) {
@@ -851,28 +1170,24 @@ export const useReelStore = create<ReelStore>((set, get) => ({
         }
       }
 
-      if (gapEnd > gapStart) {
-        trackGaps.push({ start: gapStart, end: gapEnd });
-      }
+      if (gapEnd <= gapStart) continue;
+
+      anyTrackHasGap = true;
+      // Use the narrowest gap across all tracks so clips don't overlap
+      narrowestStart = Math.max(narrowestStart, gapStart);
+      narrowestEnd = Math.min(narrowestEnd, gapEnd);
     }
 
-    if (trackGaps.length === 0) return; // No gap found at playhead
+    if (!anyTrackHasGap || narrowestEnd <= narrowestStart) return;
 
-    // Use the intersection of all gaps (the common gap region)
-    let commonStart = 0;
-    let commonEnd = reel.endMs - reel.startMs;
-    for (const g of trackGaps) {
-      commonStart = Math.max(commonStart, g.start);
-      commonEnd = Math.min(commonEnd, g.end);
-    }
+    // Now push undo only after confirming there's a gap to close
+    set(pushUndo(get()));
 
-    if (commonEnd <= commonStart) return; // No common gap
+    const gapDuration = narrowestEnd - narrowestStart;
 
-    const gapDuration = commonEnd - commonStart;
-
-    // Shift all clips that start at or after commonEnd
+    // Shift ALL clips on ALL tracks that start >= gapEnd
     const shiftedClips = allClips.map((c) => {
-      if (c.timelineStartMs >= commonEnd) {
+      if (c.timelineStartMs >= narrowestEnd) {
         return {
           ...c,
           timelineStartMs: c.timelineStartMs - gapDuration,
@@ -884,12 +1199,12 @@ export const useReelStore = create<ReelStore>((set, get) => ({
 
     // Shift subtitles
     const shiftedSegments = reel.subtitleSegments.map((seg) => {
-      if (seg.startMs >= commonEnd) {
+      if (seg.startMs >= narrowestEnd) {
         return { ...seg, startMs: seg.startMs - gapDuration, endMs: seg.endMs - gapDuration };
       }
-      if (seg.endMs > commonStart && seg.startMs < commonEnd) {
-        if (seg.startMs >= commonStart) return null;
-        return { ...seg, endMs: commonStart };
+      if (seg.endMs > narrowestStart && seg.startMs < narrowestEnd) {
+        if (seg.startMs >= narrowestStart) return null;
+        return { ...seg, endMs: narrowestStart };
       }
       return seg;
     }).filter(Boolean) as typeof reel.subtitleSegments;
@@ -911,8 +1226,8 @@ export const useReelStore = create<ReelStore>((set, get) => ({
         ...r,
         composition: { ...r.composition, clips: [] },
       })),
-      selectedClipId: null,
-      selectedSubtitleId: null,
+      selectedClipIds: [],
+      selectedSubtitleIds: [],
       dirty: true,
     }));
   },
@@ -977,8 +1292,8 @@ export const useReelStore = create<ReelStore>((set, get) => ({
         composition: { ...r.composition, clips: [] },
         subtitleSegments: segments,
       })),
-      selectedClipId: null,
-      selectedSubtitleId: null,
+      selectedClipIds: [],
+      selectedSubtitleIds: [],
       phase: 'setup',
       dirty: true,
     }));
@@ -1008,13 +1323,13 @@ export const useReelStore = create<ReelStore>((set, get) => ({
     if (!currentReel) return;
     const redoEntry: UndoEntry = {
       reel: JSON.parse(JSON.stringify(currentReel)),
-      selectedClipId: state.selectedClipId,
-      selectedSubtitleId: state.selectedSubtitleId,
+      selectedClipIds: [...state.selectedClipIds],
+      selectedSubtitleIds: [...state.selectedSubtitleIds],
     };
     set({
       reels: state.reels.map((r) => r.id === entry.reel.id ? entry.reel : r),
-      selectedClipId: entry.selectedClipId,
-      selectedSubtitleId: entry.selectedSubtitleId,
+      selectedClipIds: entry.selectedClipIds,
+      selectedSubtitleIds: entry.selectedSubtitleIds,
       undoStack: state.undoStack.slice(0, -1),
       redoStack: [...state.redoStack, redoEntry],
       dirty: true,
@@ -1029,13 +1344,13 @@ export const useReelStore = create<ReelStore>((set, get) => ({
     if (!currentReel) return;
     const undoEntry: UndoEntry = {
       reel: JSON.parse(JSON.stringify(currentReel)),
-      selectedClipId: state.selectedClipId,
-      selectedSubtitleId: state.selectedSubtitleId,
+      selectedClipIds: [...state.selectedClipIds],
+      selectedSubtitleIds: [...state.selectedSubtitleIds],
     };
     set({
       reels: state.reels.map((r) => r.id === entry.reel.id ? entry.reel : r),
-      selectedClipId: entry.selectedClipId,
-      selectedSubtitleId: entry.selectedSubtitleId,
+      selectedClipIds: entry.selectedClipIds,
+      selectedSubtitleIds: entry.selectedSubtitleIds,
       undoStack: [...state.undoStack, undoEntry],
       redoStack: state.redoStack.slice(0, -1),
       dirty: true,
@@ -1079,8 +1394,8 @@ export const useReelStore = create<ReelStore>((set, get) => ({
         subtitleSegments: JSON.parse(JSON.stringify(version.subtitleSegments)),
         subtitleStyle: JSON.parse(JSON.stringify(version.subtitleStyle)),
       })),
-      selectedClipId: null,
-      selectedSubtitleId: null,
+      selectedClipIds: [],
+      selectedSubtitleIds: [],
       dirty: true,
     }));
   },

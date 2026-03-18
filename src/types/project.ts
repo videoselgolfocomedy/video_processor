@@ -22,6 +22,8 @@ export interface ProjectState {
   reels: ReelDefinition[];
   // Punchline detection hints
   punchlineHints?: PunchlineHint[];
+  // AI-identified comedy bits from reinterpretation
+  bits?: BitDefinition[];
   // DEPRECATED: old single reel settings (kept for migration only)
   reelSettings?: ReelSettings;
 }
@@ -71,6 +73,14 @@ export interface ReelDefinition {
   subtitleSegments: SubtitleSegment[];
   punchlineSegmentIds: string[];
   versions?: ReelVersion[];
+}
+
+export interface BitDefinition {
+  id: string;
+  label: string;       // "Airplane food bit"
+  summary: string;     // 1-2 sentences
+  startMs: number;     // absolute source video time
+  endMs: number;
 }
 
 export interface PunchlineHint {
@@ -219,6 +229,11 @@ export interface SubtitleWord {
   text: string;
   startMs: number;
   endMs: number;
+  style?: {
+    color?: string;
+    fontSize?: number;
+    fontWeight?: number;
+  };
 }
 
 export interface SubtitleStyle {
@@ -275,7 +290,7 @@ export interface ExportRecord {
 
 export interface CompositionClip {
   id: string;
-  type: 'video' | 'image' | 'audio';
+  type: 'video' | 'image' | 'audio' | 'gif' | 'text';
   fileName: string;
   originalName: string;
   trackId: string;
@@ -287,6 +302,26 @@ export interface CompositionClip {
   overlay?: OverlayPosition;
   volume?: number;
   opacity?: number;
+  // Text overlay
+  textContent?: string;
+  textStyle?: {
+    fontSize: number;
+    fontFamily: string;
+    fontWeight: number;
+    color: string;
+    backgroundColor?: string;
+    lineHeight?: number;
+    shadowColor?: string;
+    shadowBlur?: number;
+    shadowX?: number;
+    shadowY?: number;
+  };
+  // Overlay position for image/gif/text
+  overlayPosition?: {
+    x: number;      // 0-1 fraction
+    y: number;
+    width: number;  // 0-1 fraction
+  };
 }
 
 export interface OverlayPosition {
@@ -298,7 +333,7 @@ export interface OverlayPosition {
 
 export interface CompositionTrack {
   id: string;
-  type: 'video' | 'audio' | 'subtitle';
+  type: 'video' | 'audio' | 'subtitle' | 'image' | 'text';
   label: string;
   locked: boolean;
   muted: boolean;
@@ -309,7 +344,7 @@ export interface MediaBinAsset {
   id: string;
   fileName: string;
   originalName: string;
-  type: 'video' | 'image' | 'audio';
+  type: 'video' | 'image' | 'audio' | 'gif';
   duration?: number;
   resolution?: { width: number; height: number };
 }

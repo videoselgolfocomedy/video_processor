@@ -451,10 +451,24 @@ export function renderVideo(options: RenderVideoOptions): {
 
 /* ── Reel rendering: concatenate edited clip segments ────────────────── */
 
+export interface ImageOverlayInput {
+  filePath: string;
+  startMs: number;   // in concat output timeline
+  endMs: number;
+  x: number;         // 0-1 fraction
+  y: number;
+  width: number;     // 0-1 fraction
+  opacity: number;   // 0-1
+}
+
 export interface RenderReelOptions {
   videoInputPath: string;
   audioInputPath?: string;
   clips: { sourceInMs: number; sourceOutMs: number }[];
+  /** Audio clips mapped to the video concat timeline — specifies silent gaps */
+  audioClipRanges?: { startMs: number; endMs: number }[];
+  /** Image overlays to burn into the video */
+  imageOverlays?: ImageOverlayInput[];
   assFilePath?: string;
   fontsDirPath?: string;
   outputPath: string;
@@ -497,6 +511,20 @@ export function renderReelVideo(options: RenderReelOptions): {
     // Audio input with seek (same time range)
     if (hasAudio) {
       args.push('-ss', String(seekSec), '-t', String(durSec), '-i', options.audioInputPath!);
+    }
+  }
+
+  // Add image overlay inputs (after all clip inputs)
+  const imageOverlays = options.imageOverlays ?? [];
+  const firstImageInputIdx = clips.length * (hasAudio ? 2 : 1);
+  for (const img of imageOverlays) {
+    const ext = img.filePath.toLowerCase().split('.').pop() ?? '';
+    if (ext === 'gif') {
+      // GIF: use ignore_loop to keep looping, stream_loop for duration coverage
+      args.push('-ignore_loop', '0', '-stream_loop', '-1', '-i', img.filePath);
+    } else {
+      // Still image: loop to create a video stream
+      args.push('-loop', '1', '-i', img.filePath);
     }
   }
 
@@ -546,8 +574,38 @@ export function renderReelVideo(options: RenderReelOptions): {
     `${concatInputs}concat=n=${clips.length}:v=1:a=1[outv][outa]`
   );
 
-  // Scale to output size + optional ASS subtitles
-  let finalFilter = `[outv]scale=${options.width}:${options.height}`;
+  // Scale to output size
+  let videoLabel = 'outv';
+  filterParts.push(`[outv]scale=${options.width}:${options.height}[scaled]`);
+  videoLabel = 'scaled';
+
+  // Apply image overlays (between scale and ASS subtitles)
+  for (let imgIdx = 0; imgIdx < imageOverlays.length; imgIdx++) {
+    const img = imageOverlays[imgIdx];
+    const imgInputIdx = firstImageInputIdx + imgIdx;
+    const imgW = Math.round(img.width * options.width);
+    // Center position: x*W - overlayW/2, y*H - overlayH/2
+    // Use FFmpeg overlay expressions so overlay_h is resolved at runtime
+    const ox = Math.round(img.x * options.width - imgW / 2);
+    const oy = `${Math.round(img.y * options.height)}-overlay_h/2`;
+    const startSec = (img.startMs / 1000).toFixed(3);
+    const endSec = (img.endMs / 1000).toFixed(3);
+    const nextLabel = `imgov${imgIdx}`;
+
+    // Scale the image to the target width, preserve aspect ratio; apply opacity
+    filterParts.push(
+      `[${imgInputIdx}:v]scale=${imgW}:-1,format=rgba,colorchannelmixer=aa=${img.opacity.toFixed(2)}[img${imgIdx}]`
+    );
+    // Overlay onto the video with enable expression for timing
+    // shortest=1 ensures the overlay doesn't extend beyond the main video
+    filterParts.push(
+      `[${videoLabel}][img${imgIdx}]overlay=x=${ox}:y=${oy}:shortest=1:enable='between(t,${startSec},${endSec})'[${nextLabel}]`
+    );
+    videoLabel = nextLabel;
+  }
+
+  // Optional ASS subtitles (on top of everything)
+  let finalFilter = `[${videoLabel}]`;
   if (options.assFilePath) {
     const escapedAssPath = options.assFilePath
       .replace(/\\/g, '\\\\\\\\')
@@ -563,13 +621,32 @@ export function renderReelVideo(options: RenderReelOptions): {
         .replace(/'/g, "\\\\'");
       assFilter = `ass='${escapedAssPath}':fontsdir='${escapedFontsDir}'`;
     }
-    finalFilter += `,${assFilter}`;
+    finalFilter += `${assFilter}[finalv]`;
+  } else {
+    // No ASS — just copy through with label rename
+    finalFilter += `null[finalv]`;
   }
-  finalFilter += '[finalv]';
+
   filterParts.push(finalFilter);
 
+  // Apply audio muting for gaps if audioClipRanges are provided
+  let audioLabel = '[outa]';
+  if (options.audioClipRanges && options.audioClipRanges.length > 0) {
+    // Build volume expression: volume=1 during audio clips, 0 during gaps
+    // Use between() for each audio range, sum > 0 means audio is active
+    const enableParts = options.audioClipRanges.map((r) => {
+      const startSec = r.startMs / 1000;
+      const endSec = r.endMs / 1000;
+      return `between(t\\,${startSec.toFixed(3)}\\,${endSec.toFixed(3)})`;
+    });
+    // volume = if(any_range_active, 1, 0)
+    const enableExpr = enableParts.join('+');
+    filterParts.push(`[outa]volume=if(${enableExpr}\\,1\\,0):eval=frame[finala]`);
+    audioLabel = '[finala]';
+  }
+
   args.push('-filter_complex', filterParts.join(';'));
-  args.push('-map', '[finalv]', '-map', '[outa]');
+  args.push('-map', '[finalv]', '-map', audioLabel);
 
   // Encoding
   args.push(

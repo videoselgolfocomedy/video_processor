@@ -25,13 +25,8 @@ export function ReelTimeline({ reelId }: ReelTimelineProps) {
 
   const reelDurationMs = reel ? reel.endMs - reel.startMs : 0;
 
-  // Only show tracks that have content or are primary
-  const visibleTracks = reel?.composition.tracks.filter((t) => {
-    // Always show main video, main audio, subtitles
-    if (['rv1', 'ra1', 'rs1'].includes(t.id)) return true;
-    // Show others if they have clips
-    return reel.composition.clips.some((c) => c.trackId === t.id);
-  }) ?? [];
+  // Show all tracks (including newly added empty ones)
+  const visibleTracks = reel?.composition.tracks ?? [];
 
   // Measure viewport width
   useEffect(() => {

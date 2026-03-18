@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useRef, useState, useEffect } from 'react';
+import { useParams } from 'next/navigation';
 import { useReelStore } from '@/stores/reel-store';
 import { ReelVideoPlayer } from './reel-video-player';
 import { ReelSubtitleBox } from './reel-subtitle-box';
@@ -8,16 +9,128 @@ import { ReelTimeline } from './reel-timeline';
 import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { RefreshCw, Scissors, Trash2 } from 'lucide-react';
+import { RefreshCw, Scissors, Trash2, Bold } from 'lucide-react';
 import { splitLongSegments } from '@/lib/subtitle-utils';
 import { formatTimestamp } from '@/lib/utils';
 import { getReelVideoElement } from './reel-video-ref';
-import type { SubtitleStyle } from '@/types/project';
+import type { SubtitleStyle, SubtitleWord } from '@/types/project';
 
 interface ReelTimelineViewProps {
   reelId: string;
   videoSrc?: string;
   audioSrc?: string;
+}
+
+/* ── Text overlay rendering on canvas ──────────────────────────────── */
+
+function TextOverlayPreview({ reelId, canvasWidth }: {
+  reelId: string;
+  canvasWidth: number;
+}) {
+  const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
+  const currentTimeMs = useReelStore((s) => s.currentTimeMs);
+
+  if (!reel || canvasWidth <= 0) return null;
+
+  // Find text clips that are visible at current time
+  const textClips = reel.composition.clips.filter(
+    (c) => c.type === 'text' && currentTimeMs >= c.timelineStartMs && currentTimeMs <= c.timelineEndMs
+  );
+
+  if (textClips.length === 0) return null;
+
+  const scale = canvasWidth / 1080;
+
+  return (
+    <>
+      {textClips.map((clip) => {
+        const ts = clip.textStyle ?? {
+          fontSize: 48,
+          fontFamily: 'Inter',
+          fontWeight: 400,
+          color: '#ffffff',
+          backgroundColor: undefined,
+        };
+        const pos = clip.overlayPosition ?? { x: 0.5, y: 0.5, width: 0.8 };
+
+        return (
+          <div
+            key={clip.id}
+            className="absolute pointer-events-none"
+            style={{
+              left: `${pos.x * 100}%`,
+              top: `${pos.y * 100}%`,
+              transform: 'translate(-50%, -50%)',
+              maxWidth: `${pos.width * 100}%`,
+              fontFamily: `${ts.fontFamily}, sans-serif`,
+              fontSize: ts.fontSize * scale,
+              fontWeight: ts.fontWeight,
+              color: ts.color,
+              backgroundColor: ts.backgroundColor ?? undefined,
+              padding: ts.backgroundColor ? `${2 * scale}px ${4 * scale}px` : undefined,
+              borderRadius: ts.backgroundColor ? 2 : undefined,
+              textAlign: 'center',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              lineHeight: ts.lineHeight ?? 1.2,
+              textShadow: ts.shadowColor
+                ? `${(ts.shadowX ?? 0) * scale}px ${(ts.shadowY ?? 0) * scale}px ${(ts.shadowBlur ?? 0) * scale}px ${ts.shadowColor}`
+                : undefined,
+              zIndex: 15,
+            }}
+          >
+            {clip.textContent || ''}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+/* ── Image/GIF overlay rendering on canvas ────────────────────────── */
+
+function ImageOverlayPreview({ reelId }: { reelId: string }) {
+  const params = useParams();
+  const projectId = params?.id as string | undefined;
+  const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
+  const currentTimeMs = useReelStore((s) => s.currentTimeMs);
+
+  if (!reel || !projectId) return null;
+
+  const imageClips = reel.composition.clips.filter(
+    (c) =>
+      (c.type === 'image' || c.type === 'gif') &&
+      currentTimeMs >= c.timelineStartMs &&
+      currentTimeMs <= c.timelineEndMs
+  );
+
+  if (imageClips.length === 0) return null;
+
+  return (
+    <>
+      {imageClips.map((clip) => {
+        const pos = clip.overlayPosition ?? { x: 0.5, y: 0.5, width: 0.8 };
+        return (
+          <img
+            key={clip.id}
+            src={`/api/projects/${projectId}/reels/file?name=${encodeURIComponent(clip.fileName)}`}
+            alt={clip.originalName}
+            className="absolute pointer-events-none"
+            style={{
+              left: `${pos.x * 100}%`,
+              top: `${pos.y * 100}%`,
+              transform: 'translate(-50%, -50%)',
+              maxWidth: `${pos.width * 100}%`,
+              maxHeight: '100%',
+              objectFit: 'contain',
+              opacity: clip.opacity ?? 1,
+              zIndex: 14,
+            }}
+          />
+        );
+      })}
+    </>
+  );
 }
 
 /* ── Small 9:16 canvas preview ──────────────────────────────────────── */
@@ -121,13 +234,182 @@ function TimelineCanvasPreview({ reelId }: { reelId: string }) {
           className="w-full h-full rounded bg-black"
         />
         {canvasDims.width > 0 && (
-          <ReelSubtitleBox
-            reelId={reelId}
-            canvasWidth={canvasDims.width}
-            canvasHeight={canvasDims.height}
-          />
+          <>
+            <ImageOverlayPreview reelId={reelId} />
+            <TextOverlayPreview
+              reelId={reelId}
+              canvasWidth={canvasDims.width}
+            />
+            <ReelSubtitleBox
+              reelId={reelId}
+              canvasWidth={canvasDims.width}
+              canvasHeight={canvasDims.height}
+            />
+          </>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ── Word style editor (per-word formatting) ──────────────────────── */
+
+function WordStyleEditor({
+  reelId,
+  segId,
+  seg,
+}: {
+  reelId: string;
+  segId: string;
+  seg: { text: string; startMs: number; endMs: number; words?: SubtitleWord[] };
+}) {
+  const [selectedWordIndices, setSelectedWordIndices] = useState<Set<number>>(new Set());
+  const updateReelSubtitleSegment = useReelStore((s) => s.updateReelSubtitleSegment);
+
+  // Derive display words from seg.text (source of truth)
+  const textWords = seg.text.split(/\s+/).filter(Boolean);
+  const sourceWords = seg.words ?? [];
+
+  // Build merged words: use seg.text words for display, map style/timing from words[]
+  const mergedWords: SubtitleWord[] = textWords.map((tw, i) => {
+    if (i < sourceWords.length) {
+      // Same index: use timing/style from source, text from edited
+      return { ...sourceWords[i], text: tw };
+    }
+    // New word added: distribute timing evenly
+    const segDur = seg.endMs - seg.startMs;
+    const wordDur = textWords.length > 0 ? segDur / textWords.length : segDur;
+    return {
+      text: tw,
+      startMs: seg.startMs + Math.round(i * wordDur),
+      endMs: seg.startMs + Math.round((i + 1) * wordDur),
+    };
+  });
+
+  const handleWordClick = (idx: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (e.shiftKey) {
+      setSelectedWordIndices((prev) => {
+        const next = new Set(prev);
+        if (next.has(idx)) next.delete(idx);
+        else next.add(idx);
+        return next;
+      });
+    } else {
+      setSelectedWordIndices((prev) =>
+        prev.size === 1 && prev.has(idx) ? new Set() : new Set([idx])
+      );
+    }
+  };
+
+  const selectedMerged = Array.from(selectedWordIndices).map((i) => mergedWords[i]).filter(Boolean);
+  const currentColor = selectedMerged.length > 0 ? (selectedMerged[0].style?.color ?? '') : '';
+  const currentSize = selectedMerged.length > 0 ? (selectedMerged[0].style?.fontSize ?? '') : '';
+  const currentBold = selectedMerged.length > 0 && selectedMerged.every((w) => (w.style?.fontWeight ?? 400) >= 700);
+
+  const applyStyle = (update: Partial<NonNullable<SubtitleWord['style']>>) => {
+    if (selectedWordIndices.size === 0) return;
+    const updated = mergedWords.map((w, i) => {
+      if (!selectedWordIndices.has(i)) return w;
+      const newStyle = { ...w.style, ...update };
+      // Remove keys that are empty/undefined
+      if (!newStyle.color) delete newStyle.color;
+      if (!newStyle.fontSize) delete newStyle.fontSize;
+      if (newStyle.fontWeight === undefined) delete newStyle.fontWeight;
+      const hasKeys = Object.keys(newStyle).length > 0;
+      return { ...w, style: hasKeys ? newStyle : undefined };
+    });
+    updateReelSubtitleSegment(reelId, segId, { words: updated });
+  };
+
+  return (
+    <div className="px-3 py-1.5 space-y-1.5">
+      {/* Word chips */}
+      <div className="flex flex-wrap gap-1">
+        {mergedWords.map((word, idx) => {
+          const isSelected = selectedWordIndices.has(idx);
+          const hasStyle = !!word.style;
+          return (
+            <button
+              key={idx}
+              className={`px-1.5 py-0.5 rounded text-[10px] border transition-colors ${
+                isSelected
+                  ? 'border-primary bg-primary/20 text-primary'
+                  : 'border-border bg-muted/30 text-foreground hover:bg-muted/50'
+              }`}
+              onClick={(e) => handleWordClick(idx, e)}
+            >
+              {word.text}
+              {hasStyle && (
+                <span
+                  className="inline-block w-1.5 h-1.5 rounded-full ml-0.5 align-middle"
+                  style={{ backgroundColor: word.style?.color ?? '#888' }}
+                />
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Style controls (only when words selected) */}
+      {selectedWordIndices.size > 0 && (
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Color */}
+          <label className="flex items-center gap-1 text-[10px] text-muted-foreground">
+            Color
+            <input
+              type="color"
+              className="w-5 h-5 rounded cursor-pointer border-0 p-0"
+              value={currentColor || '#ffffff'}
+              onChange={(e) => applyStyle({ color: e.target.value })}
+            />
+            {currentColor && (
+              <button
+                className="text-[9px] text-muted-foreground hover:text-foreground"
+                onClick={() => applyStyle({ color: undefined })}
+                title="Reset color"
+              >
+                x
+              </button>
+            )}
+          </label>
+
+          {/* Size */}
+          <label className="flex items-center gap-1 text-[10px] text-muted-foreground">
+            Size
+            <input
+              type="range"
+              min={16}
+              max={300}
+              step={1}
+              value={Number(currentSize) || 60}
+              onChange={(e) => applyStyle({ fontSize: parseInt(e.target.value) })}
+              className="w-16 h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+            />
+            <span className="w-6 text-right">{currentSize || '-'}</span>
+            {currentSize && (
+              <button
+                className="text-[9px] text-muted-foreground hover:text-foreground"
+                onClick={() => applyStyle({ fontSize: undefined })}
+                title="Reset size"
+              >
+                x
+              </button>
+            )}
+          </label>
+
+          {/* Bold toggle */}
+          <button
+            className={`p-1 rounded border text-[10px] ${
+              currentBold ? 'border-primary bg-primary/20 text-primary' : 'border-border text-muted-foreground hover:text-foreground'
+            }`}
+            onClick={() => applyStyle({ fontWeight: currentBold ? undefined : 700 })}
+            title="Toggle bold"
+          >
+            <Bold className="h-3 w-3" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -138,14 +420,54 @@ function SubtitleListEditor({ reelId }: { reelId: string }) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const updateReelSubtitleSegment = useReelStore((s) => s.updateReelSubtitleSegment);
   const deleteSubtitleSegment = useReelStore((s) => s.deleteSubtitleSegment);
-  const selectedSubtitleId = useReelStore((s) => s.selectedSubtitleId);
+  const selectedSubtitleIds = useReelStore((s) => s.selectedSubtitleIds);
   const selectSubtitle = useReelStore((s) => s.selectSubtitle);
   const setCurrentTime = useReelStore((s) => s.setCurrentTime);
+
+  // When text is manually edited, sync the words array
+  const handleTextChange = useCallback(
+    (segId: string, newText: string) => {
+      const seg = reel?.subtitleSegments.find((s) => s.id === segId);
+      if (!seg) {
+        updateReelSubtitleSegment(reelId, segId, { text: newText });
+        return;
+      }
+
+      if (!seg.words || seg.words.length === 0) {
+        updateReelSubtitleSegment(reelId, segId, { text: newText });
+        return;
+      }
+
+      // Split new text into words
+      const newWords = newText.split(/\s+/).filter(Boolean);
+      const oldWords = seg.words;
+
+      if (newWords.length === oldWords.length) {
+        // Same word count: update text of each word, preserve timing & style
+        const updatedWords = oldWords.map((w, i) => ({
+          ...w,
+          text: newWords[i],
+        }));
+        updateReelSubtitleSegment(reelId, segId, { text: newText, words: updatedWords });
+      } else {
+        // Word count changed: redistribute timing evenly, preserve styles for first N
+        const segDur = seg.endMs - seg.startMs;
+        const wordDur = newWords.length > 0 ? segDur / newWords.length : segDur;
+        const updatedWords = newWords.map((text, i) => ({
+          text,
+          startMs: seg.startMs + Math.round(i * wordDur),
+          endMs: seg.startMs + Math.round((i + 1) * wordDur),
+          style: i < oldWords.length ? oldWords[i].style : undefined,
+        }));
+        updateReelSubtitleSegment(reelId, segId, { text: newText, words: updatedWords });
+      }
+    },
+    [reel, reelId, updateReelSubtitleSegment]
+  );
 
   if (!reel) return null;
 
   const constraints = reel.subtitleConstraints;
-
   return (
     <div className="flex-1 min-w-0 overflow-y-auto">
       <div className="px-3 py-1.5 text-[10px] font-medium text-muted-foreground border-b border-border sticky top-0 bg-card z-10">
@@ -155,47 +477,50 @@ function SubtitleListEditor({ reelId }: { reelId: string }) {
         {reel.subtitleSegments.map((seg) => {
           const tooLong = seg.text.length > constraints.maxCharsPerBlock;
           const tooSlow = (seg.endMs - seg.startMs) > constraints.maxDurationMs;
-          const isSelected = selectedSubtitleId === seg.id;
+          const isSelected = selectedSubtitleIds.includes(seg.id);
 
           return (
-            <div
-              key={seg.id}
-              className={`flex items-start gap-2 px-3 py-1 text-xs cursor-pointer hover:bg-muted/30 ${
-                isSelected ? 'bg-yellow-500/10' : ''
-              } ${tooLong || tooSlow ? 'bg-yellow-950/10' : ''}`}
-              onClick={() => {
-                selectSubtitle(seg.id);
-                setCurrentTime(seg.startMs);
-              }}
-            >
-              <span className="text-[10px] text-muted-foreground whitespace-nowrap tabular-nums w-24 flex-shrink-0 self-start pt-0.5">
-                {formatTimestamp(seg.startMs)} - {formatTimestamp(seg.endMs)}
-              </span>
-              <textarea
-                className="flex-1 bg-transparent text-xs outline-none min-w-0 resize-none overflow-hidden"
-                value={seg.text}
-                rows={Math.max(1, seg.text.split('\n').length)}
-                onChange={(e) => updateReelSubtitleSegment(reelId, seg.id, { text: e.target.value })}
-                onClick={(e) => e.stopPropagation()}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    // Shift+Enter or just Enter both insert newline (textarea default)
-                    // Don't propagate to prevent other shortcuts
-                    e.stopPropagation();
-                  }
+            <div key={seg.id}>
+              <div
+                className={`flex items-start gap-2 px-3 py-1 text-xs cursor-pointer hover:bg-muted/30 ${
+                  isSelected ? 'bg-yellow-500/10' : ''
+                } ${tooLong || tooSlow ? 'bg-yellow-950/10' : ''}`}
+                onClick={() => {
+                  selectSubtitle(seg.id);
+                  setCurrentTime(seg.startMs);
                 }}
-              />
-              {tooLong && <span className="text-[9px] text-yellow-500 flex-shrink-0 self-start pt-0.5">{seg.text.length}ch</span>}
-              <button
-                className="p-0.5 text-muted-foreground hover:text-red-400 flex-shrink-0 self-start pt-0.5"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  deleteSubtitleSegment(reelId, seg.id);
-                }}
-                title="Delete subtitle"
               >
-                <Trash2 className="h-3 w-3" />
-              </button>
+                <span className="text-[10px] text-muted-foreground whitespace-nowrap tabular-nums w-24 flex-shrink-0 self-start pt-0.5">
+                  {formatTimestamp(seg.startMs)} - {formatTimestamp(seg.endMs)}
+                </span>
+                <textarea
+                  className="flex-1 bg-transparent text-xs outline-none min-w-0 resize-none overflow-hidden"
+                  value={seg.text}
+                  rows={Math.max(1, seg.text.split('\n').length)}
+                  onChange={(e) => handleTextChange(seg.id, e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.stopPropagation();
+                    }
+                  }}
+                />
+                {tooLong && <span className="text-[9px] text-yellow-500 flex-shrink-0 self-start pt-0.5">{seg.text.length}ch</span>}
+                <button
+                  className="p-0.5 text-muted-foreground hover:text-red-400 flex-shrink-0 self-start pt-0.5"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    deleteSubtitleSegment(reelId, seg.id);
+                  }}
+                  title="Delete subtitle"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </div>
+              {/* Word style editor for selected subtitle */}
+              {isSelected && seg.text.trim().length > 0 && (
+                <WordStyleEditor reelId={reelId} segId={seg.id} seg={seg} />
+              )}
             </div>
           );
         })}
@@ -391,6 +716,410 @@ function SubtitleConfigPanel({ reelId }: { reelId: string }) {
   );
 }
 
+/* ── Text clip config panel ─────────────────────────────────────────── */
+
+const FONT_FAMILIES = [
+  'Inter', 'Arial', 'Helvetica Neue', 'Helvetica', 'Georgia', 'Times New Roman',
+  'Courier New', 'Verdana', 'Impact', 'Comic Sans MS',
+  'Trebuchet MS', 'Palatino', 'Garamond', 'Bookman',
+  'Futura', 'Gill Sans', 'Lucida Grande', 'Lucida Console',
+  'Optima', 'Avenir', 'Avenir Next', 'Didot',
+  'American Typewriter', 'Rockwell', 'Copperplate',
+  'Menlo', 'Monaco', 'SF Pro Display', 'SF Pro Text',
+  'Baskerville', 'Cochin', 'Hoefler Text',
+];
+
+function TextClipConfigPanel({ reelId }: { reelId: string }) {
+  const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
+  const firstSelectedId = useReelStore((s) => s.selectedClipIds[0] ?? null);
+  const updateClip = useReelStore((s) => s.updateClip);
+
+  const clip = reel?.composition.clips.find((c) => c.id === firstSelectedId);
+  if (!clip || clip.type !== 'text') return null;
+
+  const ts = clip.textStyle ?? {
+    fontSize: 48,
+    fontFamily: 'Inter',
+    fontWeight: 400,
+    color: '#ffffff',
+    backgroundColor: undefined,
+    lineHeight: 1.2,
+    shadowColor: undefined,
+    shadowBlur: 0,
+    shadowX: 0,
+    shadowY: 0,
+  };
+
+  const pos = clip.overlayPosition ?? { x: 0.5, y: 0.5, width: 0.8 };
+
+  const updateTextStyle = (updates: Partial<NonNullable<typeof clip.textStyle>>) => {
+    updateClip(reelId, clip.id, {
+      textStyle: { ...ts, ...updates },
+    });
+  };
+
+  const updateOverlayPos = (updates: Partial<NonNullable<typeof clip.overlayPosition>>) => {
+    updateClip(reelId, clip.id, {
+      overlayPosition: { ...pos, ...updates },
+    });
+  };
+
+  return (
+    <div className="overflow-y-auto p-3 space-y-3">
+      <h3 className="text-xs font-medium text-orange-400">Text Overlay</h3>
+
+      {/* Text content */}
+      <div>
+        <label className="block text-[10px] text-muted-foreground mb-0.5">Content</label>
+        <textarea
+          className="w-full bg-muted/30 border border-border rounded px-2 py-1 text-xs outline-none resize-none"
+          value={clip.textContent ?? ''}
+          rows={3}
+          onChange={(e) => updateClip(reelId, clip.id, { textContent: e.target.value })}
+          placeholder="Enter text..."
+        />
+      </div>
+
+      {/* Font family */}
+      <div>
+        <label className="block text-[10px] text-muted-foreground mb-0.5">Font</label>
+        <select
+          className="w-full bg-muted/30 border border-border rounded px-2 py-1 text-xs outline-none"
+          value={ts.fontFamily}
+          onChange={(e) => updateTextStyle({ fontFamily: e.target.value })}
+        >
+          {FONT_FAMILIES.map((f) => (
+            <option key={f} value={f}>{f}</option>
+          ))}
+        </select>
+      </div>
+
+      {/* Font size */}
+      <div>
+        <label className="block text-[10px] text-muted-foreground mb-0.5">
+          Size: {ts.fontSize}px
+        </label>
+        <input
+          type="range" min={12} max={300} step={1}
+          value={ts.fontSize}
+          onChange={(e) => updateTextStyle({ fontSize: parseInt(e.target.value) })}
+          className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+        />
+      </div>
+
+      {/* Font weight */}
+      <div>
+        <label className="block text-[10px] text-muted-foreground mb-0.5">
+          Weight: {ts.fontWeight}
+        </label>
+        <input
+          type="range" min={100} max={900} step={100}
+          value={ts.fontWeight}
+          onChange={(e) => updateTextStyle({ fontWeight: parseInt(e.target.value) })}
+          className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+        />
+      </div>
+
+      {/* Colors */}
+      <div className="flex gap-3">
+        <div>
+          <label className="block text-[10px] text-muted-foreground mb-0.5">Color</label>
+          <input
+            type="color"
+            className="w-8 h-8 rounded cursor-pointer border border-border p-0"
+            value={ts.color}
+            onChange={(e) => updateTextStyle({ color: e.target.value })}
+          />
+        </div>
+        <div>
+          <label className="block text-[10px] text-muted-foreground mb-0.5">Background</label>
+          <div className="flex items-center gap-1">
+            <input
+              type="color"
+              className="w-8 h-8 rounded cursor-pointer border border-border p-0"
+              value={ts.backgroundColor ?? '#000000'}
+              onChange={(e) => updateTextStyle({ backgroundColor: e.target.value })}
+            />
+            {ts.backgroundColor && (
+              <button
+                className="text-[9px] text-muted-foreground hover:text-foreground"
+                onClick={() => updateTextStyle({ backgroundColor: undefined })}
+                title="Remove background"
+              >
+                x
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Line Height */}
+      <div>
+        <label className="block text-[10px] text-muted-foreground mb-0.5">
+          Line Height: {(ts.lineHeight ?? 1.2).toFixed(1)}
+        </label>
+        <input
+          type="range" min={0.8} max={3.0} step={0.1}
+          value={ts.lineHeight ?? 1.2}
+          onChange={(e) => updateTextStyle({ lineHeight: parseFloat(e.target.value) })}
+          className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+        />
+      </div>
+
+      {/* Shadow */}
+      <div>
+        <h4 className="text-[10px] text-muted-foreground mb-1">Shadow</h4>
+        <div className="flex items-center gap-2 mb-1.5">
+          <div>
+            <label className="block text-[10px] text-muted-foreground mb-0.5">Color</label>
+            <div className="flex items-center gap-1">
+              <input
+                type="color"
+                className="w-8 h-8 rounded cursor-pointer border border-border p-0"
+                value={ts.shadowColor ?? '#000000'}
+                onChange={(e) => updateTextStyle({ shadowColor: e.target.value })}
+              />
+              {ts.shadowColor && (
+                <button
+                  className="text-[9px] text-muted-foreground hover:text-foreground"
+                  onClick={() => updateTextStyle({ shadowColor: undefined, shadowBlur: 0, shadowX: 0, shadowY: 0 })}
+                  title="Remove shadow"
+                >
+                  x
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <div>
+            <label className="block text-[10px] text-muted-foreground mb-0.5">
+              Blur: {ts.shadowBlur ?? 0}
+            </label>
+            <input
+              type="range" min={0} max={20} step={1}
+              value={ts.shadowBlur ?? 0}
+              onChange={(e) => updateTextStyle({ shadowBlur: parseInt(e.target.value), shadowColor: ts.shadowColor || '#000000' })}
+              className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] text-muted-foreground mb-0.5">
+              X: {ts.shadowX ?? 0}
+            </label>
+            <input
+              type="range" min={-10} max={10} step={1}
+              value={ts.shadowX ?? 0}
+              onChange={(e) => updateTextStyle({ shadowX: parseInt(e.target.value), shadowColor: ts.shadowColor || '#000000' })}
+              className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] text-muted-foreground mb-0.5">
+              Y: {ts.shadowY ?? 0}
+            </label>
+            <input
+              type="range" min={-10} max={10} step={1}
+              value={ts.shadowY ?? 0}
+              onChange={(e) => updateTextStyle({ shadowY: parseInt(e.target.value), shadowColor: ts.shadowColor || '#000000' })}
+              className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Position */}
+      <div>
+        <h4 className="text-[10px] text-muted-foreground mb-1">Position</h4>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="block text-[10px] text-muted-foreground mb-0.5">
+              X: {Math.round(pos.x * 100)}%
+            </label>
+            <input
+              type="range" min={0} max={100} step={1}
+              value={Math.round(pos.x * 100)}
+              onChange={(e) => updateOverlayPos({ x: parseInt(e.target.value) / 100 })}
+              className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] text-muted-foreground mb-0.5">
+              Y: {Math.round(pos.y * 100)}%
+            </label>
+            <input
+              type="range" min={0} max={100} step={1}
+              value={Math.round(pos.y * 100)}
+              onChange={(e) => updateOverlayPos({ y: parseInt(e.target.value) / 100 })}
+              className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+            />
+          </div>
+        </div>
+        <div>
+          <label className="block text-[10px] text-muted-foreground mb-0.5">
+            Width: {Math.round(pos.width * 100)}%
+          </label>
+          <input
+            type="range" min={10} max={100} step={1}
+            value={Math.round(pos.width * 100)}
+            onChange={(e) => updateOverlayPos({ width: parseInt(e.target.value) / 100 })}
+            className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+          />
+        </div>
+      </div>
+
+      {/* Preview */}
+      <div>
+        <label className="block text-[10px] text-muted-foreground mb-0.5">Preview</label>
+        <div
+          className="relative rounded border border-border overflow-hidden bg-black"
+          style={{ height: 80 }}
+        >
+          <span
+            style={{
+              position: 'absolute',
+              left: `${pos.x * 100}%`,
+              top: `${pos.y * 100}%`,
+              transform: 'translate(-50%, -50%)',
+              maxWidth: `${pos.width * 100}%`,
+              fontFamily: ts.fontFamily,
+              fontSize: Math.min(24, ts.fontSize * 0.3),
+              fontWeight: ts.fontWeight,
+              color: ts.color,
+              backgroundColor: ts.backgroundColor ?? undefined,
+              padding: ts.backgroundColor ? '2px 4px' : undefined,
+              borderRadius: ts.backgroundColor ? 2 : undefined,
+              textAlign: 'center',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              lineHeight: ts.lineHeight ?? 1.2,
+              textShadow: ts.shadowColor
+                ? `${ts.shadowX ?? 0}px ${ts.shadowY ?? 0}px ${ts.shadowBlur ?? 0}px ${ts.shadowColor}`
+                : undefined,
+            }}
+          >
+            {clip.textContent || 'Text'}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Image/GIF clip config panel ────────────────────────────────────── */
+
+function ImageClipConfigPanel({ reelId }: { reelId: string }) {
+  const params = useParams();
+  const projectId = params?.id as string | undefined;
+  const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
+  const firstSelectedId = useReelStore((s) => s.selectedClipIds[0] ?? null);
+  const updateClip = useReelStore((s) => s.updateClip);
+
+  const clip = reel?.composition.clips.find((c) => c.id === firstSelectedId);
+  if (!clip || (clip.type !== 'image' && clip.type !== 'gif')) return null;
+
+  const pos = clip.overlayPosition ?? { x: 0.5, y: 0.5, width: 0.8 };
+  const opacity = clip.opacity ?? 1;
+
+  const updateOverlayPos = (updates: Partial<{ x: number; y: number; width: number }>) => {
+    updateClip(reelId, clip.id, {
+      overlayPosition: { ...pos, ...updates },
+    });
+  };
+
+  return (
+    <div className="overflow-y-auto p-3 space-y-3">
+      <h3 className="text-xs font-medium text-purple-400">Image Overlay</h3>
+
+      {/* Thumbnail preview with position indicator */}
+      <div>
+        <label className="block text-[10px] text-muted-foreground mb-0.5">Preview</label>
+        <div
+          className="relative rounded border border-border overflow-hidden bg-black"
+          style={{ height: 120, aspectRatio: '9/16', margin: '0 auto' }}
+        >
+          {projectId && (
+            <img
+              src={`/api/projects/${projectId}/reels/file?name=${encodeURIComponent(clip.fileName)}`}
+              alt={clip.originalName}
+              style={{
+                position: 'absolute',
+                left: `${pos.x * 100}%`,
+                top: `${pos.y * 100}%`,
+                transform: 'translate(-50%, -50%)',
+                maxWidth: `${pos.width * 100}%`,
+                maxHeight: '100%',
+                objectFit: 'contain',
+                opacity,
+              }}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* Position */}
+      <div>
+        <h4 className="text-[10px] text-muted-foreground mb-1">Position</h4>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="block text-[10px] text-muted-foreground mb-0.5">
+              X: {Math.round(pos.x * 100)}%
+            </label>
+            <input
+              type="range" min={0} max={100} step={1}
+              value={Math.round(pos.x * 100)}
+              onChange={(e) => updateOverlayPos({ x: parseInt(e.target.value) / 100 })}
+              className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] text-muted-foreground mb-0.5">
+              Y: {Math.round(pos.y * 100)}%
+            </label>
+            <input
+              type="range" min={0} max={100} step={1}
+              value={Math.round(pos.y * 100)}
+              onChange={(e) => updateOverlayPos({ y: parseInt(e.target.value) / 100 })}
+              className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Width */}
+      <div>
+        <label className="block text-[10px] text-muted-foreground mb-0.5">
+          Width: {Math.round(pos.width * 100)}%
+        </label>
+        <input
+          type="range" min={10} max={100} step={1}
+          value={Math.round(pos.width * 100)}
+          onChange={(e) => updateOverlayPos({ width: parseInt(e.target.value) / 100 })}
+          className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+        />
+      </div>
+
+      {/* Opacity */}
+      <div>
+        <label className="block text-[10px] text-muted-foreground mb-0.5">
+          Opacity: {Math.round(opacity * 100)}%
+        </label>
+        <input
+          type="range" min={0} max={100} step={1}
+          value={Math.round(opacity * 100)}
+          onChange={(e) => updateClip(reelId, clip.id, { opacity: parseInt(e.target.value) / 100 })}
+          className="w-full h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+        />
+      </div>
+
+      {/* File info */}
+      <div className="text-[10px] text-muted-foreground">
+        <span>{clip.originalName}</span>
+      </div>
+    </div>
+  );
+}
+
 /* ── Main timeline view layout ──────────────────────────────────────── */
 /*
   ┌──────────────────────────────────────────────────────────────┐
@@ -403,7 +1132,16 @@ function SubtitleConfigPanel({ reelId }: { reelId: string }) {
 
 export function ReelTimelineView({ reelId, videoSrc, audioSrc }: ReelTimelineViewProps) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
+  const selectedClipIds = useReelStore((s) => s.selectedClipIds);
+
   if (!reel) return null;
+
+  const firstSelectedId = selectedClipIds[0] ?? null;
+  const selectedClip = firstSelectedId
+    ? reel.composition.clips.find((c) => c.id === firstSelectedId)
+    : null;
+  const showTextPanel = selectedClip?.type === 'text';
+  const showImagePanel = selectedClip?.type === 'image' || selectedClip?.type === 'gif';
 
   return (
     <div className="flex h-full flex-col">
@@ -424,19 +1162,27 @@ export function ReelTimelineView({ reelId, videoSrc, audioSrc }: ReelTimelineVie
         </div>
       </div>
 
-      {/* Bottom row: subtitles (50%) | style preview + settings (50%) */}
+      {/* Bottom row: subtitles (50%) | right panel (50%) */}
       <div className="flex flex-1 min-h-0 border-t border-border">
         {/* Left: subtitle list */}
         <div className="flex-1 min-w-0 flex flex-col border-r border-border">
           <SubtitleListEditor reelId={reelId} />
         </div>
 
-        {/* Right: style preview + settings */}
+        {/* Right: clip config OR subtitle style */}
         <div className="flex-1 min-w-0 flex flex-col overflow-y-auto">
-          <div className="p-3 border-b border-border">
-            <SubtitleStylePreview style={reel.subtitleStyle} />
-          </div>
-          <SubtitleConfigPanel reelId={reelId} />
+          {showTextPanel ? (
+            <TextClipConfigPanel reelId={reelId} />
+          ) : showImagePanel ? (
+            <ImageClipConfigPanel reelId={reelId} />
+          ) : (
+            <>
+              <div className="p-3 border-b border-border">
+                <SubtitleStylePreview style={reel.subtitleStyle} />
+              </div>
+              <SubtitleConfigPanel reelId={reelId} />
+            </>
+          )}
         </div>
       </div>
     </div>

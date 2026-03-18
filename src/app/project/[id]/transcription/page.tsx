@@ -222,6 +222,16 @@ export default function TranscriptionPage() {
               ? splitLongSegments(event.segments, c.maxCharsPerBlock, c.maxDurationMs)
               : event.segments;
             setReinterpretResults(corrected);
+            // Persist bits if the LLM identified any
+            if (event.bits && Array.isArray(event.bits) && event.bits.length > 0) {
+              fetch(`/api/projects/${projectId}/subtitles`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bits: event.bits }),
+              }).catch(() => {});
+              updateCurrentProject({ bits: event.bits });
+              toast({ title: `${event.bits.length} comedy bits identified (visible in Reels)` });
+            }
           } else if (event.type === 'error') {
             setReinterpretError(event.error);
           }
