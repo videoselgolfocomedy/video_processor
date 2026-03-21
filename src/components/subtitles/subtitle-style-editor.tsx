@@ -338,7 +338,7 @@ export function SubtitleStyleEditor({
               label="Margin"
               value={style.marginBottom}
               min={0}
-              max={300}
+              max={500}
               step={5}
               unit="px"
               onChange={(v) => update('marginBottom', v)}

@@ -252,10 +252,38 @@ function buildDefaultOverride(style: SubtitleStyle): string {
   return `{\\c${cssColorToASS(style.color)}\\fs${style.fontSize}\\b${style.fontWeight >= 700 ? 1 : 0}}`;
 }
 
+/**
+ * Find the per-word style for displayWord at index i.
+ * Uses index-based lookup first, then falls back to text matching
+ * (handles cases where seg.text word count differs from seg.words length).
+ */
+function findWordStyle(
+  displayWord: string,
+  i: number,
+  wordStyles: SubtitleWord[],
+  textTransform: SubtitleStyle['textTransform'],
+): SubtitleWord['style'] | undefined {
+  // 1. Direct index match
+  if (i < wordStyles.length && wordStyles[i].style) {
+    return wordStyles[i].style;
+  }
+  // 2. Text match fallback — find a word entry whose text contains this display word
+  const normalized = applyTransform(displayWord, textTransform).toLowerCase();
+  for (const ws of wordStyles) {
+    if (!ws.style) continue;
+    const wsNorm = applyTransform(ws.text, textTransform).toLowerCase();
+    // Exact match or the word entry contains this display word (handles multi-word entries)
+    if (wsNorm === normalized || wsNorm.split(/\s+/).includes(normalized)) {
+      return ws.style;
+    }
+  }
+  return undefined;
+}
+
 /** Apply per-word style: returns override prefix + text (no suffix reset) */
-function styledWord(ws: SubtitleWord | undefined, text: string, style: SubtitleStyle, hasAnyStyles: boolean): string {
+function styledWord(ws: SubtitleWord['style'] | undefined, text: string, style: SubtitleStyle, hasAnyStyles: boolean): string {
   if (!hasAnyStyles) return text;
-  const override = ws?.style ? (buildWordOverride(ws.style) || buildDefaultOverride(style)) : buildDefaultOverride(style);
+  const override = ws ? (buildWordOverride(ws) || buildDefaultOverride(style)) : buildDefaultOverride(style);
   return override + text;
 }
 
@@ -274,15 +302,11 @@ function buildSegTextWithStyles(seg: SubtitleSegment, style: SubtitleStyle): str
     return escapeASSText(applyTransform(seg.text, style.textTransform));
   }
 
-  const defaultOverride = buildDefaultOverride(style);
-
   return displayWords.map((dw, i) => {
-    const ws = i < wordStyles.length ? wordStyles[i] : undefined;
+    const wsStyle = findWordStyle(dw, i, wordStyles, style.textTransform);
     const transformed = escapeASSText(applyTransform(dw, style.textTransform));
     const sep = i > 0 ? (newlineBefore.has(i) ? '\\N' : ' ') : '';
-    // Each word gets explicit tags: custom style override OR default style reset
-    const override = ws?.style ? (buildWordOverride(ws.style) || defaultOverride) : defaultOverride;
-    return sep + override + transformed;
+    return sep + styledWord(wsStyle, transformed, style, true);
   }).join('');
 }
 
@@ -342,9 +366,9 @@ function generateTypewriter(
 
     for (let i = 0; i < wordCount; i++) {
       const accParts = displayWords.slice(0, i + 1).map((dw, j) => {
-        const ws = j < words.length ? words[j] : undefined;
+        const wsStyle = findWordStyle(dw, j, words, style.textTransform);
         const t = escapeASSText(applyTransform(dw, style.textTransform));
-        return styledWord(ws, t, style, hasStyles);
+        return styledWord(wsStyle, t, style, hasStyles);
       });
       const accumulated = joinWordsASS(accParts, newlineBefore);
       const wi = i < words.length ? words[i] : words[words.length - 1];
@@ -387,9 +411,9 @@ function generateWordHighlight(
 
       const parts: string[] = [];
       for (let j = 0; j < wordCount; j++) {
-        const ws = j < words.length ? words[j] : undefined;
+        const wsStyle = findWordStyle(displayWords[j], j, words, style.textTransform);
         let w = escapeASSText(applyTransform(displayWords[j], style.textTransform));
-        w = styledWord(ws, w, style, hasStyles);
+        w = styledWord(wsStyle, w, style, hasStyles);
         if (j === i) {
           parts.push(`{\\1c${highlightASS}}${w}`);
         } else {
@@ -435,9 +459,9 @@ function generatePop(
 
       const parts: string[] = [];
       for (let j = 0; j <= i; j++) {
-        const ws = j < words.length ? words[j] : undefined;
+        const wsStyle = findWordStyle(displayWords[j], j, words, style.textTransform);
         let w = escapeASSText(applyTransform(displayWords[j], style.textTransform));
-        w = styledWord(ws, w, style, hasStyles);
+        w = styledWord(wsStyle, w, style, hasStyles);
         if (j === i) {
           parts.push(
             `{\\fscx50\\fscy50\\t(0,${halfMs},\\fscx120\\fscy120)\\t(${halfMs},${fullMs},\\fscx100\\fscy100)}${w}`
@@ -484,9 +508,9 @@ function generatePunchline(
 
       // Accumulate all words up to i
       const parts = displayWords.slice(0, i + 1).map((dw, j) => {
-        const ws = j < words.length ? words[j] : undefined;
+        const wsStyle = findWordStyle(dw, j, words, style.textTransform);
         const t = escapeASSText(applyTransform(dw, style.textTransform));
-        return styledWord(ws, t, style, hasStyles);
+        return styledWord(wsStyle, t, style, hasStyles);
       });
 
       lines.push({ start, end, text: joinWordsASS(parts, newlineBefore) });

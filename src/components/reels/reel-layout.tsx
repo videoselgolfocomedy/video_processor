@@ -9,7 +9,7 @@ import { ReelRightPanel } from './reel-right-panel';
 import { BitsSuggestionPanel } from './bits-suggestion-panel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Save, Plus, X, Copy, Trash2, ArrowRight, Sparkles } from 'lucide-react';
+import { Save, Plus, Copy, Trash2, ArrowRight, Sparkles } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 interface ReelLayoutProps {
@@ -209,21 +209,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
                 ) : (
                   <span>{reel.name}</span>
                 )}
-                {reel.id === activeReelId && (
-                  <X
-                    className="h-3 w-3 text-muted-foreground hover:text-foreground ml-1 cursor-pointer"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (reels.length === 1) {
-                        if (window.confirm('Delete the only reel? This will clear all edits.')) {
-                          deleteReel(reel.id);
-                        }
-                      } else {
-                        deleteReel(reel.id);
-                      }
-                    }}
-                  />
-                )}
+                {/* No X button on tabs — delete only via right-click context menu with confirmation */}
               </button>
 
               {/* Context menu */}
@@ -251,10 +237,14 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
                   </button>
                   <button
                     className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted text-left text-red-400"
-                    onClick={(e) => {
+                    onClick={async (e) => {
                       e.stopPropagation();
-                      deleteReel(reel.id);
                       setContextMenuId(null);
+                      if (window.confirm(`Delete reel "${reel.name}"? This cannot be undone.`)) {
+                        deleteReel(reel.id);
+                        // Immediate save so deletion persists even if user closes the page
+                        await onSave();
+                      }
                     }}
                   >
                     <Trash2 className="h-3 w-3" /> Delete
