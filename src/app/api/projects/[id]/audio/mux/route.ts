@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { execFile, ChildProcess } from 'child_process';
+import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs/promises';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
@@ -56,14 +56,14 @@ export async function POST(
   try {
     await fs.access(audioPath);
   } catch {
-    return NextResponse.json({ error: 'Audio file not found' }, { status: 404 });
+    return NextResponse.json({ error: `Audio file not found: ${safeName}` }, { status: 404 });
   }
 
   // Verify video file exists
   try {
     await fs.access(videoPath);
   } catch {
-    return NextResponse.json({ error: 'Video file not found' }, { status: 404 });
+    return NextResponse.json({ error: `Video file not found: ${cameraSource.storedName}` }, { status: 404 });
   }
 
   // Ensure export dir exists
@@ -74,7 +74,7 @@ export async function POST(
   jobManager.startJob(job.id);
   jobManager.updateProgress(job.id, 5, 'Iniciando muxado de audio en video...');
 
-  // Run FFmpeg in background
+  // Run FFmpeg with spawn (not execFile) to avoid maxBuffer overflow on long videos
   const ffmpeg = getFFmpegPath();
   const args = [
     '-i', videoPath,
@@ -90,20 +90,24 @@ export async function POST(
     outputPath,
   ];
 
-  const proc: ChildProcess = execFile(ffmpeg, args);
+  const proc = spawn(ffmpeg, args, { stdio: ['ignore', 'pipe', 'pipe'] });
   jobManager.setProcess(job.id, proc);
 
   let duration = 0;
+  let stderrLog = '';
 
-  proc.stderr?.on('data', (data: Buffer) => {
+  proc.stderr.on('data', (data: Buffer) => {
     const text = data.toString();
+    stderrLog += text;
+    // Keep only last 4KB of stderr for error reporting
+    if (stderrLog.length > 4096) stderrLog = stderrLog.slice(-4096);
     const match = text.match(/Duration:\s*(\d+):(\d+):(\d+)/);
     if (match) {
       duration = parseInt(match[1]) * 3600 + parseInt(match[2]) * 60 + parseInt(match[3]);
     }
   });
 
-  proc.stdout?.on('data', (data: Buffer) => {
+  proc.stdout.on('data', (data: Buffer) => {
     const lines = data.toString().split('\n');
     for (const line of lines) {
       if (line.startsWith('out_time_us=')) {
@@ -131,12 +135,14 @@ export async function POST(
       }
       jobManager.completeJob(job.id, { outputPath });
     } else {
-      jobManager.failJob(job.id, `FFmpeg mux exited with code ${code}`);
+      // Include last stderr lines for debugging
+      const lastLines = stderrLog.trim().split('\n').slice(-5).join('\n');
+      jobManager.failJob(job.id, `FFmpeg mux falló (code ${code}):\n${lastLines}`);
     }
   });
 
   proc.on('error', (err) => {
-    jobManager.failJob(job.id, `Failed to start FFmpeg: ${err.message}`);
+    jobManager.failJob(job.id, `No se pudo iniciar FFmpeg: ${err.message}`);
   });
 
   return NextResponse.json({ jobId: job.id });
