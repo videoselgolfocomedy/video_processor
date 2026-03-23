@@ -338,8 +338,9 @@ export default function TranscriptionPage() {
     : videoDurationMs || 10000;
 
   // Video preview URL — prefer muxed video (has processed audio baked in)
+  // Add cache buster to avoid stale cached video after re-mux
   const videoSrc = useMuxedVideo && muxedVideoName
-    ? `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(muxedVideoName)}`
+    ? `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(muxedVideoName)}&v=${muxedVideoName}`
     : videoSource
       ? `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(videoSource.storedName)}`
       : undefined;
