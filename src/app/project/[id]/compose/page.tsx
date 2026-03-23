@@ -25,10 +25,20 @@ export default function ComposePage() {
 
     const durationMs = getDurationMs(currentProject);
 
+    const videoFileName = getVideoFileName(currentProject);
+    const audioFileName = getAudioFileName(currentProject);
+
     loadComposition(
       currentProject.composition,
       currentProject.transcription.segments,
-      durationMs
+      durationMs,
+      currentProject.youtubeSubtitles.style,
+      currentProject.youtubeSubtitles.stylePreset,
+      currentProject.transcription.constraints,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (currentProject.composition as any).versions,
+      videoFileName,
+      audioFileName,
     );
     setLoaded(true);
   }, [currentProject, loaded, loadComposition]);
@@ -43,7 +53,9 @@ export default function ComposePage() {
 
   // Build video/audio source URLs
   const videoSrc = getVideoSrc(currentProject, projectId);
-  const audioSrc = getAudioSrc(currentProject, projectId);
+  // Only pass separate audioSrc when NOT using muxed video (muxed already has audio baked in)
+  const hasMuxedVideo = !!currentProject.sync.muxedVideoPath;
+  const audioSrc = hasMuxedVideo ? undefined : getAudioSrc(currentProject, projectId);
   const subtitleStyle = currentProject.youtubeSubtitles.style;
 
   return (
@@ -88,4 +100,19 @@ function getAudioSrc(project: { sync: { mixedAudioPath?: string; selectedAudioPa
   if (!audioPath) return undefined;
   const name = audioPath.split('/').pop();
   return `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(name || '')}`;
+}
+
+// Get the raw file name (for use as clip fileName in the store)
+function getVideoFileName(project: { sync: { muxedVideoPath?: string }; sources: Array<{ type?: string; storedName: string }> }): string | undefined {
+  if (project.sync.muxedVideoPath) {
+    return project.sync.muxedVideoPath.split('/').pop();
+  }
+  const videoSource = project.sources.find((s) => (s as { type: string }).type === 'video');
+  return videoSource?.storedName;
+}
+
+function getAudioFileName(project: { sync: { mixedAudioPath?: string; selectedAudioPath?: string } }): string | undefined {
+  const audioPath = project.sync.mixedAudioPath || project.sync.selectedAudioPath;
+  if (!audioPath) return undefined;
+  return audioPath.split('/').pop();
 }

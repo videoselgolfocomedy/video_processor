@@ -1,12 +1,15 @@
 'use client';
 
-import { useCallback, useState, useEffect } from 'react';
+import { useCallback, useState, useEffect, useMemo } from 'react';
 import { useComposeStore } from '@/stores/compose-store';
-import { MediaBin } from './media-bin';
 import { ComposePreview } from './compose-preview';
 import { ClipProperties } from './clip-properties';
 import { MultiTrackTimeline } from './multi-track-timeline';
-import { YouTubeSubtitlePanel } from './youtube-subtitle-panel';
+import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { RefreshCw, Scissors } from 'lucide-react';
+import { splitLongSegments } from '@/lib/subtitle-utils';
 import type { SubtitleStyle } from '@/types/project';
 
 interface ComposeLayoutProps {
@@ -20,15 +23,38 @@ export function ComposeLayout({
   projectId,
   videoSrc,
   audioSrc,
-  subtitleStyle,
 }: ComposeLayoutProps) {
   const [saving, setSaving] = useState(false);
-  const [rightPanel, setRightPanel] = useState<'properties' | 'subtitles'>('properties');
 
   const getCompositionState = useComposeStore((s) => s.getCompositionState);
   const subtitleSegments = useComposeStore((s) => s.subtitleSegments);
   const markClean = useComposeStore((s) => s.markClean);
-  const selectedClipId = useComposeStore((s) => s.selectedClipId);
+  const selectedClipIds = useComposeStore((s) => s.selectedClipIds);
+  const clips = useComposeStore((s) => s.clips);
+  const storeSubtitleStyle = useComposeStore((s) => s.subtitleStyle);
+  const subtitleStylePreset = useComposeStore((s) => s.subtitleStylePreset);
+  const subtitleConstraints = useComposeStore((s) => s.subtitleConstraints);
+  const setSubtitleStyle = useComposeStore((s) => s.setSubtitleStyle);
+  const setSubtitlePreset = useComposeStore((s) => s.setSubtitlePreset);
+  const setSubtitleConstraints = useComposeStore((s) => s.setSubtitleConstraints);
+  const regenerateSubtitles = useComposeStore((s) => s.regenerateSubtitles);
+  const versions = useComposeStore((s) => s.versions);
+
+  // Determine what the first selected clip is (for right panel context)
+  const firstSelectedClip = useMemo(() => {
+    if (selectedClipIds.length === 0) return null;
+    return clips.find((c) => c.id === selectedClipIds[0]) ?? null;
+  }, [selectedClipIds, clips]);
+
+  // Right panel mode: derived from selection
+  const panelMode = useMemo(() => {
+    if (firstSelectedClip) {
+      if (firstSelectedClip.type === 'text') return 'text-clip' as const;
+      if (firstSelectedClip.type === 'image' || firstSelectedClip.type === 'gif') return 'image-clip' as const;
+      return 'clip-properties' as const;
+    }
+    return 'subtitles' as const;
+  }, [firstSelectedClip]);
 
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -37,10 +63,15 @@ export function ComposeLayout({
       await fetch(`/api/projects/${projectId}/compose`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(compositionState),
+        body: JSON.stringify({
+          ...compositionState,
+          subtitleStyle: storeSubtitleStyle,
+          subtitleStylePreset,
+          subtitleConstraints,
+          versions,
+        }),
       });
 
-      // Also save subtitle segment changes
       await fetch(`/api/projects/${projectId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -55,7 +86,7 @@ export function ComposeLayout({
     } finally {
       setSaving(false);
     }
-  }, [projectId, getCompositionState, subtitleSegments, markClean]);
+  }, [projectId, getCompositionState, subtitleSegments, markClean, storeSubtitleStyle, subtitleStylePreset, subtitleConstraints, versions]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -67,39 +98,105 @@ export function ComposeLayout({
         return;
       }
 
+      const store = useComposeStore.getState();
+
+      // Space: Play/Pause
       if (e.key === ' ') {
         e.preventDefault();
-        const store = useComposeStore.getState();
         store.setIsPlaying(!store.isPlaying);
+        return;
       }
 
+      // Delete/Backspace: delete selected (Shift = ripple delete)
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        const store = useComposeStore.getState();
-        if (store.selectedClipId) {
-          store.removeClip(store.selectedClipId);
+        e.preventDefault();
+        if (e.shiftKey) {
+          store.rippleDeleteSelected();
+        } else {
+          store.deleteSelected();
         }
+        return;
       }
 
+      // Ctrl+Z: undo, Ctrl+Shift+Z: redo
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
-        useComposeStore.getState().undo();
+        if (e.shiftKey) { store.redo(); } else { store.undo(); }
+        return;
       }
 
+      // Ctrl+Y: redo
       if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
         e.preventDefault();
-        useComposeStore.getState().redo();
+        store.redo();
+        return;
       }
 
+      // Ctrl+S: save
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
         handleSave();
+        return;
       }
 
-      // S key for split
-      if (e.key === 's' || e.key === 'S') {
-        if (!e.ctrlKey && !e.metaKey) {
-          useComposeStore.getState().splitClipAtPlayhead();
+      // S: split selected clip, Shift+S: split all tracks
+      if (e.key === 's' && !e.ctrlKey && !e.metaKey) {
+        store.splitClipAtPlayhead();
+        return;
+      }
+      if (e.key === 'S' && !e.ctrlKey && !e.metaKey) {
+        store.splitAllAtPlayhead();
+        return;
+      }
+
+      // Q: trim in to playhead
+      if (e.key === 'q' || e.key === 'Q') {
+        if (store.selectedClipIds.length === 1) {
+          const clip = store.clips.find((c) => c.id === store.selectedClipIds[0]);
+          if (clip && store.currentTimeMs > clip.timelineStartMs && store.currentTimeMs < clip.timelineEndMs) {
+            store.saveSnapshot();
+            store.trimClip(clip.id, 'in', store.currentTimeMs);
+          }
         }
+        return;
+      }
+
+      // W: trim out to playhead
+      if (e.key === 'w' || e.key === 'W') {
+        if (store.selectedClipIds.length === 1) {
+          const clip = store.clips.find((c) => c.id === store.selectedClipIds[0]);
+          if (clip && store.currentTimeMs > clip.timelineStartMs && store.currentTimeMs < clip.timelineEndMs) {
+            store.saveSnapshot();
+            store.trimClip(clip.id, 'out', store.currentTimeMs);
+          }
+        }
+        return;
+      }
+
+      // G: collapse gap at playhead
+      if (e.key === 'g' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        store.collapseGapAtPlayhead();
+        return;
+      }
+
+      // Shift+G: close gap for selected
+      if (e.key === 'G' && !e.ctrlKey && !e.metaKey) {
+        store.closeGapForSelected();
+        return;
+      }
+
+      // Arrow keys: seek (Shift = fine 100ms, normal = 1s)
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const step = e.shiftKey ? 100 : 1000;
+        store.setCurrentTime(Math.max(0, store.currentTimeMs - step));
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        const step = e.shiftKey ? 100 : 1000;
+        store.setCurrentTime(Math.min(store.durationMs, store.currentTimeMs + step));
+        return;
       }
     };
 
@@ -107,62 +204,141 @@ export function ComposeLayout({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleSave]);
 
+  // Constraint violations
+  const violations = subtitleSegments.filter(
+    (s) => s.text.length > subtitleConstraints.maxCharsPerBlock || (s.endMs - s.startMs) > subtitleConstraints.maxDurationMs
+  ).length;
+
+  const handleAutoSplit = useCallback(() => {
+    const { maxCharsPerBlock, maxDurationMs } = subtitleConstraints;
+    const split = splitLongSegments(subtitleSegments, maxCharsPerBlock, maxDurationMs);
+    // Use store's setSubtitleSegments to avoid undo complexity
+    useComposeStore.getState().saveSnapshot();
+    useComposeStore.getState().setSubtitleSegments(split);
+  }, [subtitleConstraints, subtitleSegments]);
+
   return (
     <div className="flex h-full flex-col">
-      {/* Top section: Media Bin + Preview + Right Panel */}
+      {/* Top section: Preview + Right Panel */}
       <div className="flex flex-1 min-h-0">
-        {/* Media Bin */}
-        <div className="w-56 flex-shrink-0">
-          <MediaBin projectId={projectId} />
-        </div>
-
         {/* Preview area (16:9 YouTube only) */}
         <div className="flex-1 flex flex-col min-w-0">
           <ComposePreview
             projectId={projectId}
             videoSrc={videoSrc}
             audioSrc={audioSrc}
-            subtitleStyle={subtitleStyle}
+            subtitleStyle={storeSubtitleStyle}
           />
         </div>
 
-        {/* Right Panel: Clip Properties or Subtitle Style */}
+        {/* Right Panel: context-sensitive */}
         <div className="w-64 flex-shrink-0 border-l border-border bg-card overflow-auto flex flex-col">
-          {/* Tab switcher */}
-          <div className="flex border-b border-border">
-            <button
-              className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
-                rightPanel === 'properties'
-                  ? 'border-b-2 border-primary text-foreground'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-              onClick={() => setRightPanel('properties')}
-            >
-              Properties
-            </button>
-            <button
-              className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
-                rightPanel === 'subtitles'
-                  ? 'border-b-2 border-primary text-foreground'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-              onClick={() => setRightPanel('subtitles')}
-            >
-              Subtitles
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-auto">
-            {rightPanel === 'properties' && selectedClipId ? (
+          {panelMode === 'clip-properties' && firstSelectedClip && (
+            <div className="flex-1 overflow-auto">
               <ClipProperties />
-            ) : rightPanel === 'properties' && !selectedClipId ? (
-              <div className="p-3 text-xs text-muted-foreground text-center mt-8">
-                Select a clip to edit properties
+            </div>
+          )}
+
+          {panelMode === 'text-clip' && firstSelectedClip && (
+            <div className="flex-1 overflow-auto">
+              <ClipProperties />
+            </div>
+          )}
+
+          {panelMode === 'image-clip' && firstSelectedClip && (
+            <div className="flex-1 overflow-auto">
+              <ClipProperties />
+            </div>
+          )}
+
+          {panelMode === 'subtitles' && (
+            <div className="flex-1 overflow-auto">
+              {/* Subtitle position quick controls */}
+              <div className="p-3 border-b border-border">
+                <h3 className="text-xs font-medium mb-2">Subtitle Position</h3>
+                <div className="flex gap-1 mb-2">
+                  {(['top', 'center', 'bottom'] as const).map((pos) => (
+                    <Button
+                      key={pos}
+                      variant={storeSubtitleStyle.position === pos ? 'default' : 'outline'}
+                      size="sm"
+                      className="flex-1 text-[10px] h-7"
+                      onClick={() => setSubtitleStyle({ ...storeSubtitleStyle, position: pos })}
+                    >
+                      {pos}
+                    </Button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-[10px] text-muted-foreground whitespace-nowrap">Margin</label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={400}
+                    step={5}
+                    value={storeSubtitleStyle.marginBottom}
+                    onChange={(e) => setSubtitleStyle({ ...storeSubtitleStyle, marginBottom: parseInt(e.target.value) })}
+                    className="flex-1 h-1.5 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+                  />
+                  <span className="text-[10px] text-muted-foreground w-8 text-right">{storeSubtitleStyle.marginBottom}px</span>
+                </div>
               </div>
-            ) : (
-              <YouTubeSubtitlePanel />
-            )}
-          </div>
+
+              {/* Subtitle Style Editor */}
+              <div className="p-3 border-b border-border">
+                <SubtitleStyleEditor
+                  style={storeSubtitleStyle}
+                  activePreset={subtitleStylePreset}
+                  onChange={(style) => setSubtitleStyle(style)}
+                  onPresetChange={(presetId, style) => setSubtitlePreset(presetId, style)}
+                />
+              </div>
+
+              {/* Constraints */}
+              <div className="p-3">
+                <h3 className="text-xs font-medium mb-2">Constraints</h3>
+                <div className="flex gap-3">
+                  <div className="flex-1">
+                    <label className="block text-[10px] text-muted-foreground mb-1">Max chars</label>
+                    <Input
+                      type="number" min={15} max={100}
+                      value={subtitleConstraints.maxCharsPerBlock}
+                      onChange={(e) => setSubtitleConstraints({
+                        ...subtitleConstraints,
+                        maxCharsPerBlock: parseInt(e.target.value) || 80,
+                      })}
+                      className="h-7 text-xs"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <label className="block text-[10px] text-muted-foreground mb-1">Max ms</label>
+                    <Input
+                      type="number" min={1000} max={15000} step={500}
+                      value={subtitleConstraints.maxDurationMs}
+                      onChange={(e) => setSubtitleConstraints({
+                        ...subtitleConstraints,
+                        maxDurationMs: parseInt(e.target.value) || 7000,
+                      })}
+                      className="h-7 text-xs"
+                    />
+                  </div>
+                </div>
+                <div className="flex gap-2 mt-2">
+                  <Button
+                    size="sm" variant="outline" className="text-xs"
+                    onClick={regenerateSubtitles}
+                  >
+                    <RefreshCw className="mr-1 h-3 w-3" /> Regenerate
+                  </Button>
+                  {violations > 0 && (
+                    <Button size="sm" variant="outline" className="text-xs" onClick={handleAutoSplit}>
+                      <Scissors className="mr-1 h-3 w-3" /> Auto-split ({violations})
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

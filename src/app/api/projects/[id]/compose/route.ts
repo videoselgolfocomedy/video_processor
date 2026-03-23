@@ -25,8 +25,30 @@ export async function PUT(
   }
 
   try {
-    const composition: CompositionState = await request.json();
-    const updated = await updateProject(id, { composition });
+    const body = await request.json();
+    const { subtitleStyle, subtitleStylePreset, subtitleConstraints, versions, ...compositionFields } = body;
+    const composition: CompositionState & { versions?: unknown[] } = {
+      ...compositionFields,
+      ...(versions ? { versions } : {}),
+    };
+
+    // Also save subtitle style to youtubeSubtitles if provided
+    const updates: Record<string, unknown> = { composition };
+    if (subtitleStyle) {
+      updates.youtubeSubtitles = {
+        ...project.youtubeSubtitles,
+        style: subtitleStyle,
+        ...(subtitleStylePreset ? { stylePreset: subtitleStylePreset } : {}),
+      };
+    }
+    if (subtitleConstraints) {
+      updates.transcription = {
+        ...project.transcription,
+        constraints: subtitleConstraints,
+      };
+    }
+
+    const updated = await updateProject(id, updates);
     if (!updated) {
       return NextResponse.json({ error: 'Failed to update' }, { status: 500 });
     }

@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useParams } from 'next/navigation';
+import Link from 'next/link';
 import { useProjectStore } from '@/stores/project-store';
 import { useSSE } from '@/hooks/use-sse';
 import { SubtitleEditor } from '@/components/subtitles/subtitle-editor';
@@ -436,17 +437,29 @@ export default function TranscriptionPage() {
           {audioSource ? (
             <div className="flex items-center gap-2 rounded-md border border-border bg-secondary/50 px-3 py-2">
               <FileAudio className="h-4 w-4 text-primary flex-none" />
-              <div className="text-xs">
+              <div className="text-xs flex-1">
                 <span className="text-muted-foreground">Se transcribirá: </span>
                 <strong className="text-foreground">{audioSource.label}</strong>
               </div>
+              <Link
+                href={`/project/${projectId}/sync`}
+                className="text-[10px] text-primary hover:underline flex-none"
+              >
+                Cambiar
+              </Link>
             </div>
           ) : (
             <div className="flex items-center gap-2 rounded-md border border-yellow-800/40 bg-yellow-950/20 px-3 py-2">
               <AlertTriangle className="h-4 w-4 text-yellow-500 flex-none" />
-              <span className="text-xs text-yellow-500">
-                No hay audio disponible. Genera una mezcla en Audio primero.
+              <span className="text-xs text-yellow-500 flex-1">
+                No hay audio disponible. Ve a Sync & Mix para generar una mezcla.
               </span>
+              <Link
+                href={`/project/${projectId}/sync`}
+                className="text-[10px] text-yellow-400 hover:underline flex-none"
+              >
+                Ir a Sync
+              </Link>
             </div>
           )}
 

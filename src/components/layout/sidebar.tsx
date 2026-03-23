@@ -13,6 +13,7 @@ import {
   Smartphone,
   Menu,
   X,
+  AudioLines,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -24,6 +25,7 @@ const navItems = [
   { href: '', label: 'Overview', icon: LayoutDashboard },
   { href: '/import', label: 'Importar', icon: FolderInput },
   { href: '/audio-prep', label: 'Audio', icon: Music },
+  { href: '/sync', label: 'Sync & Mix', icon: AudioLines },
   { href: '/transcription', label: 'Transcription', icon: Subtitles },
   { href: '/compose', label: 'Compose', icon: Layers },
   { href: '/reels', label: 'Reels', icon: Smartphone },

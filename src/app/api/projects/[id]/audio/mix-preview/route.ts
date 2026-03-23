@@ -30,19 +30,27 @@ export async function POST(
   const boardVolume = Number(body.boardVolume ?? 1);
   const ambientVolume = Number(body.ambientVolume ?? 0.5);
   const manualAdjustMs = Number(body.manualAdjustMs ?? 0);
+  const useAmplified = Boolean(body.useAmplified);
 
-  // Find board audio path
+  // Find board audio path — use amplified version if requested and available
   const boardSource = project.sources.find((s) => s.role === 'board');
   if (!boardSource) {
     return NextResponse.json({ error: 'No hay audio de mesa' }, { status: 400 });
   }
-  const boardTrack = project.audio.extractedTracks.find(
-    (t) => t.sourceFileId === boardSource.id
-  );
-  const boardPath = boardTrack?.path ||
-    (boardSource.type === 'audio'
-      ? path.join(getProjectDir(id, 'source'), boardSource.storedName)
-      : null);
+
+  let boardPath: string | null = null;
+
+  if (useAmplified && project.audio.amplifiedBoardPath) {
+    boardPath = project.audio.amplifiedBoardPath;
+  } else {
+    const boardTrack = project.audio.extractedTracks.find(
+      (t) => t.sourceFileId === boardSource.id
+    );
+    boardPath = boardTrack?.path ||
+      (boardSource.type === 'audio'
+        ? path.join(getProjectDir(id, 'source'), boardSource.storedName)
+        : null);
+  }
 
   if (!boardPath) {
     return NextResponse.json({ error: 'Audio de mesa no disponible' }, { status: 400 });

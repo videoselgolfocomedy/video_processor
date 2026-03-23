@@ -21,16 +21,21 @@ interface MixPreviewPanelProps {
   projectId: string;
   hasAmbient: boolean;
   alignmentOffsetMs?: number;
+  amplifiedBoardPath?: string;
+  amplifyApplied?: boolean;
 }
 
 export function MixPreviewPanel({
   projectId,
   hasAmbient,
   alignmentOffsetMs,
+  amplifiedBoardPath,
+  amplifyApplied,
 }: MixPreviewPanelProps) {
   const [boardVolume, setBoardVolume] = useState(1.0);
   const [ambientVolume, setAmbientVolume] = useState(0.5);
   const [manualAdjustMs, setManualAdjustMs] = useState(0);
+  const [useAmplified, setUseAmplified] = useState(!!amplifyApplied);
   const [jobId, setJobId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -61,7 +66,7 @@ export function MixPreviewPanel({
       const res = await fetch(`/api/projects/${projectId}/audio/mix-preview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ boardVolume, ambientVolume, manualAdjustMs }),
+        body: JSON.stringify({ boardVolume, ambientVolume, manualAdjustMs, useAmplified }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -78,7 +83,7 @@ export function MixPreviewPanel({
         variant: 'destructive',
       });
     }
-  }, [projectId, boardVolume, ambientVolume, manualAdjustMs, toast]);
+  }, [projectId, boardVolume, ambientVolume, manualAdjustMs, useAmplified, toast]);
 
   const mixUrl = outputName
     ? `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(outputName)}&t=${cacheBust}`
@@ -115,10 +120,39 @@ export function MixPreviewPanel({
           </div>
         </div>
 
+        {/* Board source selector */}
+        {amplifyApplied && amplifiedBoardPath && (
+          <div className="rounded-md border border-border p-3 space-y-1.5">
+            <Label className="text-xs">Fuente de mesa</Label>
+            <div className="flex gap-1">
+              <button
+                className={`flex-1 px-2 py-1.5 text-xs rounded-md border transition-colors ${
+                  !useAmplified
+                    ? 'bg-primary/20 border-primary text-primary'
+                    : 'border-border text-muted-foreground hover:text-foreground'
+                }`}
+                onClick={() => setUseAmplified(false)}
+              >
+                Original
+              </button>
+              <button
+                className={`flex-1 px-2 py-1.5 text-xs rounded-md border transition-colors ${
+                  useAmplified
+                    ? 'bg-green-500/20 border-green-500 text-green-400'
+                    : 'border-border text-muted-foreground hover:text-foreground'
+                }`}
+                onClick={() => setUseAmplified(true)}
+              >
+                Amplificado
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-1">
             <div className="flex items-center justify-between">
-              <Label className="text-xs">Vol. Mesa</Label>
+              <Label className="text-xs">Vol. Mesa{useAmplified ? ' (amplificada)' : ''}</Label>
               <span className="text-xs text-muted-foreground">{boardVolume.toFixed(1)}</span>
             </div>
             <input

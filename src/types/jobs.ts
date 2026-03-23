@@ -1,5 +1,6 @@
 export type JobType =
   | 'audio-extract'
+  | 'audio-amplify'
   | 'demucs'
   | 'voice-subtract'
   | 'laughter-detect'

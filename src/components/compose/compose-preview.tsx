@@ -45,8 +45,14 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
   const audioClips = clips.filter(
     (c) => c.type === 'audio' && !mutedTrackIds.has(c.trackId)
   );
+  const textClips = clips.filter(
+    (c) => c.type === 'text' && !hiddenTrackIds.has(c.trackId)
+  );
+  const imageOverlayClips = clips.filter(
+    (c) => (c.type === 'image' || c.type === 'gif') && c.overlayPosition && !hiddenTrackIds.has(c.trackId)
+  );
 
-  const cutaways = videoClips.filter((c) => c.mode === 'cutaway');
+  const cutaways = videoClips.filter((c) => c.mode === 'cutaway' && !c.overlayPosition);
   const overlays = videoClips.filter((c) => c.mode === 'overlay');
 
   return (
@@ -109,6 +115,30 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
         );
       })}
 
+      {/* 3b. Image/GIF overlays with position */}
+      {imageOverlayClips.map((clip) => {
+        const src = clipSources[clip.fileName];
+        if (!src) return null;
+        const from = Math.round((clip.timelineStartMs / 1000) * FPS);
+        const dur = Math.max(1, Math.round(((clip.timelineEndMs - clip.timelineStartMs) / 1000) * FPS));
+        const pos = clip.overlayPosition!;
+        return (
+          <Sequence key={clip.id} from={from} durationInFrames={dur}>
+            <div
+              style={{
+                position: 'absolute',
+                left: `${(pos.x - pos.width / 2) * 100}%`,
+                top: `${(pos.y - pos.width * (9 / 16) / 2) * 100}%`,
+                width: `${pos.width * 100}%`,
+                opacity: clip.opacity ?? 1,
+              }}
+            >
+              <Img src={src} style={{ width: '100%', height: 'auto', objectFit: 'contain' }} />
+            </div>
+          </Sequence>
+        );
+      })}
+
       {/* 4. Base audio */}
       {audioSrc && <Audio src={audioSrc} />}
 
@@ -125,7 +155,42 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
         );
       })}
 
-      {/* 6. Subtitles */}
+      {/* 6. Text overlays */}
+      {textClips.map((clip) => {
+        if (!clip.textContent) return null;
+        const from = Math.round((clip.timelineStartMs / 1000) * FPS);
+        const dur = Math.max(1, Math.round(((clip.timelineEndMs - clip.timelineStartMs) / 1000) * FPS));
+        const style = clip.textStyle;
+        const pos = clip.overlayPosition ?? { x: 0.5, y: 0.5, width: 0.8 };
+        return (
+          <Sequence key={clip.id} from={from} durationInFrames={dur}>
+            <div
+              style={{
+                position: 'absolute',
+                left: `${(pos.x - pos.width / 2) * 100}%`,
+                top: `${pos.y * 100}%`,
+                width: `${pos.width * 100}%`,
+                transform: 'translateY(-50%)',
+                textAlign: 'center',
+                opacity: clip.opacity ?? 1,
+                fontSize: style?.fontSize ?? 48,
+                fontFamily: style?.fontFamily ?? 'Inter',
+                fontWeight: style?.fontWeight ?? 700,
+                color: style?.color ?? '#FFFFFF',
+                lineHeight: style?.lineHeight ?? 1.3,
+                textShadow: style?.shadowColor
+                  ? `${style.shadowX ?? 2}px ${style.shadowY ?? 2}px ${style.shadowBlur ?? 8}px ${style.shadowColor}`
+                  : undefined,
+                backgroundColor: style?.backgroundColor ?? 'transparent',
+              }}
+            >
+              {clip.textContent}
+            </div>
+          </Sequence>
+        );
+      })}
+
+      {/* 7. Subtitles */}
       <SubtitleLayer segments={segments} style={subtitleStyle} />
     </AbsoluteFill>
   );

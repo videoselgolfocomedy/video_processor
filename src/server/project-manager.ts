@@ -13,6 +13,7 @@ const defaultAudioState: AudioState = {
   laughterStatus: 'idle',
   laughterSegments: [],
   volumeCurve: [],
+  amplifyApplied: false,
   cleanupApplied: false,
 };
 
@@ -25,9 +26,7 @@ const defaultSyncState: SyncState = {
 const defaultCompositionState: CompositionState = {
   tracks: [
     { id: 'v1', type: 'video', label: 'Main Video', locked: true, muted: false, visible: true },
-    { id: 'v2', type: 'video', label: 'Cutaways/Overlays', locked: false, muted: false, visible: true },
     { id: 'a1', type: 'audio', label: 'Main Audio', locked: true, muted: false, visible: true },
-    { id: 'a2', type: 'audio', label: 'Extra Audio', locked: false, muted: false, visible: true },
     { id: 's1', type: 'subtitle', label: 'Subtitles', locked: false, muted: false, visible: true },
   ],
   clips: [],

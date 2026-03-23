@@ -128,6 +128,10 @@ export interface AudioState {
   laughterSegments: LaughterSegment[];
   laughterConfig?: LaughterDetectionConfig;
   volumeCurve: VolumeCurvePoint[];
+  // Board audio amplification/normalization
+  amplifyApplied: boolean;
+  amplifySettings?: AudioAmplifySettings;
+  amplifiedBoardPath?: string; // output of amplification
   // Board audio path (the clean desk audio used as main voice)
   boardAudioPath?: string;
   // Camera ambient path (after optional cleanup)
@@ -173,6 +177,16 @@ export interface AudioTrack {
   sampleRate: number;
   channels: number;
   duration: number;
+}
+
+export interface AudioAmplifySettings {
+  mode: 'loudnorm' | 'gain' | 'both';
+  gainDb: number;              // Simple gain in dB (-20 to +30)
+  targetLUFS: number;          // Loudness normalization target (-24 to -10)
+  truePeak: number;            // Max true peak level (-3 to 0)
+  compressor: boolean;         // Apply dynamics before normalize
+  compressorThreshold: number; // dB (-40 to 0)
+  compressorRatio: number;     // 1:1 to 10:1
 }
 
 export interface AudioCleanupSettings {

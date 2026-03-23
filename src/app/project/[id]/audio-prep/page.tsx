@@ -10,6 +10,7 @@ import { SubtractPanel } from '@/components/audio/subtract-panel';
 import { LaughterPanel } from '@/components/audio/laughter-panel';
 import { VolumeCurvePanel } from '@/components/audio/volume-curve-panel';
 import { AudioCleanupPanel } from '@/components/audio/audio-cleanup-panel';
+import { AudioAmplifyPanel } from '@/components/audio/audio-amplify-panel';
 import { MixPreviewPanel } from '@/components/audio/mix-preview-panel';
 import { AudioFilesPanel } from '@/components/audio/audio-files-panel';
 import { Button } from '@/components/ui/button';
@@ -30,6 +31,7 @@ type PipelineStepStatus = 'pending' | 'running' | 'done';
 function PreparationPipeline({
   extractStatus,
   extractProgress,
+  amplifyStatus,
   subtractStatus,
   subtractProgress,
   laughterStatus,
@@ -38,6 +40,7 @@ function PreparationPipeline({
 }: {
   extractStatus: PipelineStepStatus;
   extractProgress: number;
+  amplifyStatus: PipelineStepStatus;
   subtractStatus: PipelineStepStatus;
   subtractProgress: number;
   laughterStatus: PipelineStepStatus;
@@ -46,8 +49,9 @@ function PreparationPipeline({
 }) {
   const steps: { label: string; status: PipelineStepStatus; progress: number }[] = [
     { label: 'Extracción', status: extractStatus, progress: extractProgress },
-    { label: 'Sustracción guiada', status: subtractStatus, progress: subtractProgress },
-    { label: 'Detección risas', status: laughterStatus, progress: laughterProgress },
+    { label: 'Sustracción', status: subtractStatus, progress: subtractProgress },
+    { label: 'Amplificar', status: amplifyStatus, progress: amplifyStatus === 'done' ? 100 : 0 },
+    { label: 'Risas', status: laughterStatus, progress: laughterProgress },
     { label: 'Limpieza', status: cleanupStatus, progress: cleanupStatus === 'done' ? 100 : 0 },
   ];
 
@@ -191,6 +195,10 @@ export default function AudioPrepPage() {
       ? 'running'
       : 'pending';
 
+  const amplifyStatus: PipelineStepStatus = currentProject.audio.amplifyApplied
+    ? 'done'
+    : 'pending';
+
   const cleanupStatus: PipelineStepStatus = currentProject.audio.cleanupApplied
     ? 'done'
     : 'pending';
@@ -210,6 +218,7 @@ export default function AudioPrepPage() {
           <PreparationPipeline
             extractStatus={extractStatus}
             extractProgress={extracting ? extractProgress : hasExtractedAudio ? 100 : 0}
+            amplifyStatus={amplifyStatus}
             subtractStatus={subtractStatus}
             subtractProgress={subtractRunning ? subtractProgress : (currentProject.audio.subtractionStatus ?? 'idle') === 'done' ? 100 : 0}
             laughterStatus={laughterStatus}
@@ -328,12 +337,25 @@ export default function AudioPrepPage() {
             />
           )}
 
-          {/* Mix preview: board + ambient */}
+          {/* Step 2.5: Amplify board audio (after subtraction, before mix) */}
+          {boardSource && (
+            <AudioAmplifyPanel
+              projectId={projectId}
+              amplifyApplied={currentProject.audio.amplifyApplied ?? false}
+              amplifiedBoardPath={currentProject.audio.amplifiedBoardPath}
+              boardSourceName={boardSource.originalName}
+              onComplete={() => fetchProject(projectId)}
+            />
+          )}
+
+          {/* Mix preview: board + ambient — can use amplified board if available */}
           {ambientReady && (
             <MixPreviewPanel
               projectId={projectId}
               hasAmbient={ambientReady}
               alignmentOffsetMs={currentProject.audio.alignmentOffsetMs}
+              amplifiedBoardPath={currentProject.audio.amplifiedBoardPath}
+              amplifyApplied={currentProject.audio.amplifyApplied ?? false}
             />
           )}
 
