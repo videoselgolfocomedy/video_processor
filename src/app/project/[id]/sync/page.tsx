@@ -228,9 +228,12 @@ export default function SyncPage() {
   if (!currentProject) return null;
 
   const cameraSource = currentProject.sources.find((s) => s.role === 'camera' && s.type === 'video');
+  const boardSource = currentProject.sources.find((s) => s.role === 'board');
   const alignmentOffsetMs = currentProject.audio.alignmentOffsetMs ?? 0;
   const muxedVideoPath = currentProject.sync.muxedVideoPath;
   const muxedVideoName = muxedVideoPath?.split('/').pop() ?? null;
+  const selectedAudioPathSaved = currentProject.sync.selectedAudioPath;
+  const selectedAudioNameSaved = selectedAudioPathSaved?.split('/').pop() ?? null;
 
   // Filter: only show usable audio files (not raw extracted tracks)
   const usableFiles = audioFiles.filter(f => !f.isExtracted);
@@ -437,29 +440,70 @@ export default function SyncPage() {
           </Card>
         </div>
 
-        {/* Sidebar: result */}
-        <div className="space-y-6">
+        {/* Sidebar: source info + result */}
+        <div className="space-y-4">
+          {/* Source clips info — always visible */}
+          <Card className="border-border">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-xs font-medium text-muted-foreground">Clips de entrada</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 text-xs">
+              <div className="flex items-start gap-2">
+                <FileVideo className="h-3.5 w-3.5 text-blue-400 mt-0.5 flex-none" />
+                <div className="min-w-0">
+                  <p className="font-medium text-foreground truncate">{cameraSource?.originalName ?? 'Sin video'}</p>
+                  {cameraSource?.duration && (
+                    <p className="text-muted-foreground">{formatTime(cameraSource.duration * 1000)}</p>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-start gap-2">
+                <FileAudio className="h-3.5 w-3.5 text-green-400 mt-0.5 flex-none" />
+                <div className="min-w-0">
+                  <p className="font-medium text-foreground truncate">{boardSource?.originalName ?? 'Sin audio mesa'}</p>
+                  {boardSource?.duration && (
+                    <p className="text-muted-foreground">{formatTime(boardSource.duration * 1000)}</p>
+                  )}
+                </div>
+              </div>
+              {alignmentOffsetMs > 0 && (
+                <div className="rounded bg-muted/50 px-2 py-1.5 text-[10px] text-muted-foreground">
+                  Offset de alineación: <strong className="text-foreground">{formatTime(alignmentOffsetMs)}</strong>
+                  <br />
+                  La mesa empezó a grabar {formatTime(alignmentOffsetMs)} antes que la cámara
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Mux result */}
           {muxedVideoPath && muxedVideoName ? (
             <Card className="border-green-800/40 bg-green-950/20">
-              <CardHeader className="pb-3">
+              <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-medium flex items-center gap-2 text-green-400">
                   <CheckCircle className="h-4 w-4" />
-                  Video listo
+                  Video muxado
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <p className="text-xs text-muted-foreground">
-                  El video ya tiene el audio procesado. Puedes ir a Compose o Reels para editar.
-                </p>
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <FileVideo className="h-3.5 w-3.5 text-green-400 flex-none" />
-                  <span className="font-mono truncate">{muxedVideoName}</span>
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex items-center gap-2">
+                    <FileVideo className="h-3 w-3 text-green-400 flex-none" />
+                    <span className="font-mono truncate text-foreground">{muxedVideoName}</span>
+                  </div>
+                  {selectedAudioNameSaved && (
+                    <div className="flex items-center gap-2">
+                      <FileAudio className="h-3 w-3 text-green-400 flex-none" />
+                      <span className="text-muted-foreground">Audio usado: </span>
+                      <span className="font-mono truncate text-foreground">{selectedAudioNameSaved}</span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex gap-2">
                   <Link href={`/project/${projectId}/compose`} className="flex-1">
                     <Button variant="outline" size="sm" className="w-full text-xs">
-                      Ir a Compose
+                      Compose
                     </Button>
                   </Link>
                   <Link href={`/project/${projectId}/transcription`} className="flex-1">
@@ -475,7 +519,7 @@ export default function SyncPage() {
                   className="inline-flex items-center gap-2 text-xs text-primary hover:underline"
                 >
                   <Download className="h-3.5 w-3.5" />
-                  Descargar video
+                  Descargar
                 </a>
 
                 <Button
@@ -491,28 +535,14 @@ export default function SyncPage() {
             </Card>
           ) : (
             <Card className="border-border">
-              <CardContent className="pt-6 text-center space-y-3">
-                <Video className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-                <p className="text-xs text-muted-foreground">
-                  Aún no hay video muxado. Selecciona un audio y pulsa &quot;Muxar&quot;.
+              <CardContent className="pt-4 text-center space-y-2">
+                <Video className="h-6 w-6 text-muted-foreground/30 mx-auto" />
+                <p className="text-[10px] text-muted-foreground">
+                  Sin video muxado
                 </p>
               </CardContent>
             </Card>
           )}
-
-          {/* Info card */}
-          <Card className="border-border">
-            <CardContent className="pt-4 space-y-2 text-xs text-muted-foreground">
-              <p className="font-medium text-foreground text-xs">Flujo de trabajo</p>
-              <ol className="list-decimal list-inside space-y-1">
-                <li>Procesa el audio en <Link href={`/project/${projectId}/audio-prep`} className="text-primary hover:underline">Audio</Link></li>
-                <li>Selecciona el audio final aquí</li>
-                <li>Muxar → reemplaza el audio del video</li>
-                <li><Link href={`/project/${projectId}/transcription`} className="text-primary hover:underline">Transcribir</Link> el audio seleccionado</li>
-                <li>Editar en <Link href={`/project/${projectId}/compose`} className="text-primary hover:underline">Compose</Link> / <Link href={`/project/${projectId}/reels`} className="text-primary hover:underline">Reels</Link></li>
-              </ol>
-            </CardContent>
-          </Card>
         </div>
       </div>
     </div>
