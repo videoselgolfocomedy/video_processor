@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { spawn } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
 import path from 'path';
 import fs from 'fs/promises';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
@@ -11,6 +11,32 @@ function getFFmpegPath(): string {
     return require('ffmpeg-static') as string;
   } catch {
     return 'ffmpeg';
+  }
+}
+
+function getFFprobePath(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('ffprobe-static').path as string;
+  } catch {
+    return 'ffprobe';
+  }
+}
+
+/** Get audio file duration in seconds using ffprobe */
+function probeAudioDuration(filePath: string): number {
+  try {
+    const ffprobe = getFFprobePath();
+    const output = execFileSync(ffprobe, [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'csv=p=0',
+      filePath,
+    ], { encoding: 'utf-8', timeout: 10000 });
+    const dur = parseFloat(output.trim());
+    return isNaN(dur) ? 0 : dur;
+  } catch {
+    return 0;
   }
 }
 
@@ -91,23 +117,27 @@ export async function POST(
   // Mix files (mixed.wav, mix_*) have the offset already baked in
   const isAlreadyAligned = safeName === 'mixed.wav' || safeName.startsWith('mix_');
 
+  // Probe audio duration to use -t for reliable trimming
+  // (-shortest is unreliable with -c:v copy)
+  let audioDurationSec = probeAudioDuration(audioPath);
+  if (!isAlreadyAligned && offsetSec > 0) {
+    // Raw audio: we'll trim by offset, so effective duration is shorter
+    audioDurationSec = Math.max(0, audioDurationSec - offsetSec);
+  }
+
   // Create job
   const job = jobManager.createJob(id, 'mux');
   jobManager.startJob(job.id);
-  jobManager.updateProgress(job.id, 5, 'Iniciando muxado de audio en video...');
+  jobManager.updateProgress(job.id, 5,
+    `Muxando: video + audio (${Math.round(audioDurationSec)}s)...`
+  );
 
-  // Build FFmpeg args:
-  // - `-ss` before `-i` on video for fast seek (input-level seek, no re-encode)
-  // - For mix files: audio starts at camera time 0, so video must also start at 0
-  //   BUT `-shortest` trims the output to the audio duration
-  // - For raw board audio: trim audio by offset, video starts at 0
-  // - `-t` limits output to audio duration for reliable trimming
   const ffmpeg = getFFmpegPath();
 
   let args: string[];
 
   if (!isAlreadyAligned && offsetSec > 0) {
-    // Raw board/amplified audio: trim audio by offset to align with camera
+    // Raw board/amplified audio: trim audio by offset, limit output to trimmed audio duration
     args = [
       '-i', videoPath,
       '-i', audioPath,
@@ -117,14 +147,13 @@ export async function POST(
       '-c:v', 'copy',
       '-c:a', 'aac',
       '-b:a', '192k',
-      '-shortest',
+      ...(audioDurationSec > 0 ? ['-t', String(audioDurationSec)] : ['-shortest']),
       '-y',
       '-progress', 'pipe:1',
       outputPath,
     ];
   } else {
-    // Mix file: audio is already aligned with camera time 0.
-    // Use -shortest to trim output to audio length (mix is shorter than camera video).
+    // Mix file: audio starts at camera time 0, use -t to cut output to audio duration
     args = [
       '-i', videoPath,
       '-i', audioPath,
@@ -133,7 +162,7 @@ export async function POST(
       '-b:a', '192k',
       '-map', '0:v:0',
       '-map', '1:a:0',
-      '-shortest',
+      ...(audioDurationSec > 0 ? ['-t', String(audioDurationSec)] : ['-shortest']),
       '-y',
       '-progress', 'pipe:1',
       outputPath,
