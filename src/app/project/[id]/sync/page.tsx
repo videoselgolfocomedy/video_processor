@@ -32,6 +32,13 @@ interface AudioFileEntry {
   isExtracted: boolean;
 }
 
+function formatTime(ms: number): string {
+  const totalSec = Math.abs(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = Math.floor(totalSec % 60);
+  return `${min}:${String(sec).padStart(2, '0')}`;
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -221,6 +228,7 @@ export default function SyncPage() {
   if (!currentProject) return null;
 
   const cameraSource = currentProject.sources.find((s) => s.role === 'camera' && s.type === 'video');
+  const alignmentOffsetMs = currentProject.audio.alignmentOffsetMs ?? 0;
   const muxedVideoPath = currentProject.sync.muxedVideoPath;
   const muxedVideoName = muxedVideoPath?.split('/').pop() ?? null;
 
@@ -382,10 +390,17 @@ export default function SyncPage() {
               )}
 
               {selectedAudio ? (
-                <div className="flex items-center gap-2 text-xs rounded-md border border-primary/30 bg-primary/5 p-2">
-                  <FileAudio className="h-3.5 w-3.5 text-primary" />
-                  <span className="text-muted-foreground">Audio seleccionado:</span>
-                  <strong className="font-mono text-primary">{selectedAudio}</strong>
+                <div className="rounded-md border border-primary/30 bg-primary/5 p-2 space-y-1">
+                  <div className="flex items-center gap-2 text-xs">
+                    <FileAudio className="h-3.5 w-3.5 text-primary" />
+                    <span className="text-muted-foreground">Audio seleccionado:</span>
+                    <strong className="font-mono text-primary">{selectedAudio}</strong>
+                  </div>
+                  {alignmentOffsetMs > 0 && !(selectedAudio === 'mixed.wav' || selectedAudio.startsWith('mix_')) && (
+                    <p className="text-[10px] text-muted-foreground pl-5">
+                      Se aplicará offset de alineación: se recortarán los primeros {formatTime(alignmentOffsetMs)} del audio para sincronizar con el video.
+                    </p>
+                  )}
                 </div>
               ) : (
                 <div className="flex items-center gap-2 text-xs text-yellow-500">

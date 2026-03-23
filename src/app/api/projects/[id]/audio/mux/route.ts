@@ -17,6 +17,13 @@ function getFFmpegPath(): string {
 /**
  * POST /api/projects/[id]/audio/mux
  * Mux a selected audio file into the camera video (copy video, encode audio as AAC).
+ *
+ * Audio alignment:
+ * - Mix files (mixed.wav, mix_*) are already aligned with camera time 0
+ *   → only need to trim video if user wants to skip dead time
+ * - Raw board/amplified files need alignmentOffsetMs applied to the audio
+ *   to sync with camera
+ *
  * Body: { audioFileName: string }
  */
 export async function POST(
@@ -69,26 +76,61 @@ export async function POST(
   // Ensure export dir exists
   await fs.mkdir(exportDir, { recursive: true });
 
+  // Determine alignment offset
+  const alignmentOffsetMs = project.audio.alignmentOffsetMs ?? 0;
+  const offsetSec = Math.max(0, alignmentOffsetMs / 1000);
+
+  // Detect if the audio file is already aligned with camera time 0
+  // Mix files (mixed.wav, mix_*) have the offset already baked in
+  const isAlreadyAligned = safeName === 'mixed.wav' || safeName.startsWith('mix_');
+
   // Create job
   const job = jobManager.createJob(id, 'mux');
   jobManager.startJob(job.id);
   jobManager.updateProgress(job.id, 5, 'Iniciando muxado de audio en video...');
 
-  // Run FFmpeg with spawn (not execFile) to avoid maxBuffer overflow on long videos
+  // Build FFmpeg args with proper alignment
+  // For raw audio (board, amplified): trim audio by offset to align with camera
+  // For mix files: audio is already aligned, no trim needed
+  // Video: always use -c:v copy for speed (can't use -ss with -c:v copy accurately,
+  //   so we use filter to trim instead)
   const ffmpeg = getFFmpegPath();
-  const args = [
-    '-i', videoPath,
-    '-i', audioPath,
-    '-c:v', 'copy',
-    '-c:a', 'aac',
-    '-b:a', '192k',
-    '-map', '0:v:0',
-    '-map', '1:a:0',
-    '-shortest',
-    '-y',
-    '-progress', 'pipe:1',
-    outputPath,
-  ];
+
+  let args: string[];
+
+  if (!isAlreadyAligned && offsetSec > 0) {
+    // Raw board/amplified audio: use filter to trim audio by offset to align with camera
+    // This means board[offsetSec:] syncs with camera[0:]
+    args = [
+      '-i', videoPath,
+      '-i', audioPath,
+      '-filter_complex', `[1:a]atrim=start=${offsetSec},asetpts=PTS-STARTPTS[aligned]`,
+      '-map', '0:v:0',
+      '-map', '[aligned]',
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-shortest',
+      '-y',
+      '-progress', 'pipe:1',
+      outputPath,
+    ];
+  } else {
+    // Mix file or no offset: audio is already aligned with camera time 0
+    args = [
+      '-i', videoPath,
+      '-i', audioPath,
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-map', '0:v:0',
+      '-map', '1:a:0',
+      '-shortest',
+      '-y',
+      '-progress', 'pipe:1',
+      outputPath,
+    ];
+  }
 
   const proc = spawn(ffmpeg, args, { stdio: ['ignore', 'pipe', 'pipe'] });
   jobManager.setProcess(job.id, proc);
@@ -99,7 +141,6 @@ export async function POST(
   proc.stderr.on('data', (data: Buffer) => {
     const text = data.toString();
     stderrLog += text;
-    // Keep only last 4KB of stderr for error reporting
     if (stderrLog.length > 4096) stderrLog = stderrLog.slice(-4096);
     const match = text.match(/Duration:\s*(\d+):(\d+):(\d+)/);
     if (match) {
@@ -122,7 +163,6 @@ export async function POST(
 
   proc.on('close', async (code) => {
     if (code === 0) {
-      // Update project with muxed video path
       const currentProject = await getProject(id);
       if (currentProject) {
         await updateProject(id, {
@@ -135,7 +175,6 @@ export async function POST(
       }
       jobManager.completeJob(job.id, { outputPath });
     } else {
-      // Include last stderr lines for debugging
       const lastLines = stderrLog.trim().split('\n').slice(-5).join('\n');
       jobManager.failJob(job.id, `FFmpeg mux falló (code ${code}):\n${lastLines}`);
     }
