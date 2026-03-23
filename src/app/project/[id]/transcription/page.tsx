@@ -309,6 +309,18 @@ export default function TranscriptionPage() {
     toast({ title: `Auto-split: ${segments.length} -> ${split.length} segmentos` });
   }, [currentProject, updateCurrentProject, toast]);
 
+  // Check if muxed video exists on disk (must be before early return)
+  const muxedVideoPath = currentProject?.sync.muxedVideoPath;
+  const muxedVideoName = muxedVideoPath?.split('/').pop();
+  const [useMuxedVideo, setUseMuxedVideo] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (!muxedVideoName) { setUseMuxedVideo(false); return; }
+    fetch(`/api/projects/${projectId}/audio/file?name=${encodeURIComponent(muxedVideoName)}`, { method: 'HEAD' })
+      .then((res) => setUseMuxedVideo(res.ok))
+      .catch(() => setUseMuxedVideo(false));
+  }, [muxedVideoName, projectId]);
+
   if (!currentProject) return null;
 
   const segments = currentProject.transcription.segments;
@@ -326,13 +338,12 @@ export default function TranscriptionPage() {
     : videoDurationMs || 10000;
 
   // Video preview URL — prefer muxed video (has processed audio baked in)
-  const muxedVideoPath = currentProject.sync.muxedVideoPath;
-  const muxedVideoName = muxedVideoPath?.split('/').pop();
-  const videoSrc = muxedVideoName
+  const videoSrc = useMuxedVideo && muxedVideoName
     ? `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(muxedVideoName)}`
     : videoSource
       ? `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(videoSource.storedName)}`
       : undefined;
+  const usingMuxed = useMuxedVideo && !!muxedVideoName;
 
   // Count constraint violations
   const violations = constraints ? segments.filter(
@@ -438,6 +449,20 @@ export default function TranscriptionPage() {
             </p>
           )}
 
+          {/* Video source indicator */}
+          {!usingMuxed && muxedVideoPath && (
+            <div className="flex items-center gap-2 rounded-md border border-yellow-800/40 bg-yellow-950/20 px-3 py-2">
+              <AlertTriangle className="h-4 w-4 text-yellow-500 flex-none" />
+              <span className="text-xs text-yellow-500 flex-1">
+                Video muxado no encontrado. Mostrando video original ({videoSource?.originalName}). Ve a Sync & Mix para re-muxar.
+              </span>
+              <Link href={`/project/${projectId}/sync`} className="text-[10px] text-yellow-400 hover:underline flex-none">
+                Ir a Sync
+              </Link>
+            </div>
+          )}
+
+          {/* Audio source indicator */}
           {audioSource ? (
             <div className="flex items-center gap-2 rounded-md border border-border bg-secondary/50 px-3 py-2">
               <FileAudio className="h-4 w-4 text-primary flex-none" />
