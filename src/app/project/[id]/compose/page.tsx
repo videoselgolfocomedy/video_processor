@@ -69,8 +69,21 @@ export default function ComposePage() {
 }
 
 // Helper: get total duration from project
-function getDurationMs(project: { sources: Array<{ duration?: number }>; sync: { muxedVideoPath?: string }; audio: { extractedTracks: Array<{ duration: number }> } }): number {
-  // Try source video duration first
+function getDurationMs(project: {
+  sources: Array<{ duration?: number }>;
+  sync: { muxedVideoPath?: string };
+  audio: { extractedTracks: Array<{ duration: number }> };
+  transcription: { segments: Array<{ endMs: number }> };
+}): number {
+  // If we have transcription segments, use the last segment's end as the content duration
+  // This matches the actual audio content (important when muxed with -shortest)
+  const segments = project.transcription.segments;
+  if (segments.length > 0) {
+    const lastEnd = Math.max(...segments.map((s) => s.endMs));
+    if (lastEnd > 0) return lastEnd + 2000; // +2s padding
+  }
+
+  // Try source video duration
   const videoSource = project.sources.find((s) => 'type' in s && (s as { type: string }).type === 'video');
   if (videoSource?.duration) return videoSource.duration * 1000;
 

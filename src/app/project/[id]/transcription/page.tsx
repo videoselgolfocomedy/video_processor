@@ -325,10 +325,14 @@ export default function TranscriptionPage() {
     ? Math.max(...segments.map((s) => s.endMs), videoDurationMs)
     : videoDurationMs || 10000;
 
-  // Video preview URL
-  const videoSrc = videoSource
-    ? `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(videoSource.storedName)}`
-    : undefined;
+  // Video preview URL — prefer muxed video (has processed audio baked in)
+  const muxedVideoPath = currentProject.sync.muxedVideoPath;
+  const muxedVideoName = muxedVideoPath?.split('/').pop();
+  const videoSrc = muxedVideoName
+    ? `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(muxedVideoName)}`
+    : videoSource
+      ? `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(videoSource.storedName)}`
+      : undefined;
 
   // Count constraint violations
   const violations = constraints ? segments.filter(
