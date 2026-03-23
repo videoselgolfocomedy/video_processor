@@ -16,7 +16,7 @@ import { LANGUAGES } from '@/config/languages';
 import { WHISPER_MODELS } from '@/lib/constants';
 import { splitLongSegments, segmentsToSrt, segmentsToDiff, downloadAsFile } from '@/lib/subtitle-utils';
 import { formatTimestamp } from '@/lib/utils';
-import { AlertTriangle, Check, Download, FileAudio, Loader2, Mic, Scissors, Settings2, Sparkles, X, Zap } from 'lucide-react';
+import { AlertTriangle, Check, Download, FileAudio, FileVideo, Loader2, Mic, Scissors, Settings2, Sparkles, X, Zap } from 'lucide-react';
 import type { PlayerRef } from '@remotion/player';
 import type { SubtitleSegment, SubtitleConstraints } from '@/types/project';
 
@@ -450,11 +450,19 @@ export default function TranscriptionPage() {
           )}
 
           {/* Video source indicator */}
-          {!usingMuxed && muxedVideoPath && (
+          {usingMuxed ? (
+            <div className="flex items-center gap-2 rounded-md border border-green-800/40 bg-green-950/20 px-3 py-2">
+              <FileVideo className="h-4 w-4 text-green-500 flex-none" />
+              <span className="text-xs text-green-400 flex-1">
+                Video muxado (con audio procesado)
+              </span>
+            </div>
+          ) : (
             <div className="flex items-center gap-2 rounded-md border border-yellow-800/40 bg-yellow-950/20 px-3 py-2">
-              <AlertTriangle className="h-4 w-4 text-yellow-500 flex-none" />
+              <FileVideo className="h-4 w-4 text-yellow-500 flex-none" />
               <span className="text-xs text-yellow-500 flex-1">
-                Video muxado no encontrado. Mostrando video original ({videoSource?.originalName}). Ve a Sync & Mix para re-muxar.
+                Video original ({videoSource?.originalName ?? 'sin video'}) — sin audio procesado.
+                {muxedVideoPath ? ' El muxado anterior no se encontró.' : ''} Ve a Sync & Mix para muxar.
               </span>
               <Link href={`/project/${projectId}/sync`} className="text-[10px] text-yellow-400 hover:underline flex-none">
                 Ir a Sync

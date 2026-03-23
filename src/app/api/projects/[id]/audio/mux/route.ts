@@ -76,6 +76,13 @@ export async function POST(
   // Ensure export dir exists
   await fs.mkdir(exportDir, { recursive: true });
 
+  // Clean up old muxed files to save disk space
+  if (project.sync.muxedVideoPath) {
+    const oldName = path.basename(project.sync.muxedVideoPath);
+    const oldPath = path.join(exportDir, oldName);
+    try { await fs.unlink(oldPath); } catch { /* ignore */ }
+  }
+
   // Determine alignment offset
   const alignmentOffsetMs = project.audio.alignmentOffsetMs ?? 0;
   const offsetSec = Math.max(0, alignmentOffsetMs / 1000);
@@ -89,18 +96,18 @@ export async function POST(
   jobManager.startJob(job.id);
   jobManager.updateProgress(job.id, 5, 'Iniciando muxado de audio en video...');
 
-  // Build FFmpeg args with proper alignment
-  // For raw audio (board, amplified): trim audio by offset to align with camera
-  // For mix files: audio is already aligned, no trim needed
-  // Video: always use -c:v copy for speed (can't use -ss with -c:v copy accurately,
-  //   so we use filter to trim instead)
+  // Build FFmpeg args:
+  // - `-ss` before `-i` on video for fast seek (input-level seek, no re-encode)
+  // - For mix files: audio starts at camera time 0, so video must also start at 0
+  //   BUT `-shortest` trims the output to the audio duration
+  // - For raw board audio: trim audio by offset, video starts at 0
+  // - `-t` limits output to audio duration for reliable trimming
   const ffmpeg = getFFmpegPath();
 
   let args: string[];
 
   if (!isAlreadyAligned && offsetSec > 0) {
-    // Raw board/amplified audio: use filter to trim audio by offset to align with camera
-    // This means board[offsetSec:] syncs with camera[0:]
+    // Raw board/amplified audio: trim audio by offset to align with camera
     args = [
       '-i', videoPath,
       '-i', audioPath,
@@ -116,7 +123,8 @@ export async function POST(
       outputPath,
     ];
   } else {
-    // Mix file or no offset: audio is already aligned with camera time 0
+    // Mix file: audio is already aligned with camera time 0.
+    // Use -shortest to trim output to audio length (mix is shorter than camera video).
     args = [
       '-i', videoPath,
       '-i', audioPath,
