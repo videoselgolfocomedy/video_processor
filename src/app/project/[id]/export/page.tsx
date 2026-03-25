@@ -64,22 +64,49 @@ export default function ExportPage() {
     [currentProject?.sources]
   );
 
-  const videoSrc = useMemo(
-    () =>
-      videoSource
-        ? `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(videoSource.storedName)}`
-        : undefined,
-    [videoSource, projectId]
-  );
+  // Detect compose clips on v1 track
+  const composeV1Clips = useMemo(() => {
+    const clips = currentProject?.composition?.clips;
+    if (!clips || clips.length === 0) return [];
+    return clips.filter((c) => c.trackId === 'v1').sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+  }, [currentProject?.composition?.clips]);
 
+  const hasComposeEdits = composeV1Clips.length > 0;
+
+  // Use muxed video for compose preview (clips sourceInMs refer to muxed video positions)
+  const muxedVideoName = useMemo(() => {
+    if (!hasComposeEdits) return undefined;
+    const muxedPath = currentProject?.sync?.muxedVideoPath;
+    if (!muxedPath) return undefined;
+    // Extract filename from absolute path
+    return muxedPath.split('/').pop();
+  }, [hasComposeEdits, currentProject?.sync?.muxedVideoPath]);
+
+  const videoSrc = useMemo(() => {
+    if (muxedVideoName) {
+      return `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(muxedVideoName)}`;
+    }
+    return videoSource
+      ? `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(videoSource.storedName)}`
+      : undefined;
+  }, [videoSource, projectId, muxedVideoName]);
+
+  // Duration: use compose timeline if edits exist, otherwise raw video
   const videoDurationMs = useMemo(() => {
     if (!currentProject) return 10000;
+
+    // Compose-aware duration
+    if (composeV1Clips.length > 0) {
+      return Math.max(...composeV1Clips.map((c) => c.timelineEndMs));
+    }
+
+    // Fallback: raw source duration
     const segments = currentProject.transcription.segments;
     const vDur = videoSource?.duration ? videoSource.duration * 1000 : 0;
     return segments.length > 0
       ? Math.max(...segments.map((s) => s.endMs), vDur)
       : vDur || 10000;
-  }, [currentProject, videoSource]);
+  }, [currentProject, videoSource, composeV1Clips]);
 
   if (!currentProject) return null;
 
@@ -107,6 +134,8 @@ export default function ExportPage() {
         videoSource={videoSource}
         videoSrc={videoSrc}
         durationMs={videoDurationMs}
+        composeClipCount={hasComposeEdits ? composeV1Clips.length : undefined}
+        composeClips={hasComposeEdits ? composeV1Clips : undefined}
       />
 
       {/* Reels Export */}

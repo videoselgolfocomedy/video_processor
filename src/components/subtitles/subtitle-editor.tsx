@@ -6,9 +6,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Download, Plus, Trash2, Save } from 'lucide-react';
+import { Download, Plus, Trash2, Save, RemoveFormatting } from 'lucide-react';
 import { formatTimestamp } from '@/lib/utils';
-import { segmentsToSrt, downloadAsFile } from '@/lib/subtitle-utils';
+import { segmentsToSrt, downloadAsFile, stripTrailingPunctuation } from '@/lib/subtitle-utils';
 import type { SubtitleSegment, SubtitleConstraints } from '@/types/project';
 
 interface SubtitleEditorProps {
@@ -97,6 +97,15 @@ export function SubtitleEditor({
             <Button
               variant="ghost"
               size="sm"
+              onClick={() => onChange(stripTrailingPunctuation(segments))}
+              title="Eliminar puntuación final (.,;:)"
+            >
+              <RemoveFormatting className="mr-1 h-3 w-3" />
+              Strip .,
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => downloadAsFile(
                 segmentsToSrt(segments),
                 'subtitles.srt',
@@ -160,7 +169,7 @@ export function SubtitleEditor({
                   </div>
                   <div className="flex-1 min-w-0">
                     <textarea
-                      className="w-full resize-none border-0 bg-transparent text-sm focus:outline-none focus:ring-0"
+                      className="w-full resize-none border-0 bg-transparent text-base focus:outline-none focus:ring-0"
                       rows={2}
                       value={seg.text}
                       onChange={(e) => updateSegment(i, { text: e.target.value })}

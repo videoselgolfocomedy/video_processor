@@ -134,6 +134,7 @@ export async function GET(
           'Content-Range': `bytes ${start}-${end}/${stat.size}`,
           'Content-Length': String(chunkSize),
           'Accept-Ranges': 'bytes',
+          'Cache-Control': 'no-cache',
         },
       });
     }

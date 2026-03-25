@@ -105,9 +105,10 @@ export default function ReelsPage() {
 }
 
 function getVideoSrc(project: { sync: { muxedVideoPath?: string }; sources: Array<{ type?: string; storedName: string }> }, projectId: string): string | undefined {
+  // Cache buster using filename to avoid stale cached video after re-mux
   if (project.sync.muxedVideoPath) {
     const name = project.sync.muxedVideoPath.split('/').pop();
-    return `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(name || '')}`;
+    return `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(name || '')}&v=${encodeURIComponent(name || '')}`;
   }
   const videoSource = project.sources.find((s) => (s as { type: string }).type === 'video');
   if (videoSource) {

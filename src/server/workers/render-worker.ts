@@ -427,7 +427,279 @@ export async function startRender(options: RenderOptions): Promise<void> {
     subtitleStyle = project.youtubeSubtitles?.style;
     segments = project.youtubeSubtitles?.segments ?? project.transcription.segments;
 
-    // Apply user-specified trim
+    // Check for compose timeline clips on v1 track
+    const composeVideoClips = (project.composition?.clips ?? [])
+      .filter((c: CompositionClip) => c.trackId === 'v1')
+      .sort((a: CompositionClip, b: CompositionClip) => a.timelineStartMs - b.timelineStartMs);
+
+    if (composeVideoClips.length > 0) {
+      // ---- COMPOSE-BASED YOUTUBE EXPORT ----
+      console.log(`[render] YouTube compose export with ${composeVideoClips.length} video clip(s):`,
+        composeVideoClips.map((c: CompositionClip) => `[${c.sourceInMs}-${c.sourceOutMs}ms]`).join(', '));
+
+      // Apply trim range to compose clips (trim operates on compose timeline)
+      let videoClips = composeVideoClips;
+      if (trimInMs !== undefined && trimOutMs !== undefined && (trimInMs > 0 || trimOutMs < Math.max(...composeVideoClips.map((c: CompositionClip) => c.timelineEndMs)))) {
+        videoClips = composeVideoClips
+          .filter((c: CompositionClip) => c.timelineEndMs > trimInMs && c.timelineStartMs < trimOutMs)
+          .map((c: CompositionClip) => ({
+            ...c,
+            sourceInMs: c.sourceInMs + Math.max(0, trimInMs - c.timelineStartMs),
+            sourceOutMs: c.sourceOutMs - Math.max(0, c.timelineEndMs - trimOutMs),
+            timelineStartMs: Math.max(c.timelineStartMs, trimInMs) - trimInMs,
+            timelineEndMs: Math.min(c.timelineEndMs, trimOutMs) - trimInMs,
+          }));
+        console.log(`[render] After trim [${trimInMs}-${trimOutMs}]: ${videoClips.length} clip(s)`);
+      }
+
+      if (videoClips.length === 0) {
+        jobManager.failJob(jobId, 'No video clips within trim range');
+        return;
+      }
+
+      // Use muxed video as source if available (has synced audio+video)
+      // Check export dir first, then compose dir for muxed files
+      let composeVideoSrc = videoSrc;
+      let composeAudioSrc = audioSrc;
+
+      const exportDirFiles = await fs.readdir(exportDir).catch(() => [] as string[]);
+      const composeDirPath = getProjectDir(projectId, 'compose');
+      const composeDirFiles = await fs.readdir(composeDirPath).catch(() => [] as string[]);
+
+      const muxedFile = exportDirFiles.find((f) => f.startsWith('muxed_') && f.endsWith('.mp4'))
+        || composeDirFiles.find((f) => f.startsWith('muxed_') && f.endsWith('.mp4'));
+      if (muxedFile) {
+        const muxedPath = exportDirFiles.includes(muxedFile)
+          ? path.join(exportDir, muxedFile)
+          : path.join(composeDirPath, muxedFile);
+        composeVideoSrc = muxedPath;
+        console.log(`[render] Using muxed video: ${muxedPath}`);
+      }
+
+      const mixFile = composeDirFiles.find((f) => f.startsWith('mix_'))
+        || exportDirFiles.find((f) => f.startsWith('mix_'));
+      if (mixFile) {
+        const mixPath = composeDirFiles.includes(mixFile)
+          ? path.join(composeDirPath, mixFile)
+          : path.join(exportDir, mixFile);
+        composeAudioSrc = mixPath;
+        console.log(`[render] Using mix audio: ${mixPath}`);
+      }
+
+      // Remap subtitles to concatenated clips output
+      const remappedSegments = remapSubtitlesToClips(segments, videoClips);
+      console.log(`[render] Remapped ${remappedSegments.length} subtitle segments for compose concat`);
+
+      // Extract text overlay clips from compose
+      const textClips = (project.composition?.clips ?? [])
+        .filter((c: CompositionClip) => c.type === 'text' && c.textContent)
+        .sort((a: CompositionClip, b: CompositionClip) => a.timelineStartMs - b.timelineStartMs);
+
+      let assTextOverlays: ASSTextOverlay[] | undefined;
+      if (textClips.length > 0) {
+        let concatOffset = 0;
+        const clipTimeMap = videoClips.map((vc: CompositionClip) => {
+          const entry = {
+            timelineStart: vc.timelineStartMs,
+            timelineEnd: vc.timelineEndMs,
+            outputStart: concatOffset,
+          };
+          concatOffset += vc.timelineEndMs - vc.timelineStartMs;
+          return entry;
+        });
+
+        assTextOverlays = [];
+        const scale = preset.width / BASE_WIDTH;
+        for (const tc of textClips) {
+          for (const cm of clipTimeMap) {
+            const overlapStart = Math.max(tc.timelineStartMs, cm.timelineStart);
+            const overlapEnd = Math.min(tc.timelineEndMs, cm.timelineEnd);
+            if (overlapStart < overlapEnd) {
+              const outStart = cm.outputStart + (overlapStart - cm.timelineStart);
+              const outEnd = cm.outputStart + (overlapEnd - cm.timelineStart);
+              assTextOverlays.push({
+                text: tc.textContent!,
+                startMs: outStart,
+                endMs: outEnd,
+                x: tc.overlayPosition?.x ?? 0.5,
+                y: tc.overlayPosition?.y ?? 0.5,
+                width: tc.overlayPosition?.width ?? 0.8,
+                fontSize: Math.round((tc.textStyle?.fontSize ?? 40) * scale),
+                fontFamily: tc.textStyle?.fontFamily ?? 'Inter',
+                fontWeight: tc.textStyle?.fontWeight ?? 400,
+                color: tc.textStyle?.color ?? '#ffffff',
+                backgroundColor: tc.textStyle?.backgroundColor,
+                shadowX: tc.textStyle?.shadowX,
+                shadowY: tc.textStyle?.shadowY,
+                shadowBlur: tc.textStyle?.shadowBlur,
+                shadowColor: tc.textStyle?.shadowColor,
+                lineHeight: tc.textStyle?.lineHeight,
+              });
+            }
+          }
+        }
+      }
+
+      // Audio gap muting from a1 clips
+      const composeAudioClips = (project.composition?.clips ?? [])
+        .filter((c: CompositionClip) => c.trackId === 'a1' || c.trackId === 'a2')
+        .sort((a: CompositionClip, b: CompositionClip) => a.timelineStartMs - b.timelineStartMs);
+
+      let audioClipRanges: { startMs: number; endMs: number }[] | undefined;
+      if (composeAudioClips.length > 0) {
+        let concatOff = 0;
+        const vcTimeMap = videoClips.map((vc: CompositionClip) => {
+          const entry = {
+            timelineStart: vc.timelineStartMs,
+            timelineEnd: vc.timelineEndMs,
+            outputStart: concatOff,
+          };
+          concatOff += vc.timelineEndMs - vc.timelineStartMs;
+          return entry;
+        });
+
+        audioClipRanges = [];
+        for (const ac of composeAudioClips) {
+          for (const cm of vcTimeMap) {
+            const overlapStart = Math.max(ac.timelineStartMs, cm.timelineStart);
+            const overlapEnd = Math.min(ac.timelineEndMs, cm.timelineEnd);
+            if (overlapStart < overlapEnd) {
+              audioClipRanges.push({
+                startMs: cm.outputStart + (overlapStart - cm.timelineStart),
+                endMs: cm.outputStart + (overlapEnd - cm.timelineStart),
+              });
+            }
+          }
+        }
+
+        const totalConcatMs = concatOff;
+        const totalAudioMs = audioClipRanges.reduce((sum, r) => sum + (r.endMs - r.startMs), 0);
+        if (totalAudioMs >= totalConcatMs - 100) {
+          audioClipRanges = undefined;
+        }
+      }
+
+      // Extract image/gif overlays from compose
+      const imageGifClips = (project.composition?.clips ?? [])
+        .filter((c: CompositionClip) => (c.type === 'image' || c.type === 'gif') && c.fileName)
+        .sort((a: CompositionClip, b: CompositionClip) => a.timelineStartMs - b.timelineStartMs);
+
+      let imageOverlays: ImageOverlayInput[] | undefined;
+      if (imageGifClips.length > 0) {
+        let concatOff2 = 0;
+        const vcTimeMap2 = videoClips.map((vc: CompositionClip) => {
+          const entry = {
+            timelineStart: vc.timelineStartMs,
+            timelineEnd: vc.timelineEndMs,
+            outputStart: concatOff2,
+          };
+          concatOff2 += vc.timelineEndMs - vc.timelineStartMs;
+          return entry;
+        });
+
+        imageOverlays = [];
+        const projectDir = getProjectDir(projectId);
+        for (const ic of imageGifClips) {
+          for (const cm of vcTimeMap2) {
+            const overlapStart = Math.max(ic.timelineStartMs, cm.timelineStart);
+            const overlapEnd = Math.min(ic.timelineEndMs, cm.timelineEnd);
+            if (overlapStart < overlapEnd) {
+              const filePath = path.join(projectDir, ic.fileName!);
+              imageOverlays.push({
+                filePath,
+                startMs: cm.outputStart + (overlapStart - cm.timelineStart),
+                endMs: cm.outputStart + (overlapEnd - cm.timelineStart),
+                x: ic.overlayPosition?.x ?? 0.5,
+                y: ic.overlayPosition?.y ?? 0.5,
+                width: ic.overlayPosition?.width ?? 0.8,
+                opacity: ic.opacity ?? 1,
+              });
+            }
+          }
+        }
+        if (imageOverlays.length === 0) imageOverlays = undefined;
+      }
+
+      // Generate ASS subtitle file for compose export
+      let composeAssFilePath: string | undefined;
+      const hasSubtitles = includeSubtitles && remappedSegments.length > 0 && subtitleStyle;
+      const hasTextOverlays = assTextOverlays && assTextOverlays.length > 0;
+      if (hasSubtitles || hasTextOverlays) {
+        const scaledStyle = scaleStyleForOutput(subtitleStyle!, preset.width);
+        const segs = hasSubtitles ? remappedSegments : [];
+        const assContent = generateASS(segs, scaledStyle, preset.fps, preset.width, preset.height, assTextOverlays);
+        composeAssFilePath = path.join(exportDir, `subs_${exportId}.ass`);
+        await fs.writeFile(composeAssFilePath, assContent, 'utf-8');
+        const debugAssPath = path.join(exportDir, `debug_subs_${preset.id}.ass`);
+        await fs.writeFile(debugAssPath, assContent, 'utf-8');
+        console.log(`[render] YouTube compose ASS: ${debugAssPath}`);
+      }
+
+      jobManager.updateProgress(jobId, 2, 'Starting FFmpeg compose render...');
+
+      const { promise: composePromise, process: composeProc } = renderReelVideo({
+        videoInputPath: composeVideoSrc,
+        audioInputPath: composeAudioSrc,
+        clips: videoClips,
+        audioClipRanges,
+        imageOverlays,
+        assFilePath: composeAssFilePath,
+        fontsDirPath,
+        outputPath,
+        width: preset.width,
+        height: preset.height,
+        fps: preset.fps,
+        crf: preset.crf,
+        audioBitrate: preset.audioBitrate,
+        cropRegion: undefined, // YouTube exports don't crop
+        sourceWidth,
+        sourceHeight,
+        onProgress: (percent) => {
+          jobManager.updateProgress(jobId, 2 + percent * 0.96, `Rendering... ${Math.round(percent)}%`);
+        },
+      });
+
+      jobManager.setProcess(jobId, composeProc);
+
+      const composeTimeout = setTimeout(() => {
+        const job = jobManager.getJob(jobId);
+        if (job && job.status === 'running') {
+          composeProc.kill('SIGTERM');
+          jobManager.failJob(jobId, 'Render timed out (2h limit)');
+        }
+      }, RENDER_TIMEOUT_MS);
+
+      composePromise
+        .then(async () => {
+          clearTimeout(composeTimeout);
+          const currentProject = await getProject(projectId);
+          if (currentProject) {
+            const exports = currentProject.exports.map((e) =>
+              e.id === exportId
+                ? { ...e, status: 'done' as const, outputPath, completedAt: new Date().toISOString(), progress: 100 }
+                : e
+            );
+            await updateProject(projectId, { exports });
+          }
+          jobManager.completeJob(jobId, { outputPath });
+        })
+        .catch((err) => {
+          clearTimeout(composeTimeout);
+          console.error(`[render] YouTube compose render failed:`, err);
+          const job = jobManager.getJob(jobId);
+          if (job && job.status === 'running') {
+            jobManager.failJob(jobId, `Render failed: ${(err as Error).message}`);
+          }
+        })
+        .finally(async () => {
+          if (composeAssFilePath) {
+            try { await fs.unlink(composeAssFilePath); } catch { /* ignore */ }
+          }
+        });
+      return; // Early return — compose rendering handled separately
+    }
+
+    // Fallback: no compose clips, use simple trim
     const durationSec = videoSource?.duration
       || project.audio.extractedTracks[0]?.duration
       || 0;

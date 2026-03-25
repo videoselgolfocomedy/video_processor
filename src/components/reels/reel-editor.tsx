@@ -4,6 +4,8 @@ import { useReelStore } from '@/stores/reel-store';
 import { ReelVideoPlayer } from './reel-video-player';
 import { ReelTrimBar } from './reel-trim-bar';
 import { formatTimestamp } from '@/lib/utils';
+import { stripTrailingPunctuation } from '@/lib/subtitle-utils';
+import { RemoveFormatting } from 'lucide-react';
 
 interface ReelEditorProps {
   reelId: string;
@@ -30,9 +32,26 @@ export function ReelEditor({ reelId, videoSrc, audioSrc }: ReelEditorProps) {
 
       {/* Subtitles */}
       <section>
-        <h3 className="text-sm font-medium mb-2">
-          Subtitles ({reel.subtitleSegments.length})
-        </h3>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-medium">
+            Subtitles ({reel.subtitleSegments.length})
+          </h3>
+          <button
+            className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-0.5"
+            onClick={() => {
+              const stripped = stripTrailingPunctuation(reel.subtitleSegments);
+              stripped.forEach((seg, i) => {
+                if (seg.text !== reel.subtitleSegments[i]?.text) {
+                  updateReelSubtitleSegment(reelId, seg.id, { text: seg.text, words: seg.words });
+                }
+              });
+            }}
+            title="Eliminar puntuación final (.,;:)"
+          >
+            <RemoveFormatting className="h-3 w-3" />
+            Strip .,
+          </button>
+        </div>
         <div className="space-y-1">
           {reel.subtitleSegments.map((seg) => {
             const tooLong = seg.text.length > constraints.maxCharsPerBlock;
@@ -50,7 +69,7 @@ export function ReelEditor({ reelId, videoSrc, audioSrc }: ReelEditorProps) {
                   {tooSlow && <span className="ml-1 text-yellow-500">({((seg.endMs - seg.startMs) / 1000).toFixed(1)}s)</span>}
                 </div>
                 <input
-                  className="w-full bg-transparent text-xs mt-0.5 outline-none"
+                  className="w-full bg-transparent text-sm mt-0.5 outline-none"
                   value={seg.text}
                   onChange={(e) => updateReelSubtitleSegment(reelId, seg.id, { text: e.target.value })}
                 />

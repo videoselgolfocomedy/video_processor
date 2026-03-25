@@ -53,9 +53,9 @@ export default function ComposePage() {
 
   // Build video/audio source URLs
   const videoSrc = getVideoSrc(currentProject, projectId);
-  // Only pass separate audioSrc when NOT using muxed video (muxed already has audio baked in)
-  const hasMuxedVideo = !!currentProject.sync.muxedVideoPath;
-  const audioSrc = hasMuxedVideo ? undefined : getAudioSrc(currentProject, projectId);
+  // Always pass audioSrc — the Video component is muted (volume={0}) so audio
+  // is handled exclusively by the a1 Audio clips, which respect trim/split/delete.
+  const audioSrc = getAudioSrc(currentProject, projectId);
   const subtitleStyle = currentProject.youtubeSubtitles.style;
 
   return (
@@ -95,10 +95,10 @@ function getDurationMs(project: {
 }
 
 function getVideoSrc(project: { sync: { muxedVideoPath?: string }; sources: Array<{ type?: string; storedName: string }> }, projectId: string): string | undefined {
-  // Prefer muxed video
+  // Prefer muxed video (cache buster using filename to avoid stale cached video after re-mux)
   if (project.sync.muxedVideoPath) {
     const name = project.sync.muxedVideoPath.split('/').pop();
-    return `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(name || '')}`;
+    return `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(name || '')}&v=${encodeURIComponent(name || '')}`;
   }
   // Fall back to first video source
   const videoSource = project.sources.find((s) => (s as { type: string }).type === 'video');

@@ -6,36 +6,81 @@ import type { PlayerRef } from '@remotion/player';
 import { AbsoluteFill, Video, Audio, Sequence, Img } from 'remotion';
 import { SubtitleLayer } from '@/remotion/compositions/SubtitleLayer';
 import { useComposeStore } from '@/stores/compose-store';
-import type {
-  CompositionClip,
-  CompositionTrack,
-  SubtitleSegment,
-  SubtitleStyle,
-} from '@/types/project';
+import type { SubtitleStyle } from '@/types/project';
 
 const FPS = 30;
+const CONTIGUOUS_THRESHOLD_MS = 50; // clips within 50ms are considered contiguous
+
+// Merge contiguous clips from the same source into single ranges to avoid
+// mounting multiple <Video> elements which causes a black flash at cuts.
+interface MergedRange {
+  id: string;
+  timelineStartMs: number;
+  timelineEndMs: number;
+  sourceInMs: number;
+}
+
+function mergeContiguousClips(
+  trackClips: { id: string; timelineStartMs: number; timelineEndMs: number; sourceInMs: number; sourceOutMs: number }[]
+): MergedRange[] {
+  if (trackClips.length === 0) return [];
+  const sorted = [...trackClips].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+  const merged: MergedRange[] = [];
+  let current: MergedRange = {
+    id: sorted[0].id,
+    timelineStartMs: sorted[0].timelineStartMs,
+    timelineEndMs: sorted[0].timelineEndMs,
+    sourceInMs: sorted[0].sourceInMs,
+  };
+
+  for (let i = 1; i < sorted.length; i++) {
+    const next = sorted[i];
+    const timeGap = next.timelineStartMs - current.timelineEndMs;
+    const expectedSourceIn = current.sourceInMs + (current.timelineEndMs - current.timelineStartMs);
+    const sourceGap = Math.abs(next.sourceInMs - expectedSourceIn);
+
+    // Contiguous: timeline gap < threshold AND source position is continuous
+    if (timeGap < CONTIGUOUS_THRESHOLD_MS && sourceGap < CONTIGUOUS_THRESHOLD_MS) {
+      current.timelineEndMs = next.timelineEndMs;
+      // Keep current.sourceInMs — the Video plays continuously from the original startFrom
+    } else {
+      merged.push(current);
+      current = {
+        id: next.id,
+        timelineStartMs: next.timelineStartMs,
+        timelineEndMs: next.timelineEndMs,
+        sourceInMs: next.sourceInMs,
+      };
+    }
+  }
+  merged.push(current);
+  return merged;
+}
 
 // --- Remotion Composition ---
+// The composition reads clips/tracks/segments directly from the zustand store
+// instead of relying on Remotion Player's inputProps propagation. This ensures
+// the composition always reflects the latest store state (e.g. after clip deletion)
+// without depending on the Player re-rendering in response to inputProps changes.
 
 interface ComposeCompositionProps {
   videoSrc?: string;
   audioSrc?: string;
-  clips: CompositionClip[];
   clipSources: Record<string, string>;
-  tracks: CompositionTrack[];
-  segments: SubtitleSegment[];
   subtitleStyle: SubtitleStyle;
 }
 
 const ComposeComposition: React.FC<ComposeCompositionProps> = ({
   videoSrc,
   audioSrc,
-  clips,
   clipSources,
-  tracks,
-  segments,
   subtitleStyle,
 }) => {
+  // Read directly from the store so deletions/mutations are always reflected
+  const clips = useComposeStore((s) => s.clips);
+  const tracks = useComposeStore((s) => s.tracks);
+  const segments = useComposeStore((s) => s.subtitleSegments);
+
   const mutedTrackIds = new Set(tracks.filter((t) => t.muted).map((t) => t.id));
   const hiddenTrackIds = new Set(tracks.filter((t) => !t.visible).map((t) => t.id));
 
@@ -55,15 +100,32 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
   const cutaways = videoClips.filter((c) => c.mode === 'cutaway' && !c.overlayPosition);
   const overlays = videoClips.filter((c) => c.mode === 'overlay');
 
+  // Base video/audio clips on v1/a1 tracks — merge contiguous to avoid black flash
+  const v1Clips = clips.filter((c) => c.trackId === 'v1');
+  const a1Clips = clips.filter((c) => c.trackId === 'a1');
+  const v1Merged = mergeContiguousClips(v1Clips);
+  const a1Merged = mergeContiguousClips(a1Clips);
+
   return (
     <AbsoluteFill style={{ backgroundColor: '#000' }}>
-      {/* 1. Base video */}
-      {videoSrc && (
-        <Video
-          src={videoSrc}
-          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-        />
-      )}
+      {/* 1. Base video clips (merged contiguous ranges → single <Video> per range) */}
+      {/* Muted because audio is handled separately via a1 clips — the muxed video
+          contains embedded audio which would play on top of the separate Audio track */}
+      {videoSrc && v1Merged.map((range) => {
+        const from = Math.round((range.timelineStartMs / 1000) * FPS);
+        const dur = Math.max(1, Math.round(((range.timelineEndMs - range.timelineStartMs) / 1000) * FPS));
+        const startFrom = Math.round((range.sourceInMs / 1000) * FPS);
+        return (
+          <Sequence key={range.id} from={from} durationInFrames={dur}>
+            <Video
+              src={videoSrc}
+              startFrom={startFrom}
+              volume={0}
+              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            />
+          </Sequence>
+        );
+      })}
 
       {/* 2. Cutaways */}
       {cutaways.map((clip) => {
@@ -139,8 +201,17 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
         );
       })}
 
-      {/* 4. Base audio */}
-      {audioSrc && <Audio src={audioSrc} />}
+      {/* 4. Base audio clips (merged contiguous ranges → single <Audio> per range) */}
+      {audioSrc && a1Merged.map((range) => {
+        const from = Math.round((range.timelineStartMs / 1000) * FPS);
+        const dur = Math.max(1, Math.round(((range.timelineEndMs - range.timelineStartMs) / 1000) * FPS));
+        const startFrom = Math.round((range.sourceInMs / 1000) * FPS);
+        return (
+          <Sequence key={range.id} from={from} durationInFrames={dur}>
+            <Audio src={audioSrc} startFrom={startFrom} />
+          </Sequence>
+        );
+      })}
 
       {/* 5. Extra audio clips */}
       {audioClips.map((clip) => {
@@ -213,11 +284,8 @@ export function ComposePreview({
 }: ComposePreviewProps) {
   const playerRef = useRef<PlayerRef>(null);
 
-  // Subscribe only to data that affects the composition rendering,
-  // NOT to currentTimeMs/isPlaying (those are synced imperatively via refs).
-  const clips = useComposeStore((s) => s.clips);
-  const tracks = useComposeStore((s) => s.tracks);
-  const segments = useComposeStore((s) => s.subtitleSegments);
+  // The composition component reads clips/tracks/segments directly from the
+  // store, so we only need durationMs and mediaBin here for the Player wrapper.
   const durationMs = useComposeStore((s) => s.durationMs);
   const mediaBin = useComposeStore((s) => s.mediaBin);
 
@@ -240,13 +308,10 @@ export function ComposePreview({
     () => ({
       videoSrc,
       audioSrc,
-      clips,
       clipSources,
-      tracks,
-      segments,
       subtitleStyle,
     }),
-    [videoSrc, audioSrc, clips, clipSources, tracks, segments, subtitleStyle]
+    [videoSrc, audioSrc, clipSources, subtitleStyle]
   );
 
   // Subscribe to currentTimeMs changes outside of React render cycle

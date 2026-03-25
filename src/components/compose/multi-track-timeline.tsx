@@ -37,14 +37,46 @@ export function MultiTrackTimeline({ onSave, saving }: MultiTrackTimelineProps) 
     return () => observer.disconnect();
   }, [setViewportWidth]);
 
-  // Ctrl+scroll = zoom, plain scroll = horizontal pan
+  // Auto-scroll timeline when playhead moves outside the visible range
+  // (e.g. clicking a subtitle, pressing arrows, navigating next/prev)
+  useEffect(() => {
+    const unsub = useComposeStore.subscribe(
+      (state, prevState) => {
+        if (state.currentTimeMs === prevState.currentTimeMs) return;
+        if (state.isPlaying) return; // During playback, the playhead follows naturally
+
+        const { scrollOffsetMs: offset, viewportWidthPx: vpW, zoomLevel: zoom } = state;
+        const visibleMs = vpW / zoom;
+        const margin = visibleMs * 0.1; // 10% margin
+        const playheadMs = state.currentTimeMs;
+
+        // If playhead is outside the visible window (with margin), re-center
+        if (playheadMs < offset + margin || playheadMs > offset + visibleMs - margin) {
+          const newOffset = Math.max(0, playheadMs - visibleMs / 2);
+          useComposeStore.getState().setScrollOffset(newOffset);
+        }
+      }
+    );
+    return unsub;
+  }, []);
+
+  // Ctrl+scroll = zoom (centered on playhead), plain scroll = horizontal pan
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const delta = e.deltaY > 0 ? 0.85 : 1.18;
         const newZoom = Math.max(0.01, Math.min(1, zoomLevel * delta));
+
+        // Keep playhead at the same viewport position after zoom
+        const store = useComposeStore.getState();
+        const playheadMs = store.currentTimeMs;
+        const vpWidth = store.viewportWidthPx;
+        const visibleMs = vpWidth / newZoom;
+        // Center playhead in the viewport
+        const newOffset = Math.max(0, Math.min(durationMs, playheadMs - visibleMs / 2));
         setZoom(newZoom);
+        setScrollOffset(newOffset);
       } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
         // Horizontal scroll
         const deltaMs = (e.deltaX || e.deltaY) / zoomLevel;

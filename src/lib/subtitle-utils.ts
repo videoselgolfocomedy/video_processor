@@ -147,6 +147,33 @@ export function segmentsToDiff(
 }
 
 /**
+ * Remove trailing punctuation (.,;:) from each segment's text.
+ * Preserves punctuation mid-sentence (e.g. "hola, ¿qué tal?" stays,
+ * but "hola, qué tal." becomes "hola, qué tal").
+ * Also strips trailing punctuation from the last word in the words array.
+ */
+export function stripTrailingPunctuation(segments: SubtitleSegment[]): SubtitleSegment[] {
+  return segments.map((seg) => {
+    const newText = seg.text.replace(/[.,;:]+$/, '').trimEnd();
+    if (newText === seg.text) return seg;
+
+    // Also update the last word if words array exists
+    let newWords = seg.words;
+    if (newWords && newWords.length > 0) {
+      const lastIdx = newWords.length - 1;
+      const lastWord = newWords[lastIdx];
+      const newWordText = lastWord.text.replace(/[.,;:]+$/, '').trimEnd();
+      if (newWordText !== lastWord.text) {
+        newWords = [...newWords];
+        newWords[lastIdx] = { ...lastWord, text: newWordText };
+      }
+    }
+
+    return { ...seg, text: newText, words: newWords };
+  });
+}
+
+/**
  * Trigger a file download in the browser.
  */
 export function downloadAsFile(

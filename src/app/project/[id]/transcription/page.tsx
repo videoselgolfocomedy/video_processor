@@ -218,11 +218,9 @@ export default function TranscriptionPage() {
             const pct = Math.round((event.batch / event.total) * 100);
             setReinterpretProgress(`${event.message} (${pct}%)`);
           } else if (event.type === 'done') {
-            const { constraints: c } = currentProject.transcription;
-            const corrected = c
-              ? splitLongSegments(event.segments, c.maxCharsPerBlock, c.maxDurationMs)
-              : event.segments;
-            setReinterpretResults(corrected);
+            // Don't apply splitLongSegments here — it changes array length
+            // and breaks the index-based diff display. Split when accepting.
+            setReinterpretResults(event.segments);
             // Persist bits if the LLM identified any
             if (event.bits && Array.isArray(event.bits) && event.bits.length > 0) {
               fetch(`/api/projects/${projectId}/subtitles`, {
@@ -266,7 +264,11 @@ export default function TranscriptionPage() {
       let newSegments: SubtitleSegment[];
 
       if (mode === 'all') {
-        newSegments = reinterpretResults;
+        // Apply splitLongSegments now (deferred from handleReinterpret to preserve index alignment for diff)
+        const { constraints: c } = currentProject.transcription;
+        newSegments = c
+          ? splitLongSegments(reinterpretResults, c.maxCharsPerBlock, c.maxDurationMs)
+          : reinterpretResults;
         setReinterpretResults(null);
         setShowReinterpretPanel(false);
       } else if (index !== undefined) {
@@ -332,7 +334,11 @@ export default function TranscriptionPage() {
 
   // Compute total duration from segments or video
   const videoSource = currentProject.sources.find((s) => s.type === 'video');
-  const videoDurationMs = videoSource?.duration ? videoSource.duration * 1000 : 0;
+  const audioSourceEntry = currentProject.sources.find((s) => s.type === 'audio');
+  // When using muxed video, its duration matches the audio source (not the original camera)
+  const videoDurationMs = useMuxedVideo && muxedVideoName && audioSourceEntry?.duration
+    ? audioSourceEntry.duration * 1000
+    : (videoSource?.duration ? videoSource.duration * 1000 : 0);
   const totalDurationMs = hasSegments
     ? Math.max(...segments.map((s) => s.endMs), videoDurationMs)
     : videoDurationMs || 10000;

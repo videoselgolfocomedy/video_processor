@@ -3,6 +3,7 @@
 import { useCallback, useState, useEffect, useMemo } from 'react';
 import { useComposeStore } from '@/stores/compose-store';
 import { ComposePreview } from './compose-preview';
+import { ComposeSubtitleEditor } from './compose-subtitle-editor';
 import { ClipProperties } from './clip-properties';
 import { MultiTrackTimeline } from './multi-track-timeline';
 import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
@@ -219,33 +220,26 @@ export function ComposeLayout({
 
   return (
     <div className="flex h-full flex-col">
-      {/* Top section: Preview + Right Panel */}
-      <div className="flex flex-1 min-h-0">
-        {/* Preview area (16:9 YouTube only) */}
-        <div className="flex-1 flex flex-col min-w-0">
-          <ComposePreview
-            projectId={projectId}
-            videoSrc={videoSrc}
-            audioSrc={audioSrc}
-            subtitleStyle={storeSubtitleStyle}
-          />
+      {/* Row 1: Full-width Preview (compact) */}
+      <div className="flex-shrink-0 flex-grow-0" style={{ height: '30%', minHeight: 160 }}>
+        <ComposePreview
+          projectId={projectId}
+          videoSrc={videoSrc}
+          audioSrc={audioSrc}
+          subtitleStyle={storeSubtitleStyle}
+        />
+      </div>
+
+      {/* Row 2: Subtitle Editor (2/3) + Format/Props Panel (1/3) */}
+      <div className="flex min-h-0 border-t border-border" style={{ flex: '1 1 0%' }}>
+        {/* Subtitle text editor with auto-scroll */}
+        <div className="w-2/3 min-w-0 border-r border-border overflow-hidden">
+          <ComposeSubtitleEditor />
         </div>
 
-        {/* Right Panel: context-sensitive */}
-        <div className="w-64 flex-shrink-0 border-l border-border bg-card overflow-auto flex flex-col">
-          {panelMode === 'clip-properties' && firstSelectedClip && (
-            <div className="flex-1 overflow-auto">
-              <ClipProperties />
-            </div>
-          )}
-
-          {panelMode === 'text-clip' && firstSelectedClip && (
-            <div className="flex-1 overflow-auto">
-              <ClipProperties />
-            </div>
-          )}
-
-          {panelMode === 'image-clip' && firstSelectedClip && (
+        {/* Right Panel: context-sensitive (format / clip props) */}
+        <div className="w-1/3 flex-shrink-0 bg-card overflow-auto flex flex-col">
+          {(panelMode === 'clip-properties' || panelMode === 'text-clip' || panelMode === 'image-clip') && firstSelectedClip && (
             <div className="flex-1 overflow-auto">
               <ClipProperties />
             </div>
@@ -342,7 +336,7 @@ export function ComposeLayout({
         </div>
       </div>
 
-      {/* Bottom section: Timeline */}
+      {/* Row 3: Timeline */}
       <div className="flex-shrink-0">
         <MultiTrackTimeline onSave={handleSave} saving={saving} />
       </div>

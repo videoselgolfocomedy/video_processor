@@ -7,7 +7,7 @@ import { SubtitlePreview } from '@/components/subtitles/subtitle-preview';
 import { RangeSelector } from '@/components/export/range-selector';
 import { EXPORT_PRESETS } from '@/config/export-presets';
 import { Monitor, Smartphone, Square, Zap, Film, Info, Subtitles } from 'lucide-react';
-import type { ExportPreset, SubtitleSegment, SubtitleStyle, SourceFile } from '@/types/project';
+import type { ExportPreset, SubtitleSegment, SubtitleStyle, SourceFile, CompositionClip } from '@/types/project';
 
 function ToggleSwitch({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
   return (
@@ -43,6 +43,8 @@ interface ExportPanelProps {
   videoSource?: SourceFile;
   videoSrc?: string;
   durationMs?: number;
+  composeClipCount?: number; // If set, compose timeline is active
+  composeClips?: CompositionClip[]; // v1 clips for preview rendering
 }
 
 function PresetIcon({ preset }: { preset: ExportPreset }) {
@@ -118,6 +120,8 @@ export function ExportPanel({
   videoSource,
   videoSrc,
   durationMs = 10000,
+  composeClipCount,
+  composeClips,
 }: ExportPanelProps) {
   const [selectedPreset, setSelectedPreset] = useState<string>('youtube_1080');
   const [includeSubtitles, setIncludeSubtitles] = useState(true);
@@ -221,6 +225,12 @@ export function ExportPanel({
                       <span className="truncate">{videoSource.originalName}</span>
                     </>
                   )}
+                  {composeClipCount !== undefined && (
+                    <>
+                      <span className="text-muted-foreground">Compose</span>
+                      <span className="text-green-400">{composeClipCount} clip{composeClipCount !== 1 ? 's' : ''} (editado)</span>
+                    </>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -297,6 +307,7 @@ export function ExportPanel({
               height={activePreset.height}
               fps={activePreset.fps}
               orientation={activePreset.orientation}
+              composeClips={composeClips}
             />
           </div>
         )}

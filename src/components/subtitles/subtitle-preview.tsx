@@ -3,9 +3,11 @@
 import React, { useMemo } from 'react';
 import { Player } from '@remotion/player';
 import type { PlayerRef } from '@remotion/player';
-import { AbsoluteFill, Video } from 'remotion';
+import { AbsoluteFill, Video, Sequence } from 'remotion';
 import { SubtitleBlock } from '@/remotion/components/SubtitleBlock';
-import type { SubtitleSegment, SubtitleStyle } from '@/types/project';
+import type { SubtitleSegment, SubtitleStyle, CompositionClip } from '@/types/project';
+
+const FPS = 30;
 
 interface SubtitlePreviewProps {
   segments: SubtitleSegment[];
@@ -17,6 +19,8 @@ interface SubtitlePreviewProps {
   fps?: number;
   orientation?: 'horizontal' | 'vertical';
   playerRef?: React.RefObject<PlayerRef>;
+  /** When provided, renders compose clips with Sequences instead of raw full video */
+  composeClips?: CompositionClip[];
 }
 
 // Wrapper that matches Remotion's expected component signature
@@ -24,19 +28,33 @@ const PreviewComposition: React.FC<{
   segments: SubtitleSegment[];
   style: SubtitleStyle;
   videoSrc?: string;
-}> = ({ segments, style, videoSrc }) => {
+  composeClips?: CompositionClip[];
+  fps: number;
+}> = ({ segments, style, videoSrc, composeClips, fps }) => {
   return (
     <AbsoluteFill style={{ backgroundColor: '#1a1a2e' }}>
-      {videoSrc && (
+      {videoSrc && composeClips && composeClips.length > 0 ? (
+        // Compose mode: render clips with Sequences
+        composeClips.map((clip) => {
+          const from = Math.round((clip.timelineStartMs / 1000) * fps);
+          const dur = Math.max(1, Math.round(((clip.timelineEndMs - clip.timelineStartMs) / 1000) * fps));
+          const startFrom = Math.round((clip.sourceInMs / 1000) * fps);
+          return (
+            <Sequence key={clip.id} from={from} durationInFrames={dur}>
+              <Video
+                src={videoSrc}
+                startFrom={startFrom}
+                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+              />
+            </Sequence>
+          );
+        })
+      ) : videoSrc ? (
         <Video
           src={videoSrc}
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'contain',
-          }}
+          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
         />
-      )}
+      ) : null}
       {segments.map((segment) => (
         <SubtitleBlock key={segment.id} segment={segment} style={style} />
       ))}
@@ -54,6 +72,7 @@ export function SubtitlePreview({
   fps = 30,
   orientation = 'horizontal',
   playerRef,
+  composeClips,
 }: SubtitlePreviewProps) {
   const durationInFrames = Math.max(1, Math.ceil((durationMs / 1000) * fps));
 
@@ -65,8 +84,8 @@ export function SubtitlePreview({
   const playerWidth = Math.round(playerHeight * aspectRatio);
 
   const inputProps = useMemo(
-    () => ({ segments, style, videoSrc }),
-    [segments, style, videoSrc]
+    () => ({ segments, style, videoSrc, composeClips, fps }),
+    [segments, style, videoSrc, composeClips, fps]
   );
 
   return (

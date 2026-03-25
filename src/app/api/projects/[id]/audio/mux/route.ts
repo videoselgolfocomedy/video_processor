@@ -110,12 +110,20 @@ export async function POST(
   }
 
   // Determine alignment offset
+  // Negative = camera starts before board by |offset| ms
+  // Positive = board starts before camera by offset ms
   const alignmentOffsetMs = project.audio.alignmentOffsetMs ?? 0;
   const offsetSec = Math.max(0, alignmentOffsetMs / 1000);
 
-  // Detect if the audio file is already aligned with camera time 0
-  // Mix files (mixed.wav, mix_*) have the offset already baked in
+  // Detect if the audio file is already aligned (mix files had offset baked in during mixing)
   const isAlreadyAligned = safeName === 'mixed.wav' || safeName.startsWith('mix_');
+
+  // For mix files with negative alignment (camera started first):
+  // The mix covers the overlap region starting at camera time |offset|,
+  // so we must seek the video forward to match.
+  const videoSeekSec = isAlreadyAligned && alignmentOffsetMs < 0
+    ? Math.abs(alignmentOffsetMs / 1000)
+    : 0;
 
   // Probe audio duration to use -t for reliable trimming
   // (-shortest is unreliable with -c:v copy)
@@ -129,7 +137,7 @@ export async function POST(
   const job = jobManager.createJob(id, 'mux');
   jobManager.startJob(job.id);
   jobManager.updateProgress(job.id, 5,
-    `Muxando: video + audio (${Math.round(audioDurationSec)}s)...`
+    `Muxando: video + audio (${Math.round(audioDurationSec)}s)${videoSeekSec > 0 ? ` seek=${videoSeekSec.toFixed(1)}s` : ''}...`
   );
 
   const ffmpeg = getFFmpegPath();
@@ -153,8 +161,10 @@ export async function POST(
       outputPath,
     ];
   } else {
-    // Mix file: audio starts at camera time 0, use -t to cut output to audio duration
+    // Mix/aligned file: seek video to the overlap start point, then mux with audio
     args = [
+      // -ss before -i for fast seek (input seeking with keyframe accuracy)
+      ...(videoSeekSec > 0 ? ['-ss', String(videoSeekSec)] : []),
       '-i', videoPath,
       '-i', audioPath,
       '-c:v', 'copy',
