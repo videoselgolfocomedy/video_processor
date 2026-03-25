@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Guía del Editor de Timeline — Reels</title>
+<style>
+  @page { size: A4; margin: 20mm 18mm; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    font-size: 11px;
+    line-height: 1.5;
+    color: #e2e8f0;
+    background: #0f172a;
+  }
+
+  /* ── Cover ── */
+  .cover {
+    page-break-after: always;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    text-align: center;
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  }
+  .cover h1 {
+    font-size: 36px;
+    font-weight: 800;
+    background: linear-gradient(135deg, #38bdf8, #818cf8, #c084fc);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 12px;
+  }
+  .cover .subtitle {
+    font-size: 16px;
+    color: #94a3b8;
+    margin-bottom: 40px;
+  }
+  .cover .icon-row {
+    display: flex;
+    gap: 16px;
+    font-size: 28px;
+    margin-bottom: 30px;
+  }
+  .cover .version {
+    font-size: 11px;
+    color: #475569;
+  }
+
+  /* ── Layout ── */
+  .page { page-break-after: always; padding: 0; }
+  .page:last-child { page-break-after: avoid; }
+
+  h2 {
+    font-size: 18px;
+    font-weight: 700;
+    color: #38bdf8;
+    border-bottom: 2px solid #1e3a5f;
+    padding-bottom: 6px;
+    margin: 20px 0 12px 0;
+  }
+  h2:first-child { margin-top: 0; }
+
+  h3 {
+    font-size: 13px;
+    font-weight: 600;
+    color: #818cf8;
+    margin: 14px 0 6px 0;
+  }
+
+  p, li { color: #cbd5e1; }
+  p { margin-bottom: 8px; }
+
+  /* ── Tables ── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0 14px 0;
+    font-size: 10.5px;
+  }
+  th {
+    background: #1e293b;
+    color: #38bdf8;
+    text-align: left;
+    padding: 6px 8px;
+    font-weight: 600;
+    border-bottom: 2px solid #334155;
+  }
+  td {
+    padding: 5px 8px;
+    border-bottom: 1px solid #1e293b;
+    vertical-align: top;
+  }
+  tr:nth-child(even) td { background: #0f172a; }
+  tr:nth-child(odd) td { background: #131c2e; }
+
+  /* ── Kbd (keyboard shortcuts) ── */
+  kbd {
+    display: inline-block;
+    background: #334155;
+    color: #f1f5f9;
+    border: 1px solid #475569;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    box-shadow: 0 1px 0 #1e293b;
+    white-space: nowrap;
+  }
+
+  /* ── Color badges ── */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 9px;
+    font-weight: 700;
+    color: white;
+    vertical-align: middle;
+  }
+  .badge-blue { background: #2563eb; }
+  .badge-green { background: #16a34a; }
+  .badge-purple { background: #9333ea; }
+  .badge-orange { background: #ea580c; }
+  .badge-red { background: #dc2626; }
+  .badge-yellow { background: #ca8a04; }
+  .badge-sky { background: #0284c7; }
+  .badge-gray { background: #475569; }
+
+  /* ── Diagrams / visual boxes ── */
+  .diagram {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 14px;
+    margin: 10px 0;
+    font-family: 'SF Mono', monospace;
+    font-size: 10px;
+    line-height: 1.6;
+    overflow: hidden;
+  }
+
+  .track-row {
+    display: flex;
+    align-items: center;
+    margin: 3px 0;
+  }
+  .track-label {
+    width: 90px;
+    font-size: 9px;
+    font-weight: 600;
+    color: #94a3b8;
+    flex-shrink: 0;
+    text-align: right;
+    padding-right: 8px;
+  }
+  .track-bar {
+    flex: 1;
+    height: 22px;
+    background: #0f172a;
+    border-radius: 4px;
+    position: relative;
+    overflow: hidden;
+  }
+  .clip-block {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 8px;
+    font-weight: 600;
+    color: white;
+    border: 1px solid rgba(255,255,255,0.3);
+  }
+  .playhead-line {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: #ef4444;
+    z-index: 5;
+  }
+
+  /* ── Tip boxes ── */
+  .tip {
+    background: #1a2744;
+    border-left: 3px solid #38bdf8;
+    padding: 8px 12px;
+    margin: 10px 0;
+    border-radius: 0 6px 6px 0;
+    font-size: 10.5px;
+  }
+  .tip strong { color: #38bdf8; }
+  .tip-warn {
+    background: #2a2014;
+    border-left-color: #f59e0b;
+  }
+  .tip-warn strong { color: #f59e0b; }
+
+  /* ── Flow diagrams ── */
+  .flow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 8px 0;
+    flex-wrap: wrap;
+  }
+  .flow-step {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 10px;
+    color: #e2e8f0;
+  }
+  .flow-arrow { color: #38bdf8; font-size: 14px; font-weight: bold; }
+
+  /* ── Two columns ── */
+  .cols { display: flex; gap: 16px; }
+  .col { flex: 1; }
+
+  /* ── TOC ── */
+  .toc { list-style: none; }
+  .toc li {
+    padding: 4px 0;
+    border-bottom: 1px dotted #1e293b;
+    font-size: 12px;
+  }
+  .toc .num { color: #38bdf8; font-weight: 700; margin-right: 8px; }
+</style>
+</head>
+<body>
+
+<!-- ════════════════════════════════════════════ COVER ═══ -->
+<div class="cover">
+  <div class="icon-row">🎬 ✂️ 🎵 📝</div>
+  <h1>Editor de Timeline — Reels</h1>
+  <div class="subtitle">Guía visual completa de controles y atajos de teclado</div>
+  <div class="version">Video Procesor &middot; Marzo 2026</div>
+</div>
+
+<!-- ════════════════════════════════════════════ PAGE 1: TOC + OVERVIEW ═══ -->
+<div class="page">
+
+<h2>Índice</h2>
+<ol class="toc">
+  <li><span class="num">1</span> Vista general del editor</li>
+  <li><span class="num">2</span> Transporte y navegación</li>
+  <li><span class="num">3</span> Atajos de teclado — Referencia rápida</li>
+  <li><span class="num">4</span> Cortar y dividir clips</li>
+  <li><span class="num">5</span> Selección y multi-selección</li>
+  <li><span class="num">6</span> Eliminar clips y cerrar huecos</li>
+  <li><span class="num">7</span> Mover y recortar clips (drag)</li>
+  <li><span class="num">8</span> Gestión de pistas (tracks)</li>
+  <li><span class="num">9</span> Subtítulos — Edición y estilos</li>
+  <li><span class="num">10</span> Superposiciones de texto</li>
+  <li><span class="num">11</span> Versiones, Undo/Redo y guardado</li>
+  <li><span class="num">12</span> Zoom y visualización</li>
+</ol>
+
+<h2>1. Vista general del editor</h2>
+
+<div class="diagram">
+  <div style="text-align:center; color:#94a3b8; font-size:9px; margin-bottom:8px;">
+    ┌─────────────────────────────────────────────────────────────────┐
+  </div>
+  <div style="display:flex; gap:2px;">
+    <div style="flex:1; background:#0f172a; border:1px solid #334155; border-radius:4px; padding:8px; text-align:center;">
+      <div style="color:#c084fc; font-weight:700; font-size:9px;">PREVIEW 9:16</div>
+      <div style="color:#64748b; font-size:8px; margin-top:4px;">Vista previa del reel<br>con subtítulos en vivo</div>
+    </div>
+    <div style="flex:2;">
+      <div style="background:#1a1f2e; border:1px solid #334155; border-radius:4px; padding:4px 8px; margin-bottom:2px; font-size:8px;">
+        <span style="color:#38bdf8;">⏮ ◀ ▶ ▶ ⏭</span> &nbsp;
+        <span style="color:#94a3b8;">00:12.3 / 01:30.0</span> &nbsp;
+        <span style="color:#818cf8;">↶ ↷</span> &nbsp;
+        <span style="color:#94a3b8;">✂️ ⟷</span> &nbsp;
+        <span style="color:#ef4444;">🗑</span> &nbsp;
+        <span style="color:#f97316;">⤺</span> &nbsp;
+        <span style="color:#38bdf8;">⤛ ⟦⟦</span> &nbsp;
+        <span style="color:#94a3b8;">🔍+/−</span>
+      </div>
+      <div style="background:#0f172a; border:1px solid #334155; border-radius:4px; padding:6px;">
+        <div style="display:flex; margin-bottom:3px;">
+          <div style="width:70px; font-size:7px; color:#94a3b8; text-align:right; padding-right:4px;">Video Ppal</div>
+          <div style="flex:1; height:16px; background:#131c2e; border-radius:2px; position:relative;">
+            <div style="position:absolute; left:0%; width:45%; top:2px; bottom:2px; background:#2563eb; border-radius:2px; border:1px solid #60a5fa;"></div>
+            <div style="position:absolute; left:50%; width:48%; top:2px; bottom:2px; background:#2563eb; border-radius:2px; border:1px solid #60a5fa;"></div>
+          </div>
+        </div>
+        <div style="display:flex; margin-bottom:3px;">
+          <div style="width:70px; font-size:7px; color:#94a3b8; text-align:right; padding-right:4px;">Audio Ppal</div>
+          <div style="flex:1; height:16px; background:#131c2e; border-radius:2px; position:relative;">
+            <div style="position:absolute; left:0%; width:45%; top:2px; bottom:2px; background:#16a34a; border-radius:2px; border:1px solid #4ade80;"></div>
+            <div style="position:absolute; left:50%; width:48%; top:2px; bottom:2px; background:#16a34a; border-radius:2px; border:1px solid #4ade80;"></div>
+          </div>
+        </div>
+        <div style="display:flex;">
+          <div style="width:70px; font-size:7px; color:#94a3b8; text-align:right; padding-right:4px;">Subtítulos</div>
+          <div style="flex:1; height:12px; background:#131c2e; border-radius:2px; position:relative;">
+            <div style="position:absolute; left:2%; width:12%; top:1px; bottom:1px; background:#ca8a04; border-radius:1px;"></div>
+            <div style="position:absolute; left:16%; width:10%; top:1px; bottom:1px; background:#ca8a04; border-radius:1px;"></div>
+            <div style="position:absolute; left:28%; width:15%; top:1px; bottom:1px; background:#ca8a04; border-radius:1px;"></div>
+            <div style="position:absolute; left:50%; width:12%; top:1px; bottom:1px; background:#ca8a04; border-radius:1px;"></div>
+            <div style="position:absolute; left:64%; width:14%; top:1px; bottom:1px; background:#ca8a04; border-radius:1px;"></div>
+            <div style="position:absolute; left:80%; width:16%; top:1px; bottom:1px; background:#ca8a04; border-radius:1px;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div style="display:flex; gap:2px; margin-top:2px;">
+    <div style="flex:1; background:#0f172a; border:1px solid #334155; border-radius:4px; padding:6px; text-align:center;">
+      <div style="color:#eab308; font-weight:700; font-size:8px;">LISTA DE SUBTÍTULOS</div>
+      <div style="color:#64748b; font-size:7px;">Edición de texto y tiempos</div>
+    </div>
+    <div style="flex:1; background:#0f172a; border:1px solid #334155; border-radius:4px; padding:6px; text-align:center;">
+      <div style="color:#c084fc; font-weight:700; font-size:8px;">ESTILOS / PROPIEDADES</div>
+      <div style="color:#64748b; font-size:7px;">Fuente, color, sombra, posición</div>
+    </div>
+  </div>
+</div>
+
+<p style="margin-top:8px;">El editor tiene cuatro zonas principales: la <strong>preview</strong> (arriba izquierda), la <strong>barra de controles</strong>, las <strong>pistas del timeline</strong> (zona central), y los <strong>paneles de edición</strong> (abajo).</p>
+
+</div>
+
+<!-- ════════════════════════════════════════════ PAGE 2: TRANSPORTE + ATAJOS ═══ -->
+<div class="page">
+
+<h2>2. Transporte y navegación</h2>
+
+<table>
+  <tr><th>Botón</th><th>Acción</th><th>Atajo</th></tr>
+  <tr><td>⏮</td><td>Ir al inicio del timeline</td><td><kbd>Home</kbd></td></tr>
+  <tr><td>◀</td><td>Retroceder 0.1 segundos</td><td><kbd>Shift</kbd>+<kbd>←</kbd></td></tr>
+  <tr><td>▶ / ⏸</td><td>Play / Pausa</td><td><kbd>Espacio</kbd></td></tr>
+  <tr><td>▶</td><td>Avanzar 0.1 segundos</td><td><kbd>Shift</kbd>+<kbd>→</kbd></td></tr>
+  <tr><td>⏭</td><td>Ir al final del timeline</td><td><kbd>End</kbd></td></tr>
+</table>
+
+<div class="cols">
+  <div class="col">
+    <h3>Código de tiempo editable</h3>
+    <p>Haz clic en el timecode (ej. <kbd>00:12.3</kbd>) para escribir un tiempo exacto. Formatos aceptados:</p>
+    <ul style="padding-left:16px; font-size:10px;">
+      <li><code>MM:SS.d</code> → 01:23.5</li>
+      <li><code>MM:SS</code> → 01:23</li>
+      <li><code>SS.d</code> → 83.5</li>
+      <li><code>SS</code> → 83</li>
+    </ul>
+  </div>
+  <div class="col">
+    <h3>Velocidad de reproducción</h3>
+    <p>Haz clic en el icono de velocímetro para cambiar la velocidad:</p>
+    <p style="font-size:10px;">
+      <kbd>0.25x</kbd> <kbd>0.5x</kbd> <kbd>0.75x</kbd> <kbd>1x</kbd> <kbd>1.25x</kbd> <kbd>1.5x</kbd> <kbd>2x</kbd>
+    </p>
+  </div>
+</div>
+
+<div class="tip">
+  <strong>Tip:</strong> Usa <kbd>←</kbd>/<kbd>→</kbd> para saltar 1 segundo, o <kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> para moverte frame a frame (0.1s).
+</div>
+
+<h2>3. Atajos de teclado — Referencia rápida</h2>
+
+<div class="cols">
+<div class="col">
+<h3>Reproducción</h3>
+<table>
+  <tr><td><kbd>Espacio</kbd></td><td>Play / Pausa</td></tr>
+  <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>Saltar ±1 segundo</td></tr>
+  <tr><td><kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd></td><td>Saltar ±0.1s</td></tr>
+  <tr><td><kbd>Home</kbd></td><td>Ir al inicio</td></tr>
+  <tr><td><kbd>End</kbd></td><td>Ir al final</td></tr>
+</table>
+
+<h3>Cortes</h3>
+<table>
+  <tr><td><kbd>S</kbd></td><td>Dividir clip en cabezal</td></tr>
+  <tr><td><kbd>Shift</kbd>+<kbd>S</kbd></td><td>Dividir TODAS las pistas</td></tr>
+  <tr><td><kbd>Q</kbd></td><td>Recortar inicio al cabezal</td></tr>
+  <tr><td><kbd>W</kbd></td><td>Recortar final al cabezal</td></tr>
+</table>
+</div>
+
+<div class="col">
+<h3>Eliminar y huecos</h3>
+<table>
+  <tr><td><kbd>Del</kbd></td><td>Eliminar selección</td></tr>
+  <tr><td><kbd>Shift</kbd>+<kbd>Del</kbd></td><td>Eliminar + cerrar hueco</td></tr>
+  <tr><td><kbd>G</kbd></td><td>Cerrar hueco en cabezal</td></tr>
+  <tr><td><kbd>Shift</kbd>+<kbd>G</kbd></td><td>Cerrar hueco para seleccionados</td></tr>
+</table>
+
+<h3>Deshacer / Guardar</h3>
+<table>
+  <tr><td><kbd>⌘</kbd>+<kbd>Z</kbd></td><td>Deshacer</td></tr>
+  <tr><td><kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>Rehacer</td></tr>
+  <tr><td><kbd>⌘</kbd>+<kbd>S</kbd></td><td>Guardar proyecto</td></tr>
+</table>
+</div>
+</div>
+
+</div>
+
+<!-- ════════════════════════════════════════════ PAGE 3: CORTES Y SELECCIÓN ═══ -->
+<div class="page">
+
+<h2>4. Cortar y dividir clips</h2>
+
+<h3>Dividir clip (<kbd>S</kbd>)</h3>
+<p>Coloca el cabezal rojo sobre un clip y pulsa <kbd>S</kbd>. El clip se divide en dos partes independientes.</p>
+
+<div class="diagram">
+  <div style="color:#64748b; font-size:8px; margin-bottom:4px;">ANTES:</div>
+  <div class="track-row">
+    <div class="track-label">Video</div>
+    <div class="track-bar">
+      <div class="clip-block" style="left:5%; width:80%; background:#2563eb;">Clip completo</div>
+      <div class="playhead-line" style="left:40%;"></div>
+    </div>
+  </div>
+  <div style="color:#38bdf8; text-align:center; margin:6px 0;">↓ Pulsar <kbd style="background:#1e293b;">S</kbd> ↓</div>
+  <div style="color:#64748b; font-size:8px; margin-bottom:4px;">DESPUÉS:</div>
+  <div class="track-row">
+    <div class="track-label">Video</div>
+    <div class="track-bar">
+      <div class="clip-block" style="left:5%; width:33%; background:#2563eb;">Parte A</div>
+      <div class="clip-block" style="left:40%; width:45%; background:#1d4ed8;">Parte B</div>
+      <div class="playhead-line" style="left:40%;"></div>
+    </div>
+  </div>
+</div>
+
+<h3>Dividir todas las pistas (<kbd>Shift</kbd>+<kbd>S</kbd>)</h3>
+<p>Igual que <kbd>S</kbd>, pero divide <strong>todos los clips de todas las pistas</strong> que crucen la posición del cabezal. Útil para hacer un corte limpio en un punto concreto.</p>
+
+<h3>Recorte rápido (<kbd>Q</kbd> / <kbd>W</kbd>)</h3>
+
+<div class="cols">
+  <div class="col">
+    <p><kbd>Q</kbd> — <strong>Recorta el inicio</strong> del clip seleccionado hasta la posición del cabezal.</p>
+  </div>
+  <div class="col">
+    <p><kbd>W</kbd> — <strong>Recorta el final</strong> del clip seleccionado hasta la posición del cabezal.</p>
+  </div>
+</div>
+
+<h2>5. Selección y multi-selección</h2>
+
+<table>
+  <tr><th>Acción</th><th>Resultado</th></tr>
+  <tr><td>Clic en un clip</td><td>Selecciona ese clip (deselecciona los demás)</td></tr>
+  <tr><td><kbd>Shift</kbd>+Clic</td><td>Añade/quita el clip de la selección múltiple</td></tr>
+  <tr><td><kbd>⌘</kbd>+Clic / <kbd>Ctrl</kbd>+Clic</td><td>Añade/quita el clip de la selección múltiple</td></tr>
+  <tr><td>Clic en zona vacía</td><td>Deselecciona todo</td></tr>
+</table>
+
+<div class="diagram">
+  <div style="color:#64748b; font-size:8px; margin-bottom:4px;">MULTI-SELECCIÓN (anillo blanco = seleccionado):</div>
+  <div class="track-row">
+    <div class="track-label">Video</div>
+    <div class="track-bar">
+      <div class="clip-block" style="left:2%; width:28%; background:#2563eb; box-shadow: 0 0 0 2px rgba(255,255,255,0.6);">Clip A ✓</div>
+      <div class="clip-block" style="left:33%; width:28%; background:#2563eb;">Clip B</div>
+      <div class="clip-block" style="left:65%; width:30%; background:#2563eb; box-shadow: 0 0 0 2px rgba(255,255,255,0.6);">Clip C ✓</div>
+    </div>
+  </div>
+  <div class="track-row">
+    <div class="track-label">Audio</div>
+    <div class="track-bar">
+      <div class="clip-block" style="left:2%; width:28%; background:#16a34a;">Audio 1</div>
+      <div class="clip-block" style="left:33%; width:28%; background:#16a34a; box-shadow: 0 0 0 2px rgba(255,255,255,0.6);">Audio 2 ✓</div>
+      <div class="clip-block" style="left:65%; width:30%; background:#16a34a;">Audio 3</div>
+    </div>
+  </div>
+</div>
+
+<div class="tip">
+  <strong>Tip:</strong> La multi-selección funciona entre pistas diferentes. Puedes seleccionar clips de video y audio a la vez y moverlos o eliminarlos juntos.
+</div>
+
+</div>
+
+<!-- ════════════════════════════════════════════ PAGE 4: ELIMINAR Y HUECOS ═══ -->
+<div class="page">
+
+<h2>6. Eliminar clips y cerrar huecos</h2>
+
+<h3>6.1 — Eliminar simple (<kbd>Del</kbd>) <span class="badge badge-red">Destructivo</span></h3>
+<p>Elimina los clips seleccionados <strong>dejando el hueco vacío</strong>. También elimina subtítulos seleccionados.</p>
+
+<div class="diagram">
+  <div style="color:#64748b; font-size:8px; margin-bottom:4px;">ANTES:</div>
+  <div class="track-row">
+    <div class="track-label">Video</div>
+    <div class="track-bar">
+      <div class="clip-block" style="left:2%; width:30%; background:#2563eb;">A</div>
+      <div class="clip-block" style="left:34%; width:30%; background:#2563eb; box-shadow: 0 0 0 2px rgba(255,255,255,0.6);">B (seleccionado)</div>
+      <div class="clip-block" style="left:66%; width:30%; background:#2563eb;">C</div>
+    </div>
+  </div>
+  <div style="color:#ef4444; text-align:center; margin:4px 0; font-size:9px;">↓ <kbd style="background:#1e293b;">Del</kbd> — elimina B, queda hueco ↓</div>
+  <div class="track-row">
+    <div class="track-label">Video</div>
+    <div class="track-bar">
+      <div class="clip-block" style="left:2%; width:30%; background:#2563eb;">A</div>
+      <div style="position:absolute; left:34%; width:30%; top:0; bottom:0; background:repeating-linear-gradient(45deg, transparent, transparent 3px, rgba(239,68,68,0.15) 3px, rgba(239,68,68,0.15) 6px); border-radius:3px;"></div>
+      <div class="clip-block" style="left:66%; width:30%; background:#2563eb;">C</div>
+    </div>
+  </div>
+</div>
+
+<h3>6.2 — Ripple Delete (<kbd>Shift</kbd>+<kbd>Del</kbd>) <span class="badge badge-orange">Recomendado</span></h3>
+<p>Elimina los clips seleccionados y <strong>cierra los huecos automáticamente</strong>, desplazando todo lo que viene después hacia la izquierda. Funciona con <strong>múltiples clips</strong> seleccionados.</p>
+
+<div class="diagram">
+  <div style="color:#64748b; font-size:8px; margin-bottom:4px;">ANTES:</div>
+  <div class="track-row">
+    <div class="track-label">Video</div>
+    <div class="track-bar">
+      <div class="clip-block" style="left:2%; width:22%; background:#2563eb;">A</div>
+      <div class="clip-block" style="left:26%; width:22%; background:#2563eb; box-shadow: 0 0 0 2px rgba(255,255,255,0.6);">B ✓</div>
+      <div class="clip-block" style="left:50%; width:22%; background:#2563eb;">C</div>
+      <div class="clip-block" style="left:74%; width:22%; background:#2563eb;">D</div>
+    </div>
+  </div>
+  <div style="color:#f97316; text-align:center; margin:4px 0; font-size:9px;">↓ <kbd style="background:#1e293b;">Shift</kbd>+<kbd style="background:#1e293b;">Del</kbd> — elimina B + cierra hueco ↓</div>
+  <div class="track-row">
+    <div class="track-label">Video</div>
+    <div class="track-bar">
+      <div class="clip-block" style="left:2%; width:22%; background:#2563eb;">A</div>
+      <div class="clip-block" style="left:26%; width:22%; background:#2563eb;">C</div>
+      <div class="clip-block" style="left:50%; width:22%; background:#2563eb;">D</div>
+    </div>
+  </div>
+</div>
+
+<h3>6.3 — Cerrar hueco en cabezal (<kbd>G</kbd>)</h3>
+<p>Coloca el cabezal en un espacio vacío y pulsa <kbd>G</kbd>. Cierra el hueco desplazando todos los clips posteriores hacia la izquierda.</p>
+
+<div class="diagram">
+  <div class="track-row">
+    <div class="track-label">Video</div>
+    <div class="track-bar">
+      <div class="clip-block" style="left:2%; width:30%; background:#2563eb;">A</div>
+      <div class="playhead-line" style="left:42%;"></div>
+      <div class="clip-block" style="left:55%; width:40%; background:#2563eb;">B</div>
+    </div>
+  </div>
+  <div style="color:#38bdf8; text-align:center; margin:4px 0; font-size:9px;">↓ Cabezal en el hueco → <kbd style="background:#1e293b;">G</kbd> ↓</div>
+  <div class="track-row">
+    <div class="track-label">Video</div>
+    <div class="track-bar">
+      <div class="clip-block" style="left:2%; width:30%; background:#2563eb;">A</div>
+      <div class="clip-block" style="left:32%; width:40%; background:#2563eb;">B</div>
+    </div>
+  </div>
+</div>
+
+<h3>6.4 — Cerrar hueco para seleccionados (<kbd>Shift</kbd>+<kbd>G</kbd>)</h3>
+<p>Desplaza los clips seleccionados hacia la izquierda para cerrar el hueco que tienen antes. Requiere al menos 1 clip seleccionado.</p>
+
+<div class="tip tip-warn">
+  <strong>Importante:</strong> Todas las operaciones de eliminación y cierre de huecos también afectan a los subtítulos automáticamente. Los subtítulos en la zona eliminada se borran, y los que están después se desplazan.
+</div>
+
+</div>
+
+<!-- ════════════════════════════════════════════ PAGE 5: DRAG & TRACKS ═══ -->
+<div class="page">
+
+<h2>7. Mover y recortar clips (drag)</h2>
+
+<h3>Mover clips</h3>
+<p>Arrastra el cuerpo del clip para reposicionarlo en el timeline. El clip se <strong>engancha</strong> (snap) a los bordes de otros clips y al cabezal si estás a menos de 200ms.</p>
+
+<div class="diagram">
+  <div style="color:#64748b; font-size:8px; margin-bottom:4px;">SNAP: el clip se engancha al borde del clip adyacente</div>
+  <div class="track-row">
+    <div class="track-label">Video</div>
+    <div class="track-bar">
+      <div class="clip-block" style="left:5%; width:30%; background:#2563eb;">Clip A</div>
+      <div class="clip-block" style="left:35%; width:25%; background:#1d4ed8; border: 1px dashed #60a5fa; opacity:0.6;">← arrastrar</div>
+      <div style="position:absolute; left:35%; top:0; bottom:0; width:1px; border-left:1px dashed #facc15;"></div>
+    </div>
+  </div>
+</div>
+
+<p><strong>Multi-arrastre:</strong> Si tienes varios clips seleccionados, arrastrar uno mueve todos a la vez manteniendo su separación relativa.</p>
+
+<h3>Recortar bordes (trim)</h3>
+
+<table>
+  <tr><th>Zona</th><th>Cursor</th><th>Efecto</th></tr>
+  <tr>
+    <td>Borde izquierdo (3px)</td>
+    <td>↔ redimensionar</td>
+    <td>Cambia el punto de entrada (<em>in-point</em>) del clip sin mover el final</td>
+  </tr>
+  <tr>
+    <td>Borde derecho (3px)</td>
+    <td>↔ redimensionar</td>
+    <td>Cambia el punto de salida (<em>out-point</em>) del clip sin mover el inicio</td>
+  </tr>
+  <tr>
+    <td>Centro</td>
+    <td>✋ agarrar</td>
+    <td>Mueve el clip entero (ver arriba)</td>
+  </tr>
+</table>
+
+<div class="tip">
+  <strong>Tip:</strong> Los tiradores de trim solo aparecen en clips de video y audio (que tienen material fuente). Los clips de texto solo tienen trim del borde derecho para ajustar su duración.
+</div>
+
+<h2>8. Gestión de pistas (tracks)</h2>
+
+<h3>Pistas por defecto</h3>
+<table>
+  <tr><th>Pista</th><th>Tipo</th><th>Color</th><th>Estado</th></tr>
+  <tr><td>Video Principal</td><td><span class="badge badge-blue">Video</span></td><td>Azul</td><td>Bloqueada (protegida)</td></tr>
+  <tr><td>Cutaways</td><td><span class="badge badge-blue">Video</span></td><td>Azul</td><td>Libre</td></tr>
+  <tr><td>Audio Principal</td><td><span class="badge badge-green">Audio</span></td><td>Verde</td><td>Bloqueada (protegida)</td></tr>
+  <tr><td>Audio Extra</td><td><span class="badge badge-green">Audio</span></td><td>Verde</td><td>Libre</td></tr>
+  <tr><td>Subtítulos</td><td><span class="badge badge-yellow">Subtítulo</span></td><td>Amarillo</td><td>Protegida (no borrable)</td></tr>
+</table>
+
+<h3>Añadir pistas nuevas</h3>
+<p>Pulsa el botón <span class="badge badge-purple">Layers +</span> en la barra de controles para abrir el menú:</p>
+
+<table>
+  <tr><th>Tipo</th><th>Color</th><th>Uso</th></tr>
+  <tr><td><span class="badge badge-blue">Video</span></td><td>Azul</td><td>Cutaways, ángulos alternativos, B-roll</td></tr>
+  <tr><td><span class="badge badge-green">Audio</span></td><td>Verde</td><td>Música de fondo, efectos de sonido</td></tr>
+  <tr><td><span class="badge badge-purple">Imagen</span></td><td>Púrpura</td><td>Fotos, GIFs, overlays visuales</td></tr>
+  <tr><td><span class="badge badge-orange">Texto</span></td><td>Naranja</td><td>Títulos, llamadas a la acción, lower thirds</td></tr>
+</table>
+
+<h3>Añadir clips a una pista</h3>
+<div class="flow">
+  <div class="flow-step">Pulsa <strong>+</strong> en la cabecera de la pista</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Selecciona archivo (video/audio/imagen)</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Clip aparece en la posición del cabezal</div>
+</div>
+<p>Para pistas de <strong>texto</strong>: se crea un clip de 3 segundos que puedes editar con doble clic.</p>
+
+<div class="tip">
+  <strong>Eliminar pista:</strong> El botón 🗑 en la cabecera elimina la pista y sus clips. Las pistas protegidas (Video Principal, Audio Principal, Subtítulos) no se pueden eliminar.
+</div>
+
+</div>
+
+<!-- ════════════════════════════════════════════ PAGE 6: SUBTÍTULOS ═══ -->
+<div class="page">
+
+<h2>9. Subtítulos — Edición y estilos</h2>
+
+<h3>9.1 — Manipulación en el timeline</h3>
+
+<table>
+  <tr><th>Acción</th><th>Efecto</th></tr>
+  <tr><td>Clic en segmento</td><td>Selecciona el subtítulo y salta a su posición</td></tr>
+  <tr><td>Doble clic en segmento</td><td>Edita el texto directamente sobre el timeline</td></tr>
+  <tr><td>Arrastrar borde izquierdo</td><td>Ajusta el tiempo de inicio</td></tr>
+  <tr><td>Arrastrar borde derecho</td><td>Ajusta el tiempo de final</td></tr>
+</table>
+
+<h3>9.2 — Herramientas de subtítulos en la barra</h3>
+
+<table>
+  <tr><th>Botón</th><th>Acción</th><th>Color</th></tr>
+  <tr>
+    <td>✂ Dividir subtítulo</td>
+    <td>Divide el segmento de subtítulo en la posición del cabezal. Usa límites de palabras cuando es posible.</td>
+    <td><span class="badge badge-yellow">Amarillo</span></td>
+  </tr>
+  <tr>
+    <td>+ Añadir subtítulo</td>
+    <td>Crea un segmento nuevo de 2 segundos en la posición actual del cabezal.</td>
+    <td><span class="badge badge-yellow">Amarillo</span></td>
+  </tr>
+  <tr>
+    <td>⟳ Sincronizar</td>
+    <td>Elimina subtítulos que caen en huecos sin clips. Mantiene los subtítulos alineados con el contenido.</td>
+    <td><span class="badge badge-yellow">Amarillo</span></td>
+  </tr>
+  <tr>
+    <td>⟲ Resetear</td>
+    <td>Borra clips y regenera subtítulos desde la transcripción base. <span class="badge badge-red">Destructivo</span></td>
+    <td><span class="badge badge-gray">Gris/Rojo</span></td>
+  </tr>
+</table>
+
+<h3>9.3 — Panel de lista de subtítulos (abajo izquierda)</h3>
+<p>Muestra todos los segmentos con sus tiempos y texto. Haz clic en una fila para seleccionar y saltar al subtítulo.</p>
+
+<div class="diagram">
+  <div style="display:flex; gap:4px; align-items:center; padding:3px; background:#131c2e; border-radius:3px; margin-bottom:3px;">
+    <span style="color:#38bdf8; font-size:8px; width:80px;">00:02.1–00:04.3</span>
+    <span style="color:#e2e8f0; font-size:9px; flex:1;">Hola a todos, bienvenidos</span>
+    <span style="color:#ef4444; font-size:8px;">🗑</span>
+  </div>
+  <div style="display:flex; gap:4px; align-items:center; padding:3px; background:#1a2744; border:1px solid #38bdf8; border-radius:3px; margin-bottom:3px;">
+    <span style="color:#38bdf8; font-size:8px; width:80px;">00:04.5–00:07.1</span>
+    <span style="color:#e2e8f0; font-size:9px; flex:1;">al show de comedia ← editando</span>
+    <span style="color:#ef4444; font-size:8px;">🗑</span>
+  </div>
+  <div style="display:flex; gap:4px; align-items:center; padding:3px; background:#131c2e; border-radius:3px; border-left:2px solid #eab308;">
+    <span style="color:#38bdf8; font-size:8px; width:80px;">00:07.2–00:15.0</span>
+    <span style="color:#eab308; font-size:9px; flex:1;">⚠ Excede máximo de caracteres</span>
+    <span style="color:#ef4444; font-size:8px;">🗑</span>
+  </div>
+</div>
+
+<h3>9.4 — Estilo por palabra</h3>
+<p>Cuando un subtítulo está seleccionado, aparecen las palabras como chips individuales. Puedes:</p>
+<ul style="padding-left:16px; font-size:10.5px;">
+  <li>Hacer clic en una palabra para seleccionarla</li>
+  <li><kbd>Shift</kbd>+clic para seleccionar varias</li>
+  <li>Cambiar <strong>color</strong>, <strong>tamaño</strong> y <strong>negrita</strong> por palabra</li>
+  <li>Un punto de color en el chip indica que tiene estilo personalizado</li>
+</ul>
+
+<h3>9.5 — Panel de estilos (abajo derecha)</h3>
+
+<div class="cols">
+  <div class="col">
+    <p><strong>Posición:</strong></p>
+    <ul style="padding-left:16px; font-size:10px;">
+      <li>Arriba / Centro / Abajo</li>
+      <li>Margen desde el borde (0-400px)</li>
+    </ul>
+    <p><strong>Fuente:</strong></p>
+    <ul style="padding-left:16px; font-size:10px;">
+      <li>Familia (28+ opciones)</li>
+      <li>Tamaño (12-300px)</li>
+      <li>Peso (100-900)</li>
+      <li>Transformación (mayúsculas/minúsculas)</li>
+    </ul>
+  </div>
+  <div class="col">
+    <p><strong>Efectos:</strong></p>
+    <ul style="padding-left:16px; font-size:10px;">
+      <li>Color de texto</li>
+      <li>Borde (stroke) + color</li>
+      <li>Sombra + desplazamiento XY + desenfoque</li>
+      <li>Fondo + relleno</li>
+      <li>Ancho máximo para ajuste de línea</li>
+    </ul>
+    <p><strong>7 presets:</strong> Default, Bold, Shadow, Outline, Neon, Cinematic, Punchline</p>
+  </div>
+</div>
+
+</div>
+
+<!-- ════════════════════════════════════════════ PAGE 7: TEXTO + VERSIONES + ZOOM ═══ -->
+<div class="page">
+
+<h2>10. Superposiciones de texto</h2>
+
+<p>Los clips de texto son overlays flotantes sobre el video. Para crear uno:</p>
+
+<div class="flow">
+  <div class="flow-step">Añadir pista de tipo <span class="badge badge-orange">Texto</span></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Pulsar <strong>+</strong> en la cabecera</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Se crea clip de 3s en cabezal</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Doble clic para editar texto</div>
+</div>
+
+<p>Cuando seleccionas un clip de texto, el panel derecho muestra:</p>
+<table>
+  <tr><th>Propiedad</th><th>Descripción</th></tr>
+  <tr><td>Texto</td><td>Contenido multilínea</td></tr>
+  <tr><td>Fuente / Tamaño / Peso</td><td>Mismas opciones que subtítulos</td></tr>
+  <tr><td>Color de texto</td><td>Selector de color</td></tr>
+  <tr><td>Color de fondo</td><td>Opcional, con toggle para activar/desactivar</td></tr>
+  <tr><td>Sombra</td><td>Color + offset X/Y + desenfoque</td></tr>
+  <tr><td>Posición X / Y</td><td>Porcentaje (0-100%) desde arriba-izquierda</td></tr>
+  <tr><td>Ancho</td><td>Porcentaje (10-100%) del ancho total</td></tr>
+</table>
+
+<h2>11. Versiones, Undo/Redo y guardado</h2>
+
+<div class="cols">
+  <div class="col">
+    <h3>Undo / Redo</h3>
+    <table>
+      <tr><td><kbd>⌘</kbd>+<kbd>Z</kbd></td><td>Deshacer (hasta 50 pasos)</td></tr>
+      <tr><td><kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>Rehacer</td></tr>
+    </table>
+    <p>El historial de deshacer es <strong>por reel</strong> y se mantiene mientras el editor está abierto.</p>
+
+    <h3>Guardado</h3>
+    <p><kbd>⌘</kbd>+<kbd>S</kbd> guarda el proyecto. El indicador cambia de <span style="color:#eab308;">"unsaved"</span> a <span style="color:#22c55e;">"saved"</span>.</p>
+  </div>
+  <div class="col">
+    <h3>Sistema de versiones</h3>
+    <div class="flow" style="flex-direction:column; align-items:flex-start;">
+      <div class="flow-step">🔖 <strong>Guardar versión</strong> — Crea snapshot con etiqueta (ej. "v1", "Pre-edición")</div>
+      <div class="flow-step">📜 <strong>Historial</strong> — Lista todas las versiones guardadas</div>
+      <div class="flow-step">↩️ <strong>Restaurar</strong> — Vuelve a una versión anterior (el estado actual se guarda en undo)</div>
+      <div class="flow-step">🗑 <strong>Eliminar</strong> — Borra una versión permanentemente</div>
+    </div>
+  </div>
+</div>
+
+<div class="tip">
+  <strong>Tip:</strong> Guarda una versión antes de hacer cambios grandes. Si algo sale mal, puedes restaurar y el estado actual se preserva en el undo.
+</div>
+
+<h2>12. Zoom y visualización</h2>
+
+<div class="cols">
+  <div class="col">
+    <h3>Controles de zoom</h3>
+    <table>
+      <tr><td>Slider 🔍−/+</td><td>Ajusta el nivel de zoom</td></tr>
+      <tr><td><kbd>⌘</kbd>+Scroll</td><td>Zoom in/out con rueda</td></tr>
+      <tr><td>Scroll horizontal</td><td>Desplazarse por el timeline</td></tr>
+    </table>
+  </div>
+  <div class="col">
+    <h3>Regla y cabezal</h3>
+    <ul style="padding-left:16px; font-size:10.5px;">
+      <li>Haz clic en la regla para saltar a esa posición</li>
+      <li>Las marcas se adaptan al zoom (1s, 5s, 10s, 30s, 60s)</li>
+      <li>El cabezal rojo tiene auto-scroll para mantenerse visible</li>
+    </ul>
+  </div>
+</div>
+
+<h3>Flujo de trabajo recomendado</h3>
+
+<div class="diagram" style="background:linear-gradient(135deg, #1e293b, #0f172a);">
+  <div style="display:flex; gap:6px; flex-wrap:wrap; justify-content:center;">
+    <div style="background:#1e3a5f; border:1px solid #38bdf8; border-radius:6px; padding:6px 10px; font-size:9px; text-align:center;">
+      <div style="color:#38bdf8; font-weight:700;">1. PREPARAR</div>
+      <div style="color:#94a3b8;">Crop + configurar<br>rango del reel</div>
+    </div>
+    <div style="color:#38bdf8; font-size:16px; display:flex; align-items:center;">→</div>
+    <div style="background:#1e3a5f; border:1px solid #38bdf8; border-radius:6px; padding:6px 10px; font-size:9px; text-align:center;">
+      <div style="color:#38bdf8; font-weight:700;">2. REVISAR</div>
+      <div style="color:#94a3b8;">Reproducir y marcar<br>puntos de corte</div>
+    </div>
+    <div style="color:#38bdf8; font-size:16px; display:flex; align-items:center;">→</div>
+    <div style="background:#1e3a5f; border:1px solid #38bdf8; border-radius:6px; padding:6px 10px; font-size:9px; text-align:center;">
+      <div style="color:#38bdf8; font-weight:700;">3. CORTAR</div>
+      <div style="color:#94a3b8;"><kbd style="font-size:7px; background:#334155; padding:1px 3px; border-radius:2px;">Shift+S</kbd> para dividir<br>todas las pistas</div>
+    </div>
+    <div style="color:#38bdf8; font-size:16px; display:flex; align-items:center;">→</div>
+    <div style="background:#1e3a5f; border:1px solid #38bdf8; border-radius:6px; padding:6px 10px; font-size:9px; text-align:center;">
+      <div style="color:#38bdf8; font-weight:700;">4. LIMPIAR</div>
+      <div style="color:#94a3b8;">Seleccionar partes malas<br><kbd style="font-size:7px; background:#334155; padding:1px 3px; border-radius:2px;">Shift+Del</kbd> ripple delete</div>
+    </div>
+    <div style="color:#38bdf8; font-size:16px; display:flex; align-items:center;">→</div>
+    <div style="background:#1e3a5f; border:1px solid #38bdf8; border-radius:6px; padding:6px 10px; font-size:9px; text-align:center;">
+      <div style="color:#38bdf8; font-weight:700;">5. PULIR</div>
+      <div style="color:#94a3b8;">Subtítulos, texto,<br>estilos, exportar</div>
+    </div>
+  </div>
+</div>
+
+<div class="tip">
+  <strong>Atajo estrella:</strong> El flujo más rápido es <kbd>Shift+S</kbd> (cortar todo) → seleccionar lo que sobra → <kbd>Shift+Del</kbd> (eliminar + cerrar hueco). Repite hasta tener solo el contenido que quieres.
+</div>
+
+</div>
+
+</body>
+</html>

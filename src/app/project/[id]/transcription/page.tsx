@@ -61,6 +61,7 @@ export default function TranscriptionPage() {
   const [selectedProvider, setSelectedProvider] = useState<string>('');
   const [reinterpretError, setReinterpretError] = useState<string | null>(null);
   const [reinterpretProgress, setReinterpretProgress] = useState<string>('');
+  const [bitSource, setBitSource] = useState<'full' | 'compose'>('full');
 
   // Constraints state
   const [showConstraints, setShowConstraints] = useState(false);
@@ -188,11 +189,26 @@ export default function TranscriptionPage() {
     setReinterpretError(null);
     setReinterpretProgress('Iniciando...');
     try {
+      // Filter segments by compose clips if bitSource === 'compose'
+      let segmentsToSend = currentProject.transcription.segments;
+      if (bitSource === 'compose') {
+        const composeClips = currentProject.composition?.clips?.filter(
+          (c: { trackId: string }) => c.trackId === 'v1'
+        ) || [];
+        if (composeClips.length > 0) {
+          segmentsToSend = segmentsToSend.filter((seg: SubtitleSegment) =>
+            composeClips.some((clip: { sourceInMs: number; sourceOutMs: number }) =>
+              seg.endMs > clip.sourceInMs && seg.startMs < clip.sourceOutMs
+            )
+          );
+        }
+      }
+
       const res = await fetch(`/api/projects/${projectId}/subtitles/reinterpret`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          segments: currentProject.transcription.segments,
+          segments: segmentsToSend,
           language: currentProject.transcription.language,
           context: reinterpretContext || undefined,
           provider: selectedProvider || undefined,
@@ -255,7 +271,7 @@ export default function TranscriptionPage() {
       setReinterpreting(false);
       setReinterpretProgress('');
     }
-  }, [currentProject, projectId, reinterpretContext, selectedProvider]);
+  }, [currentProject, projectId, reinterpretContext, selectedProvider, bitSource]);
 
   const applyReinterpretation = useCallback(
     (mode: 'all' | 'single', index?: number) => {
@@ -614,6 +630,49 @@ export default function TranscriptionPage() {
                   value={reinterpretContext}
                   onChange={(e) => setReinterpretContext(e.target.value)}
                 />
+              </div>
+            </div>
+
+            {/* Bit source selector */}
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">
+                Fuente para detección de bits
+              </label>
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => setBitSource('full')}
+                  className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
+                    bitSource === 'full'
+                      ? 'border-primary bg-primary/10 text-primary'
+                      : 'border-border text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  Video completo ({segments.length} segs)
+                </button>
+                <button
+                  onClick={() => setBitSource('compose')}
+                  disabled={!currentProject?.composition?.clips?.some((c: { trackId: string }) => c.trackId === 'v1')}
+                  className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
+                    bitSource === 'compose'
+                      ? 'border-primary bg-primary/10 text-primary'
+                      : currentProject?.composition?.clips?.some((c: { trackId: string }) => c.trackId === 'v1')
+                        ? 'border-border text-muted-foreground hover:text-foreground'
+                        : 'border-border/50 text-muted-foreground/40 cursor-not-allowed'
+                  }`}
+                >
+                  Compose
+                  {currentProject?.composition?.clips?.some((c: { trackId: string }) => c.trackId === 'v1') && (() => {
+                    const composeClips = currentProject?.composition?.clips?.filter(
+                      (c: { trackId: string }) => c.trackId === 'v1'
+                    ) || [];
+                    const composeSegs = segments.filter((seg) =>
+                      composeClips.some((clip: { sourceInMs: number; sourceOutMs: number }) =>
+                        seg.endMs > clip.sourceInMs && seg.startMs < clip.sourceOutMs
+                      )
+                    );
+                    return ` (${composeSegs.length} segs)`;
+                  })()}
+                </button>
               </div>
             </div>
 
