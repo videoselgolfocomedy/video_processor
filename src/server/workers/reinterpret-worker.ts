@@ -145,36 +145,65 @@ export async function reinterpretSubtitles(
 
   console.log(`${TAG} Starting reinterpretation: ${segments.length} segments, provider=${config.id}, model=${config.model}, batchSize=${config.batchSize}`);
 
-  const totalBatches = Math.ceil(segments.length / config.batchSize);
+  // Phase 1: Correct subtitles in batches (no bit detection per batch)
+  const correctionBatches = Math.ceil(segments.length / config.batchSize);
   const results: SubtitleSegment[] = [];
-  let rawBits: RawBit[] = [];
+  const totalSteps = correctionBatches + 1; // +1 for the dedicated bit detection pass
 
   for (let i = 0; i < segments.length; i += config.batchSize) {
     const batch = segments.slice(i, i + config.batchSize);
     const batchNum = Math.floor(i / config.batchSize) + 1;
-    const isLastBatch = i + config.batchSize >= segments.length;
 
     if (i > 0 && config.delayMs > 0) {
-      console.log(`${TAG} [Batch ${batchNum}/${totalBatches}] Waiting ${config.delayMs}ms (rate limit delay)`);
-      await onProgress?.(batchNum, totalBatches, `Esperando rate limit (${(config.delayMs / 1000).toFixed(0)}s)...`);
+      console.log(`${TAG} [Batch ${batchNum}/${correctionBatches}] Waiting ${config.delayMs}ms (rate limit delay)`);
+      await onProgress?.(batchNum, totalSteps, `Esperando rate limit (${(config.delayMs / 1000).toFixed(0)}s)...`);
       await sleep(config.delayMs);
     }
 
-    const label = totalBatches === 1
-      ? `Enviando ${batch.length} segmentos al LLM...`
-      : `Enviando batch ${batchNum}/${totalBatches} (${batch.length} segmentos)...`;
-    await onProgress?.(batchNum, totalBatches, label);
-    console.log(`${TAG} [Batch ${batchNum}/${totalBatches}] Sending ${batch.length} segments... includeBits=${isLastBatch}`);
+    const label = correctionBatches === 1
+      ? `Corrigiendo ${batch.length} segmentos...`
+      : `Corrigiendo batch ${batchNum}/${correctionBatches} (${batch.length} segmentos)...`;
+    await onProgress?.(batchNum, totalSteps, label);
+    console.log(`${TAG} [Batch ${batchNum}/${correctionBatches}] Sending ${batch.length} segments for correction...`);
     const t0 = Date.now();
-    const { corrected, bits: batchBits } = await callProvider(config, batch, language, context, batchNum, totalBatches, isLastBatch);
+    const { corrected } = await callProvider(config, batch, language, context, batchNum, correctionBatches, false);
     const elapsed = Date.now() - t0;
-    console.log(`${TAG} [Batch ${batchNum}/${totalBatches}] Done in ${elapsed}ms, got ${corrected.length} segments back, ${batchBits.length} bits`);
-    const doneLabel = totalBatches === 1
-      ? `Análisis completado (${(elapsed / 1000).toFixed(1)}s)`
-      : `Batch ${batchNum}/${totalBatches} completado (${(elapsed / 1000).toFixed(1)}s)`;
-    await onProgress?.(batchNum, totalBatches, doneLabel);
+    console.log(`${TAG} [Batch ${batchNum}/${correctionBatches}] Done in ${elapsed}ms, got ${corrected.length} segments back`);
+    const doneLabel = correctionBatches === 1
+      ? `Corrección completada (${(elapsed / 1000).toFixed(1)}s)`
+      : `Batch ${batchNum}/${correctionBatches} completado (${(elapsed / 1000).toFixed(1)}s)`;
+    await onProgress?.(batchNum, totalSteps, doneLabel);
     results.push(...corrected);
-    if (batchBits.length > 0) rawBits = batchBits;
+  }
+
+  // Phase 2: Dedicated bit detection pass — send ALL segments (condensed) in one call
+  // This ensures the LLM sees all the content when identifying comedy bits.
+  await onProgress?.(totalSteps, totalSteps, 'Detectando comedy bits...');
+  console.log(`${TAG} [Bits] Starting dedicated bit detection with ALL ${segments.length} segments`);
+
+  let rawBits: RawBit[] = [];
+  try {
+    // Condense segments to just id+text to fit in context window
+    const condensed = segments.map((s) => ({ id: s.id, text: s.text }));
+    const condensedJson = JSON.stringify(condensed);
+    console.log(`${TAG} [Bits] Condensed payload: ${condensedJson.length} chars`);
+
+    const bitsPrompt = buildPrompt(language, context, true);
+    const t0 = Date.now();
+    const { bits: detectedBits } = await callProvider(
+      config,
+      segments, // pass full segments for the correction merge
+      language,
+      context,
+      1,
+      1,
+      true // includeBits
+    );
+    const elapsed = Date.now() - t0;
+    console.log(`${TAG} [Bits] Done in ${elapsed}ms, detected ${detectedBits.length} bits`);
+    rawBits = detectedBits;
+  } catch (err) {
+    console.error(`${TAG} [Bits] Bit detection failed (corrections are preserved):`, err);
   }
 
   const bits = resolveBits(rawBits, segments);
