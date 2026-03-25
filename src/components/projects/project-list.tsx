@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Loader2, FolderOpen } from 'lucide-react';
+import { Loader2, FolderOpen, Upload } from 'lucide-react';
 import { useProjectStore } from '@/stores/project-store';
 import { ProjectCard } from './project-card';
 import { CreateProjectDialog } from './create-project-dialog';
+import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 
 export function ProjectList() {
@@ -13,6 +14,8 @@ export function ProjectList() {
     useProjectStore();
   const router = useRouter();
   const { toast } = useToast();
+  const restoreInputRef = useRef<HTMLInputElement>(null);
+  const [restoring, setRestoring] = useState(false);
 
   useEffect(() => {
     fetchProjects();
@@ -32,6 +35,31 @@ export function ProjectList() {
     toast({ title: 'Proyecto eliminado' });
   }
 
+  async function handleRestore(file: File) {
+    setRestoring(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/projects/restore', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+
+      toast({
+        title: `Proyecto restaurado: ${data.projectName}`,
+        description: data.missingFiles?.length > 0
+          ? `Faltan ${data.missingFiles.length} archivos fuente — impórtalos desde la página Import`
+          : 'Restauración completa',
+      });
+      fetchProjects();
+      router.push(`/project/${data.projectId}`);
+    } catch (err) {
+      toast({ title: 'Error al restaurar', description: (err as Error).message, variant: 'destructive' });
+    } finally {
+      setRestoring(false);
+      if (restoreInputRef.current) restoreInputRef.current.value = '';
+    }
+  }
+
   if (loading && projects.length === 0) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -49,7 +77,32 @@ export function ProjectList() {
             {projects.length} {projects.length === 1 ? 'proyecto' : 'proyectos'}
           </p>
         </div>
-        <CreateProjectDialog onCreate={handleCreate} />
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={restoring}
+            onClick={() => restoreInputRef.current?.click()}
+          >
+            {restoring ? (
+              <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+            ) : (
+              <Upload className="mr-1.5 h-4 w-4" />
+            )}
+            Restaurar backup
+          </Button>
+          <input
+            ref={restoreInputRef}
+            type="file"
+            accept=".zip"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleRestore(file);
+            }}
+          />
+          <CreateProjectDialog onCreate={handleCreate} />
+        </div>
       </div>
 
       {projects.length === 0 ? (

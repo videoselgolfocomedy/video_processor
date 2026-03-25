@@ -2,7 +2,8 @@
 
 import { useProjectStore } from '@/stores/project-store';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Music, Subtitles, Download, Film, Layers, Smartphone } from 'lucide-react';
+import { Music, Subtitles, Download, Film, Layers, Smartphone, Archive } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { formatFileSize } from '@/lib/utils';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
@@ -54,11 +55,24 @@ export default function ProjectOverviewPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-semibold">{currentProject.name}</h2>
-        <p className="text-sm text-muted-foreground">
-          {currentProject.sources.length} source files
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-semibold">{currentProject.name}</h2>
+          <p className="text-sm text-muted-foreground">
+            {currentProject.sources.length} source files
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            window.open(`/api/projects/${projectId}/backup`, '_blank');
+          }}
+          title="Descargar backup del proyecto (sin videos fuente)"
+        >
+          <Archive className="mr-1.5 h-4 w-4" />
+          Backup
+        </Button>
       </div>
 
       {/* Source files summary */}
