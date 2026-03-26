@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useReelStore } from '@/stores/reel-store';
 import { useProjectStore } from '@/stores/project-store';
 import { ReelSetupView } from './reel-setup-view';
@@ -48,6 +49,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
   const [bitProviders, setBitProviders] = useState<{ id: string; available: boolean; model?: string }[]>([]);
   const [bitError, setBitError] = useState<string | null>(null);
   const [bitProgress, setBitProgress] = useState<string>('');
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
 
   const updateCurrentProject = useProjectStore((s) => s.updateCurrentProject);
 
@@ -144,7 +146,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
   // Close context menu on click outside
   useEffect(() => {
     if (!contextMenuId) return;
-    const handler = () => setContextMenuId(null);
+    const handler = () => { setContextMenuId(null); setMenuPos(null); };
     window.addEventListener('click', handler);
     return () => window.removeEventListener('click', handler);
   }, [contextMenuId]);
@@ -261,7 +263,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
         {/* Tabs */}
         <div className="flex items-center gap-0 flex-1 min-w-0 overflow-x-auto">
           {reels.map((reel) => (
-            <div key={reel.id} className="relative flex items-center">
+            <div key={reel.id} className="relative flex items-center group">
               <button
                 className={`flex items-center gap-1 px-3 py-2 text-xs font-medium whitespace-nowrap transition-colors border-b-2 ${
                   reel.id === activeReelId
@@ -275,19 +277,6 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
                   setContextMenuId(reel.id);
                 }}
               >
-                {/* Menu dots - click to open context menu */}
-                {reel.id === activeReelId && editingTabId !== reel.id && (
-                  <span
-                    className="text-muted-foreground hover:text-foreground text-[10px] mr-0.5 cursor-pointer"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setContextMenuId(contextMenuId === reel.id ? null : reel.id);
-                    }}
-                    title="Opciones del reel"
-                  >
-                    ⋮
-                  </span>
-                )}
                 {editingTabId === reel.id ? (
                   <Input
                     value={editName}
@@ -304,47 +293,30 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
                 ) : (
                   <span>{reel.name}</span>
                 )}
-                {/* No X button on tabs — delete only via right-click context menu with confirmation */}
               </button>
-
-              {/* Context menu */}
-              {contextMenuId === reel.id && (
-                <div className="absolute top-full left-0 z-50 bg-popover border border-border rounded-md shadow-md py-1 min-w-[120px]">
-                  <button
-                    className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted text-left"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleStartRename(reel.id, reel.name);
+              {/* Menu button — OUTSIDE the tab button so clicks work reliably */}
+              {reel.id === activeReelId && editingTabId !== reel.id && (
+                <button
+                  className="px-1 py-1 -ml-1 text-muted-foreground hover:text-foreground hover:bg-muted rounded opacity-60 group-hover:opacity-100 transition-opacity"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (contextMenuId === reel.id) {
                       setContextMenuId(null);
-                    }}
-                  >
-                    Rename
-                  </button>
-                  <button
-                    className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted text-left"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      duplicateReel(reel.id);
-                      setContextMenuId(null);
-                    }}
-                  >
-                    <Copy className="h-3 w-3" /> Duplicate
-                  </button>
-                  <button
-                    className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted text-left text-red-400"
-                    onClick={async (e) => {
-                      e.stopPropagation();
-                      setContextMenuId(null);
-                      if (window.confirm(`Delete reel "${reel.name}"? This cannot be undone.`)) {
-                        deleteReel(reel.id);
-                        // Immediate save so deletion persists even if user closes the page
-                        await onSave();
-                      }
-                    }}
-                  >
-                    <Trash2 className="h-3 w-3" /> Delete
-                  </button>
-                </div>
+                      setMenuPos(null);
+                    } else {
+                      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                      setMenuPos({ top: rect.bottom + 4, left: rect.left });
+                      setContextMenuId(reel.id);
+                    }
+                  }}
+                  title="Opciones del reel"
+                >
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                    <circle cx="8" cy="3" r="1.5" />
+                    <circle cx="8" cy="8" r="1.5" />
+                    <circle cx="8" cy="13" r="1.5" />
+                  </svg>
+                </button>
               )}
             </div>
           ))}
@@ -495,6 +467,50 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
             )}
           </div>
         </div>
+      )}
+
+      {/* Context menu portal — rendered outside scroll containers */}
+      {contextMenuId && menuPos && typeof document !== 'undefined' && createPortal(
+        <div
+          className="fixed z-[9999] bg-popover border border-border rounded-md shadow-lg py-1 min-w-[140px]"
+          style={{ top: menuPos.top, left: menuPos.left }}
+        >
+          <button
+            className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted text-left"
+            onClick={() => {
+              handleStartRename(contextMenuId, reels.find(r => r.id === contextMenuId)?.name || '');
+              setContextMenuId(null);
+              setMenuPos(null);
+            }}
+          >
+            Rename
+          </button>
+          <button
+            className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted text-left"
+            onClick={() => {
+              duplicateReel(contextMenuId);
+              setContextMenuId(null);
+              setMenuPos(null);
+            }}
+          >
+            <Copy className="h-3 w-3" /> Duplicate
+          </button>
+          <button
+            className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-muted text-left text-red-400"
+            onClick={async () => {
+              const name = reels.find(r => r.id === contextMenuId)?.name || 'reel';
+              setContextMenuId(null);
+              setMenuPos(null);
+              if (window.confirm(`Delete reel "${name}"? This cannot be undone.`)) {
+                deleteReel(contextMenuId);
+                await onSave();
+              }
+            }}
+          >
+            <Trash2 className="h-3 w-3" /> Delete
+          </button>
+        </div>,
+        document.body
       )}
     </div>
   );
