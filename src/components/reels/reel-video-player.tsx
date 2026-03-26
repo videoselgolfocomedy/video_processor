@@ -191,9 +191,12 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
   const updateCropRegion = useReelStore((s) => s.updateCropRegion);
   const phase = useReelStore((s) => s.phase);
 
-  const startSec = reel ? reel.startMs / 1000 : 0;
-  const endSec = reel ? reel.endMs / 1000 : 0;
-  const reelDurationMs = reel ? reel.endMs - reel.startMs : 0;
+  // Use source times for video seeking (may differ from display times when compose-mapped)
+  const srcStartMs = reel ? (reel.sourceStartMs ?? reel.startMs) : 0;
+  const srcEndMs = reel ? (reel.sourceEndMs ?? reel.endMs) : 0;
+  const startSec = srcStartMs / 1000;
+  const endSec = srcEndMs / 1000;
+  const reelDurationMs = reel ? srcEndMs - srcStartMs : 0;
   const isTimelinePhase = phase === 'timeline';
 
   // Register video element for canvas capture by other components
