@@ -63,8 +63,10 @@ export interface ReelDefinition {
   id: string;
   name: string;
   createdAt: string;
-  startMs: number;
-  endMs: number;
+  startMs: number;       // display/compose time
+  endMs: number;         // display/compose time
+  sourceStartMs?: number; // source time for video seeking (when from compose, differs from startMs)
+  sourceEndMs?: number;   // source time for video seeking
   cropRegion: CropRegion;
   composition: CompositionState;
   subtitleStyle: SubtitleStyle;

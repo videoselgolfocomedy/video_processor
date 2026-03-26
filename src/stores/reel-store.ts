@@ -291,19 +291,21 @@ export const useReelStore = create<ReelStore>((set, get) => ({
   createReel: (name, startMs, endMs, sourceStartMs, sourceEndMs) => {
     const id = uuidv4();
     const constraints = { ...REEL_DEFAULT_CONSTRAINTS };
-    // When bits come from compose, startMs/endMs are compose-timeline times
-    // but sourceStartMs/sourceEndMs are the actual SOURCE positions for video/audio seeking
-    // and subtitle filtering (baseSegments use source times).
+    // startMs/endMs = compose times (for display, trim bar)
+    // sourceStartMs/sourceEndMs = source times (for video seeking, subtitle filtering)
     const srcStart = sourceStartMs != null ? sourceStartMs : startMs;
     const srcEnd = sourceEndMs != null ? sourceEndMs : endMs;
-    console.log(`[reel-store] createReel "${name}": compose=${startMs}-${endMs}, source=${srcStart}-${srcEnd}`);
+    console.log(`[reel-store] createReel "${name}": display=${startMs}-${endMs}, source=${srcStart}-${srcEnd}`);
+    // Subtitles are filtered by SOURCE time (baseSegments use source time)
     const segments = filterSegmentsToRange(get().baseSegments, srcStart, srcEnd, constraints);
     const reel: ReelDefinition = {
       id,
       name,
       createdAt: new Date().toISOString(),
-      startMs: srcStart,
-      endMs: srcEnd,
+      startMs,
+      endMs,
+      sourceStartMs: sourceStartMs != null ? sourceStartMs : undefined,
+      sourceEndMs: sourceEndMs != null ? sourceEndMs : undefined,
       cropRegion: { centerX: 0.5, centerY: 0.5, scale: 1.0 },
       composition: { tracks: defaultReelTracks.map((t) => ({ ...t })), clips: [], mediaBin: [] },
       subtitleStyle: { ...defaultReelStyle },
@@ -797,7 +799,10 @@ export const useReelStore = create<ReelStore>((set, get) => ({
     const reel = state.reels.find((r) => r.id === reelId);
     if (!reel) return;
 
-    const reelDur = reel.endMs - reel.startMs;
+    // Use source times for video seeking (may differ from display times when compose-mapped)
+    const srcStart = reel.sourceStartMs ?? reel.startMs;
+    const srcEnd = reel.sourceEndMs ?? reel.endMs;
+    const reelDur = srcEnd - srcStart;
     const existingClips = reel.composition.clips;
 
     // Only recreate clips if none exist at all (first time entering timeline)
@@ -814,8 +819,8 @@ export const useReelStore = create<ReelStore>((set, get) => ({
           trackId: 'rv1',
           timelineStartMs: 0,
           timelineEndMs: reelDur,
-          sourceInMs: reel.startMs,
-          sourceOutMs: reel.endMs,
+          sourceInMs: srcStart,
+          sourceOutMs: srcEnd,
         });
       }
       if (audioFileName) {
@@ -827,14 +832,14 @@ export const useReelStore = create<ReelStore>((set, get) => ({
           trackId: 'ra1',
           timelineStartMs: 0,
           timelineEndMs: reelDur,
-          sourceInMs: reel.startMs,
-          sourceOutMs: reel.endMs,
+          sourceInMs: srcStart,
+          sourceOutMs: srcEnd,
         });
       }
 
-      // Also regenerate subtitles to match the new range
+      // Subtitles filtered by SOURCE time (baseSegments use source times)
       const segments = filterSegmentsToRange(
-        state.baseSegments, reel.startMs, reel.endMs, reel.subtitleConstraints
+        state.baseSegments, srcStart, srcEnd, reel.subtitleConstraints
       );
 
       set((s) => ({
@@ -1291,7 +1296,9 @@ export const useReelStore = create<ReelStore>((set, get) => ({
     if (!reel) return;
 
     // Clear clips and regenerate subtitles from source
-    const segments = filterSegmentsToRange(state.baseSegments, reel.startMs, reel.endMs, reel.subtitleConstraints);
+    const srcStart = reel.sourceStartMs ?? reel.startMs;
+    const srcEnd = reel.sourceEndMs ?? reel.endMs;
+    const segments = filterSegmentsToRange(state.baseSegments, srcStart, srcEnd, reel.subtitleConstraints);
     set((s) => ({
       reels: updateReelInList(s.reels, reelId, (r) => ({
         ...r,
