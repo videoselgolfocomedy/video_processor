@@ -26,6 +26,16 @@ export function BitsSuggestionPanel({ bits, compositionClips, onCreateReel }: Bi
   const mainClips = compositionClips.filter((c) => c.trackId === 'v1');
   const hasComposition = mainClips.length > 0;
 
+  // Helper: map compose timeline time → source time using compose clips
+  const composeToSource = (composeMs: number): number => {
+    for (const clip of mainClips) {
+      if (composeMs >= clip.timelineStartMs && composeMs <= clip.timelineEndMs) {
+        return clip.sourceInMs + (composeMs - clip.timelineStartMs);
+      }
+    }
+    return composeMs; // fallback: already source time
+  };
+
   // Compute overlap coverage for each bit
   // If no compose editing done yet, show all bits at 100%
   const bitsWithCoverage: BitWithCoverage[] = bits
@@ -105,13 +115,13 @@ export function BitsSuggestionPanel({ bits, compositionClips, onCreateReel }: Bi
                 size="sm"
                 variant="outline"
                 className="h-6 px-2 text-[10px]"
-                onClick={() => onCreateReel(
-                  bit.label,
-                  bit.startMs,
-                  bit.endMs,
-                  (bit as BitWithSourceTimes).sourceStartMs,
-                  (bit as BitWithSourceTimes).sourceEndMs
-                )}
+                onClick={() => {
+                  // Always compute source times from compose clips — more reliable
+                  // than depending on sourceStartMs stored in the bit
+                  const srcStart = hasComposition ? composeToSource(bit.startMs) : bit.startMs;
+                  const srcEnd = hasComposition ? composeToSource(bit.endMs) : bit.endMs;
+                  onCreateReel(bit.label, bit.startMs, bit.endMs, srcStart, srcEnd);
+                }}
               >
                 <Plus className="mr-1 h-2.5 w-2.5" />
                 Create Reel
