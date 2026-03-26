@@ -9,7 +9,7 @@ import { ReelRightPanel } from './reel-right-panel';
 import { BitsSuggestionPanel } from './bits-suggestion-panel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Save, Plus, Copy, Trash2, ArrowRight, Sparkles } from 'lucide-react';
+import { Save, Plus, Copy, Trash2, ArrowRight, Sparkles, RefreshCw, Loader2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 interface ReelLayoutProps {
@@ -40,6 +40,63 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
   const [editName, setEditName] = useState('');
   const [contextMenuId, setContextMenuId] = useState<string | null>(null);
   const [showBitsPanel, setShowBitsPanel] = useState(false);
+  const [detectingBits, setDetectingBits] = useState(false);
+  const [bitSource, setBitSource] = useState<'compose' | 'full'>(
+    compositionClips.some((c: { trackId: string }) => c.trackId === 'v1') ? 'compose' : 'full'
+  );
+  const [showBitSourceMenu, setShowBitSourceMenu] = useState(false);
+
+  const updateCurrentProject = useProjectStore((s) => s.updateCurrentProject);
+
+  const handleDetectBits = useCallback(async () => {
+    if (!currentProject || detectingBits) return;
+    setDetectingBits(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/bits`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          language: currentProject.transcription.language || 'es',
+          context: '',
+          provider: 'groq',
+          source: bitSource,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to detect bits');
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) return;
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+            if (event.type === 'done' && event.bits) {
+              updateCurrentProject({ bits: event.bits });
+              setShowBitsPanel(true);
+            }
+          } catch { /* skip */ }
+        }
+      }
+    } catch (err) {
+      console.error('Bit detection failed:', err);
+    } finally {
+      setDetectingBits(false);
+    }
+  }, [currentProject, projectId, bitSource, detectingBits, updateCurrentProject]);
 
   const handleCreate = useCallback(() => {
     const name = `Reel ${reels.length + 1}`;
@@ -277,6 +334,36 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
               <span className="text-[9px] bg-muted px-1 rounded">{bits.length}</span>
             </button>
           )}
+
+          {/* Detect/Regenerate bits */}
+          <div className="relative ml-1">
+            <button
+              className={`flex items-center gap-1 px-2 py-2 text-xs font-medium transition-colors ${
+                detectingBits ? 'text-purple-400' : 'text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={handleDetectBits}
+              disabled={detectingBits}
+              title={`Detectar bits desde ${bitSource === 'compose' ? 'Compose' : 'video completo'}`}
+            >
+              {detectingBits ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3 w-3" />
+              )}
+              {bits.length > 0 ? 'Regenerar' : 'Detectar'} Bits
+            </button>
+            {/* Source selector inline */}
+            <button
+              className="absolute -bottom-4 left-0 right-0 text-center text-[9px] text-muted-foreground hover:text-purple-400"
+              onClick={(e) => {
+                e.stopPropagation();
+                setBitSource(bitSource === 'compose' ? 'full' : 'compose');
+              }}
+              title="Cambiar fuente de bits"
+            >
+              {bitSource === 'compose' ? '📐 Compose' : '🎬 Completo'}
+            </button>
+          </div>
         </div>
 
         {/* Save status + buttons */}

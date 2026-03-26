@@ -609,6 +609,37 @@ function resolveBits(rawBits: RawBit[], allSegments: SubtitleSegment[]): BitDefi
   return resolved;
 }
 
+/**
+ * Detect comedy bits only (no subtitle corrections).
+ * Sends all segments in a single call dedicated to bit detection.
+ */
+export async function detectBitsOnly(options: {
+  segments: SubtitleSegment[];
+  language: string;
+  context?: string;
+  provider: LLMProvider;
+  onProgress?: (message: string) => void | Promise<void>;
+}): Promise<BitDefinition[]> {
+  const { segments, language, context, provider, onProgress } = options;
+  const providers = await detectProviders();
+  const config = providers.find((p) => p.id === provider);
+  if (!config || !config.available) {
+    throw new Error(`Proveedor "${provider}" no disponible.`);
+  }
+
+  console.log(`${TAG} detectBitsOnly: ${segments.length} segments, provider=${config.id}, model=${config.model}`);
+  await onProgress?.('Enviando segmentos para detectar bits...');
+
+  const t0 = Date.now();
+  const { bits: rawBits } = await callProvider(config, segments, language, context, 1, 1, true);
+  const elapsed = Date.now() - t0;
+  console.log(`${TAG} detectBitsOnly: Done in ${elapsed}ms, detected ${rawBits.length} raw bits`);
+  await onProgress?.(`${rawBits.length} bits detectados (${(elapsed / 1000).toFixed(1)}s)`);
+
+  const bits = resolveBits(rawBits, segments);
+  return bits;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
