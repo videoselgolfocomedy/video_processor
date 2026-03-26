@@ -347,14 +347,16 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
 
           {/* Detect/Regenerate bits — source + provider + button */}
           <div className="flex items-center gap-1 ml-2 border-l border-border pl-2">
-            {/* Source toggle */}
-            <button
-              className="text-[9px] px-1.5 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground"
-              onClick={() => setBitSource(bitSource === 'compose' ? 'full' : 'compose')}
-              title="Fuente: Compose (video editado) o Completo"
+            {/* Source selector */}
+            <select
+              className="text-[9px] bg-transparent border border-border rounded px-1 py-0.5 text-muted-foreground"
+              value={bitSource}
+              onChange={(e) => setBitSource(e.target.value as 'compose' | 'full')}
+              title="Fuente de los segmentos para detectar bits"
             >
-              {bitSource === 'compose' ? 'Compose' : 'Completo'}
-            </button>
+              <option value="compose">Compose (editado)</option>
+              <option value="full">Video completo</option>
+            </select>
             {/* Provider selector */}
             <select
               className="text-[9px] bg-transparent border border-border rounded px-1 py-0.5 text-muted-foreground"

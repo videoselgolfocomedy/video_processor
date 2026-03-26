@@ -288,24 +288,22 @@ export const useReelStore = create<ReelStore>((set, get) => ({
   selectReel: (id) => set({ activeReelId: id, currentTimeMs: 0, isPlaying: false, selectedClipIds: [], selectedSubtitleIds: [], phase: 'setup' }),
   markClean: () => set({ dirty: false }),
 
-  createReel: (name, startMs, endMs, sourceStartMs?, sourceEndMs?) => {
+  createReel: (name, startMs, endMs, sourceStartMs, sourceEndMs) => {
     const id = uuidv4();
     const constraints = { ...REEL_DEFAULT_CONSTRAINTS };
     // When bits come from compose, startMs/endMs are compose-timeline times
-    // but sourceStartMs/sourceEndMs are the actual source positions for video/audio seeking.
-    // For subtitles, we use source times to filter from baseSegments (which have source times).
-    const segFilterStart = sourceStartMs ?? startMs;
-    const segFilterEnd = sourceEndMs ?? endMs;
-    const segments = filterSegmentsToRange(get().baseSegments, segFilterStart, segFilterEnd, constraints);
-    // Store source times for video/audio seeking (may differ from startMs/endMs when compose-mapped)
-    const videoSourceStart = sourceStartMs ?? startMs;
-    const videoSourceEnd = sourceEndMs ?? endMs;
+    // but sourceStartMs/sourceEndMs are the actual SOURCE positions for video/audio seeking
+    // and subtitle filtering (baseSegments use source times).
+    const srcStart = sourceStartMs != null ? sourceStartMs : startMs;
+    const srcEnd = sourceEndMs != null ? sourceEndMs : endMs;
+    console.log(`[reel-store] createReel "${name}": compose=${startMs}-${endMs}, source=${srcStart}-${srcEnd}`);
+    const segments = filterSegmentsToRange(get().baseSegments, srcStart, srcEnd, constraints);
     const reel: ReelDefinition = {
       id,
       name,
       createdAt: new Date().toISOString(),
-      startMs: videoSourceStart,
-      endMs: videoSourceEnd,
+      startMs: srcStart,
+      endMs: srcEnd,
       cropRegion: { centerX: 0.5, centerY: 0.5, scale: 1.0 },
       composition: { tracks: defaultReelTracks.map((t) => ({ ...t })), clips: [], mediaBin: [] },
       subtitleStyle: { ...defaultReelStyle },
