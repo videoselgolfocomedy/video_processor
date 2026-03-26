@@ -41,19 +41,38 @@ export async function POST(
     source: 'full' | 'compose';
   };
 
-  // Get segments — optionally filter by compose clips
+  // Get compose v1 clips sorted by timeline position
+  const composeClips = (project.composition?.clips ?? [])
+    .filter((c: { trackId: string }) => c.trackId === 'v1')
+    .sort((a: { timelineStartMs: number }, b: { timelineStartMs: number }) => a.timelineStartMs - b.timelineStartMs);
+
+  // Helper: map source time → compose timeline time
+  function sourceToCompose(sourceMs: number): number | null {
+    for (const clip of composeClips as Array<{ timelineStartMs: number; timelineEndMs: number; sourceInMs: number; sourceOutMs: number }>) {
+      if (sourceMs >= clip.sourceInMs && sourceMs <= clip.sourceOutMs) {
+        return clip.timelineStartMs + (sourceMs - clip.sourceInMs);
+      }
+    }
+    return null; // Not in compose timeline
+  }
+
+  // Get segments — optionally filter and remap by compose clips
   let segments = project.transcription.segments;
-  if (source === 'compose') {
-    const composeClips = (project.composition?.clips ?? []).filter(
-      (c: { trackId: string }) => c.trackId === 'v1'
-    );
-    if (composeClips.length > 0) {
-      segments = segments.filter((seg) =>
+  if (source === 'compose' && composeClips.length > 0) {
+    // Filter to segments that overlap with compose clips, then remap times to compose timeline
+    segments = segments
+      .filter((seg) =>
         composeClips.some((clip: { sourceInMs: number; sourceOutMs: number }) =>
           seg.endMs > clip.sourceInMs && seg.startMs < clip.sourceOutMs
         )
-      );
-    }
+      )
+      .map((seg) => {
+        const newStart = sourceToCompose(seg.startMs);
+        const newEnd = sourceToCompose(seg.endMs);
+        if (newStart === null || newEnd === null) return null;
+        return { ...seg, startMs: newStart, endMs: newEnd };
+      })
+      .filter((s): s is NonNullable<typeof s> => s !== null);
   }
 
   if (segments.length === 0) {
@@ -77,8 +96,27 @@ export async function POST(
           },
         });
 
+        // When bits are from compose, add sourceStartMs/sourceEndMs so reels can
+        // seek to the correct position in the muxed video
+        const enrichedBits = (source === 'compose' && composeClips.length > 0)
+          ? bits.map((bit) => {
+              // Reverse map: compose time → source time
+              let srcStart = bit.startMs;
+              let srcEnd = bit.endMs;
+              for (const clip of composeClips as Array<{ timelineStartMs: number; timelineEndMs: number; sourceInMs: number; sourceOutMs: number }>) {
+                if (bit.startMs >= clip.timelineStartMs && bit.startMs <= clip.timelineEndMs) {
+                  srcStart = clip.sourceInMs + (bit.startMs - clip.timelineStartMs);
+                }
+                if (bit.endMs >= clip.timelineStartMs && bit.endMs <= clip.timelineEndMs) {
+                  srcEnd = clip.sourceInMs + (bit.endMs - clip.timelineStartMs);
+                }
+              }
+              return { ...bit, sourceStartMs: srcStart, sourceEndMs: srcEnd };
+            })
+          : bits;
+
         // Save bits to project
-        await updateProject(id, { bits });
+        await updateProject(id, { bits: enrichedBits });
 
         controller.enqueue(
           encoder.encode(JSON.stringify({ type: 'done', bits }) + '\n')

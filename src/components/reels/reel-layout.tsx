@@ -426,8 +426,8 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
               <BitsSuggestionPanel
                 bits={bits}
                 compositionClips={compositionClips}
-                onCreateReel={(label, startMs, endMs) => {
-                  createReel(label, startMs, endMs);
+                onCreateReel={(label, startMs, endMs, sourceStartMs, sourceEndMs) => {
+                  createReel(label, startMs, endMs, sourceStartMs, sourceEndMs);
                   setShowBitsPanel(false);
                 }}
               />
@@ -457,8 +457,8 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
               <BitsSuggestionPanel
                 bits={bits}
                 compositionClips={compositionClips}
-                onCreateReel={(label, startMs, endMs) => {
-                  createReel(label, startMs, endMs);
+                onCreateReel={(label, startMs, endMs, sourceStartMs, sourceEndMs) => {
+                  createReel(label, startMs, endMs, sourceStartMs, sourceEndMs);
                   setShowBitsPanel(false);
                 }}
               />

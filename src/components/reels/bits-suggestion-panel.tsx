@@ -5,10 +5,16 @@ import { Button } from '@/components/ui/button';
 import { formatTimestamp } from '@/lib/utils';
 import { Sparkles, Plus } from 'lucide-react';
 
+// Extended bit with optional source times (when bits come from compose)
+interface BitWithSourceTimes extends BitDefinition {
+  sourceStartMs?: number;
+  sourceEndMs?: number;
+}
+
 interface BitsSuggestionPanelProps {
-  bits: BitDefinition[];
+  bits: BitWithSourceTimes[];
   compositionClips: CompositionClip[];
-  onCreateReel: (label: string, startMs: number, endMs: number) => void;
+  onCreateReel: (label: string, startMs: number, endMs: number, sourceStartMs?: number, sourceEndMs?: number) => void;
 }
 
 interface BitWithCoverage extends BitDefinition {
@@ -99,7 +105,13 @@ export function BitsSuggestionPanel({ bits, compositionClips, onCreateReel }: Bi
                 size="sm"
                 variant="outline"
                 className="h-6 px-2 text-[10px]"
-                onClick={() => onCreateReel(bit.label, bit.startMs, bit.endMs)}
+                onClick={() => onCreateReel(
+                  bit.label,
+                  bit.startMs,
+                  bit.endMs,
+                  (bit as BitWithSourceTimes).sourceStartMs,
+                  (bit as BitWithSourceTimes).sourceEndMs
+                )}
               >
                 <Plus className="mr-1 h-2.5 w-2.5" />
                 Create Reel

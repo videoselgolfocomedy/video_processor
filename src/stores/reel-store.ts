@@ -67,7 +67,7 @@ interface ReelStore {
   markClean: () => void;
 
   // Reel CRUD
-  createReel: (name: string, startMs: number, endMs: number) => string;
+  createReel: (name: string, startMs: number, endMs: number, sourceStartMs?: number, sourceEndMs?: number) => string;
   deleteReel: (id: string) => void;
   duplicateReel: (id: string) => string;
   updateReel: (id: string, updates: Partial<ReelDefinition>) => void;
@@ -288,16 +288,24 @@ export const useReelStore = create<ReelStore>((set, get) => ({
   selectReel: (id) => set({ activeReelId: id, currentTimeMs: 0, isPlaying: false, selectedClipIds: [], selectedSubtitleIds: [], phase: 'setup' }),
   markClean: () => set({ dirty: false }),
 
-  createReel: (name, startMs, endMs) => {
+  createReel: (name, startMs, endMs, sourceStartMs?, sourceEndMs?) => {
     const id = uuidv4();
     const constraints = { ...REEL_DEFAULT_CONSTRAINTS };
-    const segments = filterSegmentsToRange(get().baseSegments, startMs, endMs, constraints);
+    // When bits come from compose, startMs/endMs are compose-timeline times
+    // but sourceStartMs/sourceEndMs are the actual source positions for video/audio seeking.
+    // For subtitles, we use source times to filter from baseSegments (which have source times).
+    const segFilterStart = sourceStartMs ?? startMs;
+    const segFilterEnd = sourceEndMs ?? endMs;
+    const segments = filterSegmentsToRange(get().baseSegments, segFilterStart, segFilterEnd, constraints);
+    // Store source times for video/audio seeking (may differ from startMs/endMs when compose-mapped)
+    const videoSourceStart = sourceStartMs ?? startMs;
+    const videoSourceEnd = sourceEndMs ?? endMs;
     const reel: ReelDefinition = {
       id,
       name,
       createdAt: new Date().toISOString(),
-      startMs,
-      endMs,
+      startMs: videoSourceStart,
+      endMs: videoSourceEnd,
       cropRegion: { centerX: 0.5, centerY: 0.5, scale: 1.0 },
       composition: { tracks: defaultReelTracks.map((t) => ({ ...t })), clips: [], mediaBin: [] },
       subtitleStyle: { ...defaultReelStyle },
