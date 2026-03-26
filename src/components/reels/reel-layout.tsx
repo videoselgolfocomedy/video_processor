@@ -275,6 +275,19 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
                   setContextMenuId(reel.id);
                 }}
               >
+                {/* Menu dots - click to open context menu */}
+                {reel.id === activeReelId && editingTabId !== reel.id && (
+                  <span
+                    className="text-muted-foreground hover:text-foreground text-[10px] mr-0.5 cursor-pointer"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setContextMenuId(contextMenuId === reel.id ? null : reel.id);
+                    }}
+                    title="Opciones del reel"
+                  >
+                    ⋮
+                  </span>
+                )}
                 {editingTabId === reel.id ? (
                   <Input
                     value={editName}
