@@ -44,13 +44,31 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
   const [bitSource, setBitSource] = useState<'compose' | 'full'>(
     compositionClips.some((c: { trackId: string }) => c.trackId === 'v1') ? 'compose' : 'full'
   );
-  const [showBitSourceMenu, setShowBitSourceMenu] = useState(false);
+  const [bitProvider, setBitProvider] = useState<string>('');
+  const [bitProviders, setBitProviders] = useState<{ id: string; available: boolean; model?: string }[]>([]);
+  const [bitError, setBitError] = useState<string | null>(null);
+  const [bitProgress, setBitProgress] = useState<string>('');
 
   const updateCurrentProject = useProjectStore((s) => s.updateCurrentProject);
 
+  // Fetch available providers for bit detection
+  useEffect(() => {
+    fetch(`/api/projects/${projectId}/bits`)
+      .then((r) => r.json())
+      .then((data) => {
+        const provs = data.providers || [];
+        setBitProviders(provs);
+        const first = provs.find((p: { available: boolean }) => p.available);
+        if (first && !bitProvider) setBitProvider(first.id);
+      })
+      .catch(() => {});
+  }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleDetectBits = useCallback(async () => {
-    if (!currentProject || detectingBits) return;
+    if (!currentProject || detectingBits || !bitProvider) return;
     setDetectingBits(true);
+    setBitError(null);
+    setBitProgress('Iniciando...');
     try {
       const res = await fetch(`/api/projects/${projectId}/bits`, {
         method: 'POST',
@@ -58,7 +76,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
         body: JSON.stringify({
           language: currentProject.transcription.language || 'es',
           context: '',
-          provider: 'groq',
+          provider: bitProvider,
           source: bitSource,
         }),
       });
@@ -84,19 +102,26 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
-            if (event.type === 'done' && event.bits) {
+            if (event.type === 'progress') {
+              setBitProgress(event.message);
+            } else if (event.type === 'done' && event.bits) {
               updateCurrentProject({ bits: event.bits });
               setShowBitsPanel(true);
+              setBitProgress(`✓ ${event.bits.length} bits detectados`);
+            } else if (event.type === 'error') {
+              setBitError(event.error);
+              setBitProgress('');
             }
           } catch { /* skip */ }
         }
       }
     } catch (err) {
-      console.error('Bit detection failed:', err);
+      setBitError((err as Error).message);
+      setBitProgress('');
     } finally {
       setDetectingBits(false);
     }
-  }, [currentProject, projectId, bitSource, detectingBits, updateCurrentProject]);
+  }, [currentProject, projectId, bitSource, bitProvider, detectingBits, updateCurrentProject]);
 
   const handleCreate = useCallback(() => {
     const name = `Reel ${reels.length + 1}`;
@@ -335,34 +360,48 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
             </button>
           )}
 
-          {/* Detect/Regenerate bits */}
-          <div className="relative ml-1">
+          {/* Detect/Regenerate bits — source + provider + button */}
+          <div className="flex items-center gap-1 ml-2 border-l border-border pl-2">
+            {/* Source toggle */}
             <button
-              className={`flex items-center gap-1 px-2 py-2 text-xs font-medium transition-colors ${
-                detectingBits ? 'text-purple-400' : 'text-muted-foreground hover:text-foreground'
+              className="text-[9px] px-1.5 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground"
+              onClick={() => setBitSource(bitSource === 'compose' ? 'full' : 'compose')}
+              title="Fuente: Compose (video editado) o Completo"
+            >
+              {bitSource === 'compose' ? 'Compose' : 'Completo'}
+            </button>
+            {/* Provider selector */}
+            <select
+              className="text-[9px] bg-transparent border border-border rounded px-1 py-0.5 text-muted-foreground"
+              value={bitProvider}
+              onChange={(e) => setBitProvider(e.target.value)}
+            >
+              {bitProviders.map((p) => (
+                <option key={p.id} value={p.id} disabled={!p.available}>
+                  {p.id}{!p.available ? ' (sin key)' : ''}
+                </option>
+              ))}
+            </select>
+            {/* Detect button */}
+            <button
+              className={`flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded transition-colors ${
+                detectingBits
+                  ? 'bg-purple-500/20 text-purple-400'
+                  : 'bg-muted hover:bg-muted/80 text-foreground'
               }`}
               onClick={handleDetectBits}
-              disabled={detectingBits}
-              title={`Detectar bits desde ${bitSource === 'compose' ? 'Compose' : 'video completo'}`}
+              disabled={detectingBits || !bitProvider}
             >
               {detectingBits ? (
                 <Loader2 className="h-3 w-3 animate-spin" />
               ) : (
                 <RefreshCw className="h-3 w-3" />
               )}
-              {bits.length > 0 ? 'Regenerar' : 'Detectar'} Bits
+              {bits.length > 0 ? 'Regenerar' : 'Detectar'}
             </button>
-            {/* Source selector inline */}
-            <button
-              className="absolute -bottom-4 left-0 right-0 text-center text-[9px] text-muted-foreground hover:text-purple-400"
-              onClick={(e) => {
-                e.stopPropagation();
-                setBitSource(bitSource === 'compose' ? 'full' : 'compose');
-              }}
-              title="Cambiar fuente de bits"
-            >
-              {bitSource === 'compose' ? '📐 Compose' : '🎬 Completo'}
-            </button>
+            {/* Progress/Error */}
+            {bitProgress && <span className="text-[9px] text-purple-400 ml-1">{bitProgress}</span>}
+            {bitError && <span className="text-[9px] text-red-400 ml-1 max-w-[200px] truncate" title={bitError}>{bitError}</span>}
           </div>
         </div>
 

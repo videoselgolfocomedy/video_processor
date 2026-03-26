@@ -611,7 +611,7 @@ function resolveBits(rawBits: RawBit[], allSegments: SubtitleSegment[]): BitDefi
 
 /**
  * Detect comedy bits only (no subtitle corrections).
- * Sends all segments in a single call dedicated to bit detection.
+ * Uses a compact prompt and condensed segment format to minimize token usage.
  */
 export async function detectBitsOnly(options: {
   segments: SubtitleSegment[];
@@ -628,12 +628,98 @@ export async function detectBitsOnly(options: {
   }
 
   console.log(`${TAG} detectBitsOnly: ${segments.length} segments, provider=${config.id}, model=${config.model}`);
-  await onProgress?.('Enviando segmentos para detectar bits...');
+  await onProgress?.(`Enviando ${segments.length} segmentos para detectar bits...`);
+
+  // Build a compact transcript with segment IDs for bit boundary detection.
+  // Format: "[id_prefix] text" — much smaller than JSON arrays.
+  // We use 8-char ID prefixes to save tokens while keeping unique mapping.
+  const idMap = new Map<string, string>(); // prefix → full id
+  const lines: string[] = [];
+  for (const seg of segments) {
+    const prefix = seg.id.substring(0, 8);
+    idMap.set(prefix, seg.id);
+    lines.push(`[${prefix}] ${seg.text}`);
+  }
+  const transcript = lines.join('\n');
+
+  const systemPrompt = [
+    `You are a comedy bit detector. Identify distinct comedy bits/topics/routines in this standup transcript.`,
+    `Language: ${language === 'auto' ? 'detect from context' : language}.`,
+    context ? `Context: ${context}` : '',
+    `Each line starts with [ID]. Return ONLY a JSON array of bits:`,
+    `[{"label":"short title","summary":"1-2 sentences","startId":"ID of first segment","endId":"ID of last segment"}]`,
+    `If no clear bits found, return []. No extra text outside JSON.`,
+  ].filter(Boolean).join(' ');
+
+  console.log(`${TAG} detectBitsOnly: transcript=${transcript.length} chars, system=${systemPrompt.length} chars`);
 
   const t0 = Date.now();
-  const { bits: rawBits } = await callProvider(config, segments, language, context, 1, 1, true);
+  let responseText: string;
+
+  try {
+    switch (config.id) {
+      case 'openrouter': {
+        const key = await resolveKey('openrouter');
+        responseText = await callOpenAICompat('https://openrouter.ai/api/v1/chat/completions', key!, systemPrompt, transcript, config.model);
+        break;
+      }
+      case 'groq': {
+        const key = await resolveKey('groq');
+        responseText = await callOpenAICompat('https://api.groq.com/openai/v1/chat/completions', key!, systemPrompt, transcript, config.model);
+        break;
+      }
+      case 'openai': {
+        const key = await resolveKey('openai');
+        responseText = await callOpenAICompat('https://api.openai.com/v1/chat/completions', key!, systemPrompt, transcript, config.model);
+        break;
+      }
+      case 'anthropic': {
+        const key = await resolveKey('anthropic');
+        responseText = await callAnthropic(key!, systemPrompt, transcript, config.model);
+        break;
+      }
+      case 'ollama': {
+        const host = process.env.OLLAMA_HOST || 'http://localhost:11434';
+        responseText = await callOllama(host, systemPrompt, transcript, config.model);
+        break;
+      }
+      default:
+        throw new Error(`Unknown provider: ${config.id}`);
+    }
+  } catch (err) {
+    throw err;
+  }
+
   const elapsed = Date.now() - t0;
-  console.log(`${TAG} detectBitsOnly: Done in ${elapsed}ms, detected ${rawBits.length} raw bits`);
+  console.log(`${TAG} detectBitsOnly: LLM response in ${elapsed}ms, ${responseText.length} chars`);
+
+  // Parse response — extract JSON array of bits
+  let rawBits: RawBit[] = [];
+  try {
+    const cleaned = responseText.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    const bitsArray = Array.isArray(parsed) ? parsed : (parsed.bits || parsed.corrections || []);
+
+    rawBits = bitsArray
+      .filter((b: { label?: string; startId?: string; endId?: string; startSegmentId?: string; endSegmentId?: string }) =>
+        b.label && (b.startId || b.startSegmentId) && (b.endId || b.endSegmentId)
+      )
+      .map((b: { label: string; summary?: string; startId?: string; endId?: string; startSegmentId?: string; endSegmentId?: string }) => {
+        // Map 8-char prefix back to full segment ID
+        const startPrefix = b.startId || b.startSegmentId || '';
+        const endPrefix = b.endId || b.endSegmentId || '';
+        return {
+          label: b.label,
+          summary: b.summary || '',
+          startSegmentId: idMap.get(startPrefix) || startPrefix,
+          endSegmentId: idMap.get(endPrefix) || endPrefix,
+        };
+      });
+  } catch (e) {
+    console.error(`${TAG} detectBitsOnly: Failed to parse response:`, responseText.substring(0, 300), e);
+  }
+
+  console.log(`${TAG} detectBitsOnly: ${rawBits.length} raw bits parsed`);
   await onProgress?.(`${rawBits.length} bits detectados (${(elapsed / 1000).toFixed(1)}s)`);
 
   const bits = resolveBits(rawBits, segments);

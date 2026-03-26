@@ -1,12 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getProject, updateProject } from '@/server/project-manager';
-import { detectBitsOnly } from '@/server/workers/reinterpret-worker';
+import { detectBitsOnly, detectProviders } from '@/server/workers/reinterpret-worker';
 import type { LLMProvider } from '@/server/workers/reinterpret-worker';
+
+/**
+ * GET /api/projects/[id]/bits
+ * Returns available LLM providers for bit detection.
+ */
+export async function GET() {
+  const providers = await detectProviders();
+  // Prefer providers with large context windows for bit detection
+  const preferred = ['openrouter', 'groq', 'anthropic', 'openai', 'ollama'];
+  const sorted = preferred
+    .map((id) => providers.find((p) => p.id === id))
+    .filter(Boolean);
+  return NextResponse.json({ providers: sorted });
+}
 
 /**
  * POST /api/projects/[id]/bits
  * Detect comedy bits from segments (no subtitle corrections).
- * Body: { segments, language, context?, provider, source: 'full' | 'compose' }
+ * Body: { language, context?, provider, source: 'full' | 'compose' }
  * Returns streaming ndjson with progress + final bits.
  */
 export async function POST(
