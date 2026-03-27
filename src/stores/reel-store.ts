@@ -803,6 +803,7 @@ export const useReelStore = create<ReelStore>((set, get) => ({
     const srcStart = reel.sourceStartMs ?? reel.startMs;
     const srcEnd = reel.sourceEndMs ?? reel.endMs;
     const reelDur = srcEnd - srcStart;
+    console.log(`[reel-store] enterTimelinePhase "${reel.name}": startMs=${reel.startMs}, sourceStartMs=${reel.sourceStartMs}, srcStart=${srcStart}, srcEnd=${srcEnd}, reelDur=${reelDur}`);
     const existingClips = reel.composition.clips;
 
     // Only recreate clips if none exist at all (first time entering timeline)

@@ -119,7 +119,7 @@ export async function POST(
         await updateProject(id, { bits: enrichedBits });
 
         controller.enqueue(
-          encoder.encode(JSON.stringify({ type: 'done', bits }) + '\n')
+          encoder.encode(JSON.stringify({ type: 'done', bits: enrichedBits }) + '\n')
         );
       } catch (err) {
         controller.enqueue(
