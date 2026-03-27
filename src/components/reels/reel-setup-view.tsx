@@ -20,8 +20,8 @@ export function ReelSetupView({ reelId, videoSrc, audioSrc }: ReelSetupViewProps
   if (!reel) return null;
 
   // Extract filenames from src URLs for clip creation
-  const videoFileName = videoSrc ? videoSrc.split('/').pop() : undefined;
-  const audioFileName = audioSrc ? audioSrc.split('/').pop() : undefined;
+  const videoFileName = videoSrc ? new URL(videoSrc, 'http://x').searchParams.get('name') || videoSrc.split('/').pop() : undefined;
+  const audioFileName = audioSrc ? new URL(audioSrc, 'http://x').searchParams.get('name') || audioSrc.split('/').pop() : undefined;
 
   return (
     <div className="space-y-4 p-4">
