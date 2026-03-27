@@ -314,7 +314,7 @@ export const useReelStore = create<ReelStore>((set, get) => ({
       subtitleSegments: segments,
       punchlineSegmentIds: [],
     };
-    set((s) => ({ reels: [...s.reels, reel], activeReelId: id, dirty: true }));
+    set((s) => ({ reels: [...s.reels, reel], activeReelId: id, dirty: true, phase: 'setup' as const, currentTimeMs: 0, isPlaying: false, selectedClipIds: [], selectedSubtitleIds: [] }));
     return id;
   },
 
