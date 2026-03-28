@@ -191,19 +191,15 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
   const updateCropRegion = useReelStore((s) => s.updateCropRegion);
   const phase = useReelStore((s) => s.phase);
 
-  // Use source times for video seeking (may differ from display times when compose-mapped)
+  // Source times for video seeking — these point into the muxed video file
+  // sourceStartMs/sourceEndMs are computed from compose clips at reel creation
   const srcStartMs = reel ? (reel.sourceStartMs ?? reel.startMs) : 0;
   const srcEndMs = reel ? (reel.sourceEndMs ?? reel.endMs) : 0;
   const startSec = srcStartMs / 1000;
   const endSec = srcEndMs / 1000;
-  const reelDurationMs = reel ? srcEndMs - srcStartMs : 0;
+  // Reel display duration uses compose times
+  const reelDurationMs = reel ? (reel.endMs - reel.startMs) : 0;
   const isTimelinePhase = phase === 'timeline';
-
-  // DEBUG: trace source time computation
-  useEffect(() => {
-    if (!reel) return;
-    console.log(`[reel-video-player] REEL "${reel.name}": startMs=${reel.startMs}, sourceStartMs=${reel.sourceStartMs}, computed srcStartMs=${srcStartMs}, startSec=${startSec}`);
-  }, [reel?.id, reel?.startMs, reel?.sourceStartMs, srcStartMs, startSec]);
 
   // Register video element for canvas capture by other components
   useEffect(() => {
@@ -360,7 +356,6 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
     }
 
     if (Math.abs(video.currentTime - targetSec) > 0.05) {
-      console.log(`[reel-video-player] EXT SEEK: currentTimeMs=${currentTimeMs}, targetSec=${targetSec.toFixed(2)}, video.currentTime was ${video.currentTime.toFixed(2)}, isTimeline=${isTimelinePhase}`);
       video.currentTime = targetSec;
       if (audioRef.current) audioRef.current.currentTime = targetSec;
     }
@@ -382,9 +377,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !reel) return;
-    console.log(`[reel-video-player] RANGE CHECK: video.currentTime=${video.currentTime.toFixed(2)}, startSec=${startSec.toFixed(2)}, endSec=${endSec.toFixed(2)}, isTimeline=${isTimelinePhase}`);
     if (!isTimelinePhase && (video.currentTime < startSec || video.currentTime > endSec)) {
-      console.log(`[reel-video-player] SEEKING video to startSec=${startSec.toFixed(2)} (source time)`);
       video.currentTime = startSec;
       if (audioRef.current) audioRef.current.currentTime = startSec;
       setCurrentTime(0);

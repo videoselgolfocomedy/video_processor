@@ -24,15 +24,27 @@ export default function ReelsPage() {
 
     const videoSource = currentProject.sources.find((s) => s.type === 'video');
     const sourceRes = videoSource?.resolution ?? null;
-    const durationMs = videoSource?.duration
+
+    // Transcription segments are already in compose timeline time
+    // (compose saves them back to transcription.segments when editing)
+    const baseSegs = currentProject.transcription.segments;
+
+    // Use compose duration if compose clips exist, otherwise source video duration
+    const composeClips = (currentProject.composition?.clips ?? [])
+      .filter((c: { trackId: string }) => c.trackId === 'v1');
+    const composeDurationMs = composeClips.length > 0
+      ? Math.max(...composeClips.map((c: { timelineEndMs: number }) => c.timelineEndMs))
+      : 0;
+    const sourceDurationMs = videoSource?.duration
       ? videoSource.duration * 1000
       : currentProject.audio.extractedTracks[0]?.duration
         ? currentProject.audio.extractedTracks[0].duration * 1000
         : 60000;
+    const durationMs = composeDurationMs > 0 ? composeDurationMs : sourceDurationMs;
 
     loadReels(
       currentProject.reels,
-      currentProject.transcription.segments,
+      baseSegs,
       durationMs,
       sourceRes
     );
