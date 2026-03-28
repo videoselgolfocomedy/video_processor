@@ -46,33 +46,13 @@ export async function POST(
     .filter((c: { trackId: string }) => c.trackId === 'v1')
     .sort((a: { timelineStartMs: number }, b: { timelineStartMs: number }) => a.timelineStartMs - b.timelineStartMs);
 
-  // Helper: map source time → compose timeline time
-  function sourceToCompose(sourceMs: number): number | null {
-    for (const clip of composeClips as Array<{ timelineStartMs: number; timelineEndMs: number; sourceInMs: number; sourceOutMs: number }>) {
-      if (sourceMs >= clip.sourceInMs && sourceMs <= clip.sourceOutMs) {
-        return clip.timelineStartMs + (sourceMs - clip.sourceInMs);
-      }
-    }
-    return null; // Not in compose timeline
-  }
-
-  // Get segments — optionally filter and remap by compose clips
+  // Get segments — transcription.segments are already in compose timeline time
+  // (compose saves them back in compose time domain after editing)
   let segments = project.transcription.segments;
   if (source === 'compose' && composeClips.length > 0) {
-    // Filter to segments that overlap with compose clips, then remap times to compose timeline
-    segments = segments
-      .filter((seg) =>
-        composeClips.some((clip: { sourceInMs: number; sourceOutMs: number }) =>
-          seg.endMs > clip.sourceInMs && seg.startMs < clip.sourceOutMs
-        )
-      )
-      .map((seg) => {
-        const newStart = sourceToCompose(seg.startMs);
-        const newEnd = sourceToCompose(seg.endMs);
-        if (newStart === null || newEnd === null) return null;
-        return { ...seg, startMs: newStart, endMs: newEnd };
-      })
-      .filter((s): s is NonNullable<typeof s> => s !== null);
+    // Segments are already in compose time — just filter out any that fall outside compose clips
+    const maxCompose = Math.max(...composeClips.map((c: { timelineEndMs: number }) => c.timelineEndMs));
+    segments = segments.filter((seg) => seg.endMs > 0 && seg.startMs < maxCompose);
   }
 
   if (segments.length === 0) {
