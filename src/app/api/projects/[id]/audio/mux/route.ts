@@ -161,17 +161,21 @@ export async function POST(
       outputPath,
     ];
   } else {
-    // Mix/aligned file: seek video to the overlap start point, then mux with audio
+    // Mix/aligned file: seek video to the overlap start point, then mux with audio.
+    // IMPORTANT: -ss goes AFTER -i (output seeking) to avoid keyframe-misalignment
+    // that occurs with input seeking + -c:v copy. Input seeking snaps to the nearest
+    // keyframe BEFORE the target, causing video to lead audio by up to 30+ seconds.
+    // Output seeking is slower (must read through video) but frame-accurate.
     args = [
-      // -ss before -i for fast seek (input seeking with keyframe accuracy)
-      ...(videoSeekSec > 0 ? ['-ss', String(videoSeekSec)] : []),
       '-i', videoPath,
       '-i', audioPath,
+      '-map', '0:v:0',
+      '-map', '1:a:0',
       '-c:v', 'copy',
       '-c:a', 'aac',
       '-b:a', '192k',
-      '-map', '0:v:0',
-      '-map', '1:a:0',
+      // Output seeking: precise cut, no keyframe drift
+      ...(videoSeekSec > 0 ? ['-ss', String(videoSeekSec)] : []),
       ...(audioDurationSec > 0 ? ['-t', String(audioDurationSec)] : ['-shortest']),
       '-y',
       '-progress', 'pipe:1',

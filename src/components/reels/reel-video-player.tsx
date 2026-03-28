@@ -199,6 +199,12 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
   const reelDurationMs = reel ? srcEndMs - srcStartMs : 0;
   const isTimelinePhase = phase === 'timeline';
 
+  // DEBUG: trace source time computation
+  useEffect(() => {
+    if (!reel) return;
+    console.log(`[reel-video-player] REEL "${reel.name}": startMs=${reel.startMs}, sourceStartMs=${reel.sourceStartMs}, computed srcStartMs=${srcStartMs}, startSec=${startSec}`);
+  }, [reel?.id, reel?.startMs, reel?.sourceStartMs, srcStartMs, startSec]);
+
   // Register video element for canvas capture by other components
   useEffect(() => {
     setReelVideoElement(videoRef.current);
@@ -254,7 +260,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
           const totalDur = getTimelineDuration(freshClips);
           if (timelineMs >= totalDur) {
             // Loop back to start
-            const firstSourceMs = timelineToSourceMs(0, freshClips, reel.startMs);
+            const firstSourceMs = timelineToSourceMs(0, freshClips, reel.sourceStartMs ?? reel.startMs);
             if (firstSourceMs !== null) {
               video.currentTime = firstSourceMs / 1000;
               if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000;
@@ -282,7 +288,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
             requestAnimationFrame(() => { suppressStoreSync.current = false; });
           } else {
             // No more clips — loop to start
-            const firstSourceMs = timelineToSourceMs(0, freshClips, reel.startMs);
+            const firstSourceMs = timelineToSourceMs(0, freshClips, reel.sourceStartMs ?? reel.startMs);
             if (firstSourceMs !== null) {
               video.currentTime = firstSourceMs / 1000;
               if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000;
@@ -341,7 +347,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
     const currentClips = reel?.composition.clips ?? [];
     let targetSec: number;
     if (isTimelinePhase) {
-      const sourceMs = timelineToSourceMs(currentTimeMs, currentClips, reel?.startMs ?? 0);
+      const sourceMs = timelineToSourceMs(currentTimeMs, currentClips, reel?.sourceStartMs ?? reel?.startMs ?? 0);
       if (sourceMs === null) {
         // In a gap — find next clip and seek there
         const nextClip = findNextClipAfter(currentTimeMs, currentClips);
@@ -354,6 +360,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
     }
 
     if (Math.abs(video.currentTime - targetSec) > 0.05) {
+      console.log(`[reel-video-player] EXT SEEK: currentTimeMs=${currentTimeMs}, targetSec=${targetSec.toFixed(2)}, video.currentTime was ${video.currentTime.toFixed(2)}, isTimeline=${isTimelinePhase}`);
       video.currentTime = targetSec;
       if (audioRef.current) audioRef.current.currentTime = targetSec;
     }
@@ -375,7 +382,9 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !reel) return;
+    console.log(`[reel-video-player] RANGE CHECK: video.currentTime=${video.currentTime.toFixed(2)}, startSec=${startSec.toFixed(2)}, endSec=${endSec.toFixed(2)}, isTimeline=${isTimelinePhase}`);
     if (!isTimelinePhase && (video.currentTime < startSec || video.currentTime > endSec)) {
+      console.log(`[reel-video-player] SEEKING video to startSec=${startSec.toFixed(2)} (source time)`);
       video.currentTime = startSec;
       if (audioRef.current) audioRef.current.currentTime = startSec;
       setCurrentTime(0);
