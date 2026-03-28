@@ -153,6 +153,12 @@ export async function startRender(options: RenderOptions): Promise<void> {
     return;
   }
 
+  // For reel export: sourceInMs values reference the muxed video timeline,
+  // so use muxed video as the input (not raw camera)
+  const muxedVideoSrc = project.sync?.muxedVideoPath
+    ? (project.sync.muxedVideoPath.includes('/') ? project.sync.muxedVideoPath : path.join(getProjectDir(projectId, 'audio'), project.sync.muxedVideoPath))
+    : undefined;
+
   // Find audio
   const audioDir = getProjectDir(projectId, 'audio');
   const selectedAudio = project.sync.selectedAudioPath;
@@ -356,7 +362,7 @@ export async function startRender(options: RenderOptions): Promise<void> {
       jobManager.updateProgress(jobId, 2, 'Starting FFmpeg render...');
 
       const { promise: reelPromise, process: reelProc } = renderReelVideo({
-        videoInputPath: videoSrc,
+        videoInputPath: muxedVideoSrc ?? videoSrc,
         audioInputPath: audioSrc,
         clips: videoClips,
         audioClipRanges,
