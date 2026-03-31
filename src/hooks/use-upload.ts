@@ -45,7 +45,13 @@ export function useUpload(projectId: string) {
               if (xhr.status >= 200 && xhr.status < 300) {
                 resolve();
               } else {
-                reject(new Error(`Upload failed: ${xhr.statusText}`));
+                // Read the actual error message from the JSON response body
+                let msg = xhr.statusText;
+                try {
+                  const body = JSON.parse(xhr.responseText);
+                  if (body.error) msg = body.error;
+                } catch { /* use statusText fallback */ }
+                reject(new Error(`Upload failed: ${msg}`));
               }
             });
 

@@ -36,10 +36,22 @@ export function ReelTrimBar({ reelId, baseDurationMs }: ReelTrimBarProps) {
 
         if (handle === 'left') {
           const clamped = Math.max(0, Math.min(ms, reel.endMs - 1000));
-          updateReel(reelId, { startMs: clamped });
+          const delta = clamped - reel.startMs;
+          // Keep sourceStartMs in sync — within a compose clip the mapping is 1:1
+          const updates: Record<string, number> = { startMs: clamped };
+          if (reel.sourceStartMs != null) {
+            updates.sourceStartMs = reel.sourceStartMs + delta;
+          }
+          updateReel(reelId, updates);
         } else {
           const clamped = Math.max(reel.startMs + 1000, Math.min(ms, baseDurationMs));
-          updateReel(reelId, { endMs: clamped });
+          const delta = clamped - reel.endMs;
+          // Keep sourceEndMs in sync — within a compose clip the mapping is 1:1
+          const updates: Record<string, number> = { endMs: clamped };
+          if (reel.sourceEndMs != null) {
+            updates.sourceEndMs = reel.sourceEndMs + delta;
+          }
+          updateReel(reelId, updates);
         }
       };
 

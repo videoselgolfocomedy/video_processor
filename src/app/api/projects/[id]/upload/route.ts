@@ -7,7 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Busboy from 'busboy';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
 import { probeFile } from '@/server/ffmpeg-wrapper';
-import { SUPPORTED_VIDEO_EXTENSIONS } from '@/lib/constants';
+import { SUPPORTED_VIDEO_EXTENSIONS, MAX_UPLOAD_SIZE } from '@/lib/constants';
 import type { SourceFile } from '@/types/project';
 
 // Disable Next.js body parsing for this route - we handle it with busboy
@@ -31,12 +31,16 @@ function parseUpload(
     const contentType = request.headers.get('content-type') || '';
     const busboy = Busboy({
       headers: { 'content-type': contentType },
-      limits: { fileSize: 10 * 1024 * 1024 * 1024 }, // 10GB
+      limits: { fileSize: MAX_UPLOAD_SIZE },
     });
 
     let role = 'other';
-    let result: UploadResult | null = null;
     let fileProcessed = false;
+    let fileTruncated = false;
+    // Promise that resolves when the file write completes.
+    // Busboy's 'finish' event (= done parsing multipart) can fire BEFORE the
+    // writeStream finishes flushing to disk, so we must await this explicitly.
+    let fileWritePromise: Promise<UploadResult> | null = null;
 
     busboy.on('field', (name, value) => {
       if (name === 'role') role = value;
@@ -61,26 +65,49 @@ function parseUpload(
         size += chunk.length;
       });
 
-      stream.pipe(writeStream);
-
-      writeStream.on('finish', () => {
-        result = {
-          filePath,
-          storedName,
-          fileId,
-          originalName: info.filename,
-          size,
-          role,
-        };
+      // Detect when busboy truncates the file at the fileSize limit.
+      // Busboy does NOT emit an error — it silently stops the stream,
+      // which produces a corrupt file (e.g. MP4 missing its moov atom).
+      stream.on('limit', () => {
+        fileTruncated = true;
       });
 
-      writeStream.on('error', reject);
+      stream.pipe(writeStream);
+
+      fileWritePromise = new Promise<UploadResult>((res, rej) => {
+        writeStream.on('finish', async () => {
+          if (fileTruncated) {
+            // Clean up the truncated file
+            try { await fs.unlink(filePath); } catch { /* ignore */ }
+            const limitGB = Math.round(MAX_UPLOAD_SIZE / (1024 * 1024 * 1024));
+            rej(new Error(
+              `El archivo "${info.filename}" supera el límite de ${limitGB} GB y fue truncado. ` +
+              `Comprime el video antes de subirlo.`
+            ));
+            return;
+          }
+          res({
+            filePath,
+            storedName,
+            fileId,
+            originalName: info.filename,
+            size,
+            role,
+          });
+        });
+        writeStream.on('error', rej);
+      });
+
       stream.on('error', reject);
     });
 
-    busboy.on('finish', () => {
-      if (result) {
-        resolve(result);
+    busboy.on('finish', async () => {
+      if (fileWritePromise) {
+        try {
+          resolve(await fileWritePromise);
+        } catch (err) {
+          reject(err);
+        }
       } else {
         reject(new Error('No file received'));
       }

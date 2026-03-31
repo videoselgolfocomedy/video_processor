@@ -95,6 +95,7 @@ export function extractAudio(options: ExtractAudioOptions): {
 
   const promise = new Promise<void>((resolve, reject) => {
     let duration = 0;
+    const stderrLines: string[] = [];
 
     // Parse progress from stdout
     proc.stdout?.on('data', (data: Buffer) => {
@@ -111,15 +112,26 @@ export function extractAudio(options: ExtractAudioOptions): {
     });
 
     proc.stderr?.on('data', (data: Buffer) => {
-      const match = data.toString().match(/Duration:\s*(\d+):(\d+):(\d+)/);
+      const text = data.toString();
+      stderrLines.push(text);
+      // Keep only last 20 chunks to avoid unbounded memory
+      if (stderrLines.length > 20) stderrLines.shift();
+      const match = text.match(/Duration:\s*(\d+):(\d+):(\d+)/);
       if (match) {
         duration = parseInt(match[1]) * 3600 + parseInt(match[2]) * 60 + parseInt(match[3]);
       }
     });
 
     proc.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`FFmpeg exited with code ${code}`));
+      if (code === 0) {
+        resolve();
+      } else {
+        // Extract the last meaningful error line from stderr
+        const allStderr = stderrLines.join('');
+        const errorLines = allStderr.split('\n').filter(l => l.trim()).slice(-5);
+        const detail = errorLines.join(' | ').substring(0, 300);
+        reject(new Error(`FFmpeg exited with code ${code}: ${detail}`));
+      }
     });
 
     proc.on('error', reject);

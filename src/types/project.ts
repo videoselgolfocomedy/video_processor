@@ -144,6 +144,7 @@ export interface AudioState {
 
 export interface VoiceSubtractionConfig {
   method: 'spectral' | 'nlms';
+  alignOnly?: boolean;   // true = only align, skip voice subtraction
   alpha: number;         // over-subtraction factor (spectral, default 2.0)
   floor: number;         // spectral floor (spectral, default 0.01)
   filterLength: number;  // NLMS filter length (default 2048)

@@ -158,7 +158,10 @@ function findNextClipAfter(
     .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
 
   for (const clip of videoClips) {
-    if (clip.timelineStartMs > timelineMs) {
+    // Use >= to avoid cascading skips: when we just seeked to a clip boundary
+    // and the video hasn't finished seeking yet, the gap handler fires again.
+    // With strict >, it would skip the clip we just seeked to.
+    if (clip.timelineStartMs >= timelineMs) {
       return clip;
     }
   }
@@ -178,7 +181,13 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
   const audioRef = useRef<HTMLAudioElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const animFrameRef = useRef<number>(0);
-  const suppressStoreSync = useRef(false);
+  // Track the last time value set by the animation tick, so the seek effect
+  // can distinguish tick-driven store updates from user-initiated seeks.
+  const lastTickSetMsRef = useRef<number>(-Infinity);
+  // When we seek the video to a new clip, track the target source position.
+  // Until the video reaches near this position, skip gap-handling to prevent
+  // cascading seeks (the video element takes time to complete a seek).
+  const pendingSeekSourceMs = useRef<number | null>(null);
   const dragStart = useRef({ x: 0, y: 0, cx: 0, cy: 0, scale: 0 });
   const [, setDragMode] = useState<DragMode>(null);
 
@@ -249,6 +258,21 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
         // Timeline phase: map source time back to timeline time using clips
         const freshReel = useReelStore.getState().reels.find((r) => r.id === reelId);
         const freshClips = freshReel?.composition.clips ?? [];
+
+        // If we're waiting for a seek to complete, check if the video has
+        // reached the target. Until then, skip processing to prevent cascading
+        // seeks (the gap handler would fire again before the seek finishes).
+        if (pendingSeekSourceMs.current !== null) {
+          if (Math.abs(currentSourceMs - pendingSeekSourceMs.current) < 500) {
+            // Seek completed (or close enough) — resume normal processing
+            pendingSeekSourceMs.current = null;
+          } else {
+            // Still seeking — skip this frame
+            animFrameRef.current = requestAnimationFrame(tick);
+            return;
+          }
+        }
+
         const timelineMs = sourceToTimelineMs(currentSourceMs, freshClips);
 
         if (timelineMs !== null) {
@@ -260,14 +284,14 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
             if (firstSourceMs !== null) {
               video.currentTime = firstSourceMs / 1000;
               if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000;
+              pendingSeekSourceMs.current = firstSourceMs;
             }
-            suppressStoreSync.current = true;
+            lastTickSetMsRef.current = 0;
             setCurrentTime(0);
-            requestAnimationFrame(() => { suppressStoreSync.current = false; });
           } else {
-            suppressStoreSync.current = true;
-            setCurrentTime(Math.max(0, timelineMs));
-            requestAnimationFrame(() => { suppressStoreSync.current = false; });
+            const newMs = Math.max(0, timelineMs);
+            lastTickSetMsRef.current = newMs;
+            setCurrentTime(newMs);
           }
         } else {
           // Source position is in a gap or past all clips
@@ -279,19 +303,19 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
             // Jump to next clip
             video.currentTime = nextClip.sourceInMs / 1000;
             if (audioRef.current) audioRef.current.currentTime = nextClip.sourceInMs / 1000;
-            suppressStoreSync.current = true;
+            pendingSeekSourceMs.current = nextClip.sourceInMs;
+            lastTickSetMsRef.current = nextClip.timelineStartMs;
             setCurrentTime(nextClip.timelineStartMs);
-            requestAnimationFrame(() => { suppressStoreSync.current = false; });
           } else {
             // No more clips — loop to start
             const firstSourceMs = timelineToSourceMs(0, freshClips, reel.sourceStartMs ?? reel.startMs);
             if (firstSourceMs !== null) {
               video.currentTime = firstSourceMs / 1000;
               if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000;
+              pendingSeekSourceMs.current = firstSourceMs;
             }
-            suppressStoreSync.current = true;
+            lastTickSetMsRef.current = 0;
             setCurrentTime(0);
-            requestAnimationFrame(() => { suppressStoreSync.current = false; });
           }
         }
       } else {
@@ -299,14 +323,12 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
         if (currentSec >= endSec) {
           video.currentTime = startSec;
           if (audioRef.current) audioRef.current.currentTime = startSec;
-          suppressStoreSync.current = true;
+          lastTickSetMsRef.current = 0;
           setCurrentTime(0);
-          requestAnimationFrame(() => { suppressStoreSync.current = false; });
         } else {
-          const relMs = (currentSec - startSec) * 1000;
-          suppressStoreSync.current = true;
-          setCurrentTime(Math.max(0, relMs));
-          requestAnimationFrame(() => { suppressStoreSync.current = false; });
+          const relMs = Math.max(0, (currentSec - startSec) * 1000);
+          lastTickSetMsRef.current = relMs;
+          setCurrentTime(relMs);
         }
       }
 
@@ -334,11 +356,17 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
     return () => cancelAnimationFrame(animFrameRef.current);
   }, [isPlaying, reel, reelId, startSec, endSec, setCurrentTime, syncAudio, isTimelinePhase]);
 
-  // Seek when store currentTimeMs changes externally
+  // Seek when store currentTimeMs changes externally (user scrub, button, etc.)
+  // During playback, skip if the change came from the animation tick to prevent
+  // a feedback loop: tick → setCurrentTime → seek effect → video.currentTime → tick
   useEffect(() => {
-    if (suppressStoreSync.current) return;
     const video = videoRef.current;
     if (!video) return;
+
+    // If playing, only respond to user-initiated seeks (not tick updates).
+    // Tick always sets lastTickSetMsRef to the exact value it passes to setCurrentTime,
+    // so matching values reliably identify tick-driven updates.
+    if (isPlaying && Math.abs(currentTimeMs - lastTickSetMsRef.current) < 1) return;
 
     const currentClips = reel?.composition.clips ?? [];
     let targetSec: number;
@@ -371,7 +399,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
       audioRef.current.volume = inAudioClip ? 1 : 0;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTimeMs, startSec, isTimelinePhase, reel?.startMs, reel?.composition.clips]);
+  }, [currentTimeMs, startSec, isTimelinePhase, reel?.startMs, reel?.composition.clips, isPlaying]);
 
   // When reel range changes, ensure video is within range
   useEffect(() => {

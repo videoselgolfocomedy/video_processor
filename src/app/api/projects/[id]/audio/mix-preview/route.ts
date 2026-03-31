@@ -31,6 +31,7 @@ export async function POST(
   const ambientVolume = Number(body.ambientVolume ?? 0.5);
   const manualAdjustMs = Number(body.manualAdjustMs ?? 0);
   const useAmplified = Boolean(body.useAmplified);
+  const ambientSource: 'raw' | 'subtracted' | 'cleaned' = body.ambientSource ?? 'subtracted';
 
   // Find board audio path — use amplified version if requested and available
   const boardSource = project.sources.find((s) => s.role === 'board');
@@ -56,28 +57,61 @@ export async function POST(
     return NextResponse.json({ error: 'Audio de mesa no disponible' }, { status: 400 });
   }
 
-  // Find ambient path
-  const ambientPath = project.audio.ambientPath;
-  if (!ambientPath) {
-    return NextResponse.json(
-      { error: 'No hay audio ambiente. Ejecuta la sustracción primero.' },
-      { status: 400 }
-    );
+  // Resolve ambient audio path based on selected source
+  let ambientPath: string | null = null;
+  switch (ambientSource) {
+    case 'raw': {
+      // Use raw extracted camera audio (no subtraction applied)
+      const cameraSource = project.sources.find((s) => s.role === 'camera' && s.type === 'video');
+      if (cameraSource) {
+        const cameraTrack = project.audio.extractedTracks.find(
+          (t) => t.sourceFileId === cameraSource.id
+        );
+        ambientPath = cameraTrack?.path ?? null;
+      }
+      if (!ambientPath) {
+        return NextResponse.json(
+          { error: 'No hay audio de cámara extraído.' },
+          { status: 400 }
+        );
+      }
+      break;
+    }
+    case 'cleaned':
+      ambientPath = project.audio.cameraAmbientPath ?? null;
+      if (!ambientPath) {
+        return NextResponse.json(
+          { error: 'No hay audio de ambiente limpio. Ejecuta la limpieza primero.' },
+          { status: 400 }
+        );
+      }
+      break;
+    case 'subtracted':
+    default:
+      ambientPath = project.audio.ambientPath ?? null;
+      if (!ambientPath) {
+        return NextResponse.json(
+          { error: 'No hay audio ambiente. Ejecuta la sustracción primero.' },
+          { status: 400 }
+        );
+      }
+      break;
   }
 
   // Total offset = auto alignment + manual fine-tune
-  // Positive offset = board starts before camera by this many ms
-  // The ambient covers the camera's timeline, so we trim board from offset
-  const autoOffsetMs = project.audio.alignmentOffsetMs ?? 0;
+  // When using raw camera audio (no subtraction), skip auto alignment offset
+  // since it's only computed during the subtraction process
+  const autoOffsetMs = ambientSource === 'raw' ? 0 : (project.audio.alignmentOffsetMs ?? 0);
   const totalOffsetMs = autoOffsetMs + manualAdjustMs;
   const offsetSec = Math.max(0, totalOffsetMs / 1000);
 
   const audioDir = getProjectDir(id, 'audio');
-  const ambientName = path.basename(ambientPath, '.wav');
+  const ambientName = path.basename(ambientPath, path.extname(ambientPath));
   const adjustStr = manualAdjustMs !== 0 ? `_adj${manualAdjustMs}` : '';
+  const srcTag = ambientSource !== 'subtracted' ? `_${ambientSource}` : '';
   const outputPath = path.join(
     audioDir,
-    `mix_${ambientName}_bv${boardVolume}_av${ambientVolume}${adjustStr}.wav`
+    `mix_${ambientName}${srcTag}_bv${boardVolume}_av${ambientVolume}${adjustStr}.wav`
   );
 
   const job = jobManager.createJob(id, 'mix-preview');

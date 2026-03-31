@@ -47,12 +47,12 @@ function PreparationPipeline({
   laughterProgress: number;
   cleanupStatus: PipelineStepStatus;
 }) {
-  const steps: { label: string; status: PipelineStepStatus; progress: number }[] = [
+  const steps: { label: string; status: PipelineStepStatus; progress: number; optional?: boolean }[] = [
     { label: 'Extracción', status: extractStatus, progress: extractProgress },
-    { label: 'Sustracción', status: subtractStatus, progress: subtractProgress },
-    { label: 'Amplificar', status: amplifyStatus, progress: amplifyStatus === 'done' ? 100 : 0 },
+    { label: 'Sustracción', status: subtractStatus, progress: subtractProgress, optional: true },
+    { label: 'Amplificar', status: amplifyStatus, progress: amplifyStatus === 'done' ? 100 : 0, optional: true },
     { label: 'Risas', status: laughterStatus, progress: laughterProgress },
-    { label: 'Limpieza', status: cleanupStatus, progress: cleanupStatus === 'done' ? 100 : 0 },
+    { label: 'Limpieza', status: cleanupStatus, progress: cleanupStatus === 'done' ? 100 : 0, optional: true },
   ];
 
   return (
@@ -79,6 +79,9 @@ function PreparationPipeline({
                         : 'text-muted-foreground/60'
                   }`}>
                     {step.label}
+                    {step.optional && step.status === 'pending' && (
+                      <span className="text-[9px] text-muted-foreground/40 ml-0.5">(opc.)</span>
+                    )}
                   </span>
                 </div>
                 <Progress
@@ -175,6 +178,8 @@ export default function AudioPrepPage() {
   const hasRequiredAudio = hasExtractedAudio && !!boardSource;
   const ambientReady = !!currentProject.audio.ambientPath ||
     (currentProject.audio.subtractionStatus ?? 'idle') === 'done';
+  // Mix is available as soon as we have camera audio + board audio (subtraction optional)
+  const mixReady = hasCameraExtracted && !!boardSource;
 
   // Pipeline status helpers
   const extractStatus: PipelineStepStatus = hasExtractedAudio
@@ -348,11 +353,14 @@ export default function AudioPrepPage() {
             />
           )}
 
-          {/* Mix preview: board + ambient — can use amplified board if available */}
-          {ambientReady && (
+          {/* Mix preview: board + ambient — available as soon as camera+board exist */}
+          {mixReady && (
             <MixPreviewPanel
               projectId={projectId}
               hasAmbient={ambientReady}
+              hasRawCameraAudio={hasCameraExtracted}
+              hasCleanedAmbient={!!currentProject.audio.cameraAmbientPath}
+              ambientIsAlignOnly={currentProject.audio.subtractionConfig?.alignOnly ?? false}
               alignmentOffsetMs={currentProject.audio.alignmentOffsetMs}
               amplifiedBoardPath={currentProject.audio.amplifiedBoardPath}
               amplifyApplied={currentProject.audio.amplifyApplied ?? false}

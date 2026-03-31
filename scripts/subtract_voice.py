@@ -412,6 +412,8 @@ def main():
                         help="Step size for NLMS method (default: 0.5)")
     parser.add_argument("--alignment-out", type=str, default=None,
                         help="Path to save alignment visualization data (JSON)")
+    parser.add_argument("--align-only", action="store_true",
+                        help="Only align signals, skip voice subtraction. Output is aligned camera audio.")
     args = parser.parse_args()
 
     log_progress(0, "Cargando archivos de audio...")
@@ -439,6 +441,32 @@ def main():
         with open(args.alignment_out, 'w') as f:
             json.dump(alignment_data, f)
         log_progress(16, f"Datos de alineación guardados en {args.alignment_out}")
+
+    if args.align_only:
+        # Align-only mode: write aligned camera audio directly (no voice subtraction)
+        log_progress(90, "Modo solo-alineación: escribiendo audio de cámara alineado...")
+        ambient = camera  # already aligned by align_signals()
+
+        # Normalize
+        peak = np.max(np.abs(ambient))
+        if peak > 0:
+            ambient = ambient / peak * 0.95
+
+        log_progress(95, "Escribiendo archivo de salida...")
+        write_wav(args.output, ambient, mic_sr)
+        log_progress(100, "Alineación completada")
+
+        result = {
+            "output": args.output,
+            "method": "align-only",
+            "sample_rate": mic_sr,
+            "offset_ms": offset_ms,
+            "offset_seconds": round(offset_ms / 1000, 1),
+            "duration_samples": len(ambient),
+            "duration_seconds": round(len(ambient) / mic_sr, 2),
+        }
+        print(json.dumps(result))
+        return
 
     # Step 2: Level matching (only for NLMS — spectral uses transfer function)
     if args.method == "nlms":

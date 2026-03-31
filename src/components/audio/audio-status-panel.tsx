@@ -66,14 +66,16 @@ export function AudioStatusPanel({ project }: AudioStatusPanelProps) {
         : 'Extrae el audio del video de cámara',
     },
     {
-      label: 'Sustracción Guiada',
+      label: 'Alineación / Sustracción',
       status: project.audio.subtractionStatus ?? 'idle',
       detail:
         subtractionDone
-          ? `Ambiente extraído (${project.audio.subtractionConfig?.method || 'spectral'})`
+          ? project.audio.subtractionConfig?.alignOnly
+            ? 'Cámara alineada (sin sustracción)'
+            : `Ambiente extraído (${project.audio.subtractionConfig?.method || 'spectral'})`
           : (project.audio.subtractionStatus ?? 'idle') === 'running'
-            ? 'Sustrayendo voz...'
-            : 'Usa micro de mesa como referencia',
+            ? 'Procesando...'
+            : 'Opcional: alinear y/o sustraer voz',
     },
     {
       label: 'Detección de Risas',
@@ -84,6 +86,13 @@ export function AudioStatusPanel({ project }: AudioStatusPanelProps) {
           : (project.audio.laughterStatus ?? 'idle') === 'running'
             ? 'Analizando...'
             : 'Detecta risas y aplausos en ambiente',
+    },
+    {
+      label: 'Amplificación Mesa',
+      status: project.audio.amplifyApplied ? 'done' : 'pending',
+      detail: project.audio.amplifyApplied
+        ? `Mesa amplificada (${project.audio.amplifySettings?.mode || 'loudnorm'})`
+        : 'Opcional: normaliza y amplifica mesa',
     },
     {
       label: 'Limpieza de Ambiente',

@@ -17,9 +17,14 @@ function formatTime(ms: number): string {
   return `${min}:${sec.padStart(5, '0')}`;
 }
 
+type AmbientSource = 'raw' | 'subtracted' | 'cleaned';
+
 interface MixPreviewPanelProps {
   projectId: string;
   hasAmbient: boolean;
+  hasRawCameraAudio: boolean;
+  hasCleanedAmbient: boolean;
+  ambientIsAlignOnly?: boolean;
   alignmentOffsetMs?: number;
   amplifiedBoardPath?: string;
   amplifyApplied?: boolean;
@@ -28,6 +33,9 @@ interface MixPreviewPanelProps {
 export function MixPreviewPanel({
   projectId,
   hasAmbient,
+  hasRawCameraAudio,
+  hasCleanedAmbient,
+  ambientIsAlignOnly,
   alignmentOffsetMs,
   amplifiedBoardPath,
   amplifyApplied,
@@ -36,6 +44,9 @@ export function MixPreviewPanel({
   const [ambientVolume, setAmbientVolume] = useState(0.5);
   const [manualAdjustMs, setManualAdjustMs] = useState(0);
   const [useAmplified, setUseAmplified] = useState(!!amplifyApplied);
+  const [ambientSource, setAmbientSource] = useState<AmbientSource>(
+    hasAmbient ? 'subtracted' : 'raw'
+  );
   const [jobId, setJobId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -66,7 +77,7 @@ export function MixPreviewPanel({
       const res = await fetch(`/api/projects/${projectId}/audio/mix-preview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ boardVolume, ambientVolume, manualAdjustMs, useAmplified }),
+        body: JSON.stringify({ boardVolume, ambientVolume, manualAdjustMs, useAmplified, ambientSource }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -83,16 +94,25 @@ export function MixPreviewPanel({
         variant: 'destructive',
       });
     }
-  }, [projectId, boardVolume, ambientVolume, manualAdjustMs, useAmplified, toast]);
+  }, [projectId, boardVolume, ambientVolume, manualAdjustMs, useAmplified, ambientSource, toast]);
 
   const mixUrl = outputName
     ? `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(outputName)}&t=${cacheBust}`
     : null;
 
-  if (!hasAmbient) return null;
+  // Show panel if any ambient source is available
+  if (!hasRawCameraAudio && !hasAmbient) return null;
 
-  const baseOffsetMs = alignmentOffsetMs ?? 0;
+  const baseOffsetMs = ambientSource === 'raw' ? 0 : (alignmentOffsetMs ?? 0);
   const totalOffsetMs = baseOffsetMs + manualAdjustMs;
+
+  // Build list of available ambient sources
+  const ambientOptions: { key: AmbientSource; label: string; available: boolean; color: string }[] = [
+    { key: 'raw', label: 'Cámara (crudo)', available: hasRawCameraAudio, color: 'text-orange-400 border-orange-500 bg-orange-500/20' },
+    { key: 'subtracted', label: ambientIsAlignOnly ? 'Alineado' : 'Sustracción', available: hasAmbient, color: 'text-blue-400 border-blue-500 bg-blue-500/20' },
+    { key: 'cleaned', label: 'Limpieza', available: hasCleanedAmbient, color: 'text-purple-400 border-purple-500 bg-purple-500/20' },
+  ];
+  const availableAmbientOptions = ambientOptions.filter((o) => o.available);
 
   return (
     <Card>
@@ -106,19 +126,48 @@ export function MixPreviewPanel({
             <div className="text-xs text-muted-foreground space-y-1">
               <p>
                 Mezcla el audio de <strong className="text-green-400">mesa</strong> (voz) con el{' '}
-                <strong className="text-blue-400">ambiente</strong> extraído, sincronizados por
-                alineación de dos fases (envolvente + muestra a muestra).
+                <strong className="text-blue-400">ambiente</strong>{ambientSource === 'raw' ? ' crudo de cámara' : ' extraído'}, sincronizados
+                {ambientSource === 'raw' ? ' manualmente' : ' por alineación automática'}.
               </p>
-              <p>
-                Offset auto: <strong className="text-foreground">{formatTime(baseOffsetMs)}</strong>
-                {manualAdjustMs !== 0 && (
-                  <> {manualAdjustMs > 0 ? '+' : ''}{manualAdjustMs}ms = <strong className="text-foreground">{formatTime(totalOffsetMs)}</strong></>
-                )}
-                {' '}(mesa se recorta desde este punto)
-              </p>
+              {ambientSource !== 'raw' && (
+                <p>
+                  Offset auto: <strong className="text-foreground">{formatTime(baseOffsetMs)}</strong>
+                  {manualAdjustMs !== 0 && (
+                    <> {manualAdjustMs > 0 ? '+' : ''}{manualAdjustMs}ms = <strong className="text-foreground">{formatTime(totalOffsetMs)}</strong></>
+                  )}
+                  {' '}(mesa se recorta desde este punto)
+                </p>
+              )}
+              {ambientSource === 'raw' && manualAdjustMs !== 0 && (
+                <p>
+                  Ajuste manual: <strong className="text-foreground">{manualAdjustMs > 0 ? '+' : ''}{manualAdjustMs}ms</strong>
+                </p>
+              )}
             </div>
           </div>
         </div>
+
+        {/* Ambient source selector */}
+        {availableAmbientOptions.length > 1 && (
+          <div className="rounded-md border border-border p-3 space-y-1.5">
+            <Label className="text-xs">Fuente de ambiente</Label>
+            <div className="flex gap-1">
+              {availableAmbientOptions.map((opt) => (
+                <button
+                  key={opt.key}
+                  className={`flex-1 px-2 py-1.5 text-xs rounded-md border transition-colors ${
+                    ambientSource === opt.key
+                      ? opt.color
+                      : 'border-border text-muted-foreground hover:text-foreground'
+                  }`}
+                  onClick={() => setAmbientSource(opt.key)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Board source selector */}
         {amplifyApplied && amplifiedBoardPath && (

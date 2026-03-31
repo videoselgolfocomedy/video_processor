@@ -67,9 +67,11 @@ export async function runSubtraction(options: SubtractOptions): Promise<ChildPro
   const audioDir = getProjectDir(projectId, 'audio');
 
   // Name output file based on method + parameters for easy comparison
-  const paramSuffix = config.method === 'spectral'
-    ? `spectral_a${config.alpha}_f${config.floor}`
-    : `nlms_l${config.filterLength}_m${config.mu}`;
+  const paramSuffix = config.alignOnly
+    ? 'aligned'
+    : config.method === 'spectral'
+      ? `spectral_a${config.alpha}_f${config.floor}`
+      : `nlms_l${config.filterLength}_m${config.mu}`;
   const outputPath = path.join(audioDir, `ambient_${paramSuffix}.wav`);
   const scriptPath = path.join(process.cwd(), 'scripts', 'subtract_voice.py');
 
@@ -108,7 +110,9 @@ export async function runSubtraction(options: SubtractOptions): Promise<ChildPro
     '--alignment-out', alignmentDataPath,
   ];
 
-  if (config.method === 'spectral') {
+  if (config.alignOnly) {
+    args.push('--align-only');
+  } else if (config.method === 'spectral') {
     args.push('--alpha', String(config.alpha));
     args.push('--floor', String(config.floor));
   } else {

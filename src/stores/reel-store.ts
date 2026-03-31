@@ -807,6 +807,52 @@ export const useReelStore = create<ReelStore>((set, get) => ({
     console.log(`[reel-store] enterTimelinePhase "${reel.name}": compose=${reel.startMs}-${reel.endMs} (dur=${reelDur}), source=${srcStart}-${srcEnd}`);
     const existingClips = reel.composition.clips;
 
+    // Repair existing clips: if any main clip (rv1/ra1) has timelineDur > sourceDur,
+    // it means the reel was extended in setup but sourceEndMs wasn't updated.
+    // A clip MUST have timelineDur == sourceDur for 1:1 playback. If not, the
+    // player falls outside the source range and loops back to start.
+    if (existingClips.length > 0) {
+      const mainTrackIds = ['rv1', 'ra1'];
+      const needsRepair = existingClips.some((c) => {
+        if (!mainTrackIds.includes(c.trackId)) return false;
+        const timelineDur = c.timelineEndMs - c.timelineStartMs;
+        const sourceDur = c.sourceOutMs - c.sourceInMs;
+        return timelineDur > sourceDur + 50; // source is shorter than timeline
+      });
+
+      if (needsRepair) {
+        console.log(`[reel-store] Repairing clips where timelineDur > sourceDur`);
+        set((s) => ({
+          reels: updateReelInList(s.reels, reelId, (r) => {
+            const fixedClips = r.composition.clips.map((c) => {
+              if (!mainTrackIds.includes(c.trackId)) return c;
+              const timelineDur = c.timelineEndMs - c.timelineStartMs;
+              const sourceDur = c.sourceOutMs - c.sourceInMs;
+              if (timelineDur > sourceDur + 50) {
+                // Extend source to match timeline (1:1 playback)
+                const fixed = { ...c, sourceOutMs: c.sourceInMs + timelineDur };
+                console.log(`  ${c.trackId}: sourceOut ${c.sourceOutMs} → ${fixed.sourceOutMs} (+${timelineDur - sourceDur}ms)`);
+                return fixed;
+              }
+              return c;
+            });
+            // Also fix the reel's sourceEndMs to match the corrected clips
+            const maxSourceOut = Math.max(
+              ...fixedClips
+                .filter((c) => mainTrackIds.includes(c.trackId))
+                .map((c) => c.sourceOutMs)
+            );
+            return {
+              ...r,
+              sourceEndMs: maxSourceOut > 0 ? maxSourceOut : r.sourceEndMs,
+              composition: { ...r.composition, clips: fixedClips },
+            };
+          }),
+          dirty: true,
+        }));
+      }
+    }
+
     // Only recreate clips if none exist at all (first time entering timeline)
     const needsRecreate = existingClips.length === 0;
 

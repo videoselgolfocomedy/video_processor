@@ -42,6 +42,7 @@ export function SubtractPanel({
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState('');
   const [running, setRunning] = useState(false);
+  const [alignOnly, setAlignOnly] = useState(false);
   const [method, setMethod] = useState<SubtractionMethod>('spectral');
   const [alpha, setAlpha] = useState(1.5);
   const [floor, setFloor] = useState(0.02);
@@ -64,7 +65,7 @@ export function SubtractPanel({
       setJobId(null);
       setCacheBust(Date.now());
       onComplete();
-      toast({ title: 'Sustracción de voz completada' });
+      toast({ title: alignOnly ? 'Alineación completada' : 'Sustracción de voz completada' });
     },
     onError: (err) => {
       setRunning(false);
@@ -76,12 +77,12 @@ export function SubtractPanel({
   const handleRun = useCallback(async () => {
     setRunning(true);
     setProgress(0);
-    setMessage('Iniciando sustracción...');
+    setMessage(alignOnly ? 'Iniciando alineación...' : 'Iniciando sustracción...');
     try {
       const res = await fetch(`/api/projects/${projectId}/audio/subtract`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ method, alpha, floor, filterLength, mu }),
+        body: JSON.stringify({ method, alpha, floor, filterLength, mu, alignOnly }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -97,7 +98,7 @@ export function SubtractPanel({
         variant: 'destructive',
       });
     }
-  }, [projectId, method, alpha, floor, filterLength, mu, toast]);
+  }, [projectId, method, alpha, floor, filterLength, mu, alignOnly, toast]);
 
   const handleCancel = useCallback(async () => {
     if (jobId) {
@@ -129,7 +130,8 @@ export function SubtractPanel({
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="text-sm font-medium">
-          Sustracción Guiada de Voz
+          Alineación y Sustracción de Voz
+          <span className="text-[10px] text-muted-foreground/60 font-normal ml-1.5">(opcional)</span>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -138,12 +140,20 @@ export function SubtractPanel({
           <div className="flex items-start gap-2">
             <Info className="h-4 w-4 text-primary mt-0.5 flex-none" />
             <div className="space-y-1.5 text-xs text-muted-foreground">
-              <p>
-                <strong className="text-foreground">Sustracción guiada</strong> usa el audio de mesa como referencia para eliminar la voz del audio de cámara, dejando solo el <strong className="text-green-400">ambiente</strong> (risas, aplausos, ruido de sala).
-              </p>
-              <p>
-                Alinea automáticamente las pistas por envolvente de energía (funciona aunque haya minutos de diferencia) y usa filtrado Wiener con función de transferencia acústica para evitar artefactos.
-              </p>
+              {alignOnly ? (
+                <p>
+                  <strong className="text-foreground">Solo alinear</strong>: sincroniza el audio de cámara con el de mesa por correlación cruzada y lo guarda sin modificar. Útil para mezclar con el audio crudo de cámara (con voz incluida).
+                </p>
+              ) : (
+                <>
+                  <p>
+                    <strong className="text-foreground">Sustracción guiada</strong> usa el audio de mesa como referencia para eliminar la voz del audio de cámara, dejando solo el <strong className="text-green-400">ambiente</strong> (risas, aplausos, ruido de sala).
+                  </p>
+                  <p>
+                    Alinea automáticamente las pistas por envolvente de energía y usa filtrado Wiener con función de transferencia acústica para evitar artefactos.
+                  </p>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -184,37 +194,56 @@ export function SubtractPanel({
           </div>
         </div>
 
-        {/* Method selector */}
+        {/* Mode selector: align-only vs subtraction methods */}
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <Label className="text-xs">Método</Label>
-            <div className="flex gap-2">
-              <Button
-                variant={method === 'spectral' ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setMethod('spectral')}
+            <Label className="text-xs">Modo</Label>
+            <div className="flex gap-1">
+              <button
+                className={`flex-1 px-2 py-1.5 text-xs rounded-md border transition-colors ${
+                  alignOnly
+                    ? 'bg-orange-500/20 border-orange-500 text-orange-400'
+                    : 'border-border text-muted-foreground hover:text-foreground'
+                }`}
+                onClick={() => setAlignOnly(true)}
+                disabled={running}
+              >
+                Solo alinear
+              </button>
+              <button
+                className={`flex-1 px-2 py-1.5 text-xs rounded-md border transition-colors ${
+                  !alignOnly && method === 'spectral'
+                    ? 'bg-blue-500/20 border-blue-500 text-blue-400'
+                    : 'border-border text-muted-foreground hover:text-foreground'
+                }`}
+                onClick={() => { setAlignOnly(false); setMethod('spectral'); }}
                 disabled={running}
               >
                 Wiener (STFT)
-              </Button>
-              <Button
-                variant={method === 'nlms' ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setMethod('nlms')}
+              </button>
+              <button
+                className={`flex-1 px-2 py-1.5 text-xs rounded-md border transition-colors ${
+                  !alignOnly && method === 'nlms'
+                    ? 'bg-blue-500/20 border-blue-500 text-blue-400'
+                    : 'border-border text-muted-foreground hover:text-foreground'
+                }`}
+                onClick={() => { setAlignOnly(false); setMethod('nlms'); }}
                 disabled={running}
               >
                 NLMS Adaptativo
-              </Button>
+              </button>
             </div>
             <p className="text-xs text-muted-foreground">
-              {method === 'spectral'
-                ? 'Máscara Wiener con función de transferencia acústica. Sin artefactos musicales.'
-                : 'Filtro adaptativo muestra a muestra. Más lento, puede funcionar mejor en algunos casos.'}
+              {alignOnly
+                ? 'Alinea las pistas sin tocar el audio. Ideal para mezclar con cámara en crudo.'
+                : method === 'spectral'
+                  ? 'Máscara Wiener con función de transferencia acústica. Sin artefactos musicales.'
+                  : 'Filtro adaptativo muestra a muestra. Más lento, puede funcionar mejor en algunos casos.'}
             </p>
           </div>
 
-          {/* Method-specific params */}
-          {method === 'spectral' ? (
+          {/* Method-specific params (hidden in align-only mode) */}
+          {!alignOnly && method === 'spectral' ? (
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
                 <div className="flex items-center justify-between">
@@ -249,7 +278,7 @@ export function SubtractPanel({
                 />
               </div>
             </div>
-          ) : (
+          ) : !alignOnly ? (
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
                 <div className="flex items-center justify-between">
@@ -284,7 +313,7 @@ export function SubtractPanel({
                 />
               </div>
             </div>
-          )}
+          ) : null}
         </div>
 
         {/* Status + results */}
@@ -292,7 +321,7 @@ export function SubtractPanel({
           <div className="space-y-4">
             <div className="flex items-center gap-2 text-sm text-green-500">
               <CheckCircle className="h-4 w-4" />
-              Ambiente extraído correctamente
+              {alignOnly ? 'Audio de cámara alineado' : 'Ambiente extraído correctamente'}
             </div>
 
             {/* Alignment visualization: before & after sync */}
@@ -338,17 +367,17 @@ export function SubtractPanel({
             {running ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Procesando... {Math.round(progress)}%
+                {alignOnly ? 'Alineando' : 'Procesando'}... {Math.round(progress)}%
               </>
             ) : subtractionStatus === 'done' ? (
               <>
                 <Waves className="mr-2 h-4 w-4" />
-                Re-ejecutar sustracción
+                {alignOnly ? 'Re-alinear' : 'Re-ejecutar sustracción'}
               </>
             ) : (
               <>
                 <Waves className="mr-2 h-4 w-4" />
-                Extraer ambiente
+                {alignOnly ? 'Alinear pistas' : 'Extraer ambiente'}
               </>
             )}
           </Button>
