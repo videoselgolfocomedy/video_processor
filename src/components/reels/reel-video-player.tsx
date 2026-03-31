@@ -184,6 +184,9 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
   // Track the last time value set by the animation tick, so the seek effect
   // can distinguish tick-driven store updates from user-initiated seeks.
   const lastTickSetMsRef = useRef<number>(-Infinity);
+  // Track the last gap-seek target to avoid re-issuing the same seek every frame
+  // while waiting for the video element to complete its seek operation.
+  const lastGapSeekSourceMsRef = useRef<number>(-Infinity);
   const dragStart = useRef({ x: 0, y: 0, cx: 0, cy: 0, scale: 0 });
   const [, setDragMode] = useState<DragMode>(null);
 
@@ -258,7 +261,9 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
         const timelineMs = sourceToTimelineMs(currentSourceMs, freshClips);
 
         if (timelineMs !== null) {
-          // We're inside a clip — update timeline position
+          // We're inside a clip — clear any pending gap seek target
+          lastGapSeekSourceMsRef.current = -Infinity;
+          // Update timeline position
           const totalDur = getTimelineDuration(freshClips);
           if (timelineMs >= totalDur) {
             // Loop back to start
@@ -266,7 +271,6 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
             if (firstSourceMs !== null) {
               video.currentTime = firstSourceMs / 1000;
               if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000;
-
             }
             lastTickSetMsRef.current = 0;
             setCurrentTime(0);
@@ -282,19 +286,24 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
           const nextClip = findNextClipAfter(storeTimeMs, freshClips);
 
           if (nextClip) {
-            // Jump to next clip
-            video.currentTime = nextClip.sourceInMs / 1000;
-            if (audioRef.current) audioRef.current.currentTime = nextClip.sourceInMs / 1000;
-
+            // Only issue the seek if we haven't already requested this exact position.
+            // Re-issuing video.currentTime every frame restarts the seek and prevents
+            // the browser from ever completing it → infinite loop.
+            const targetMs = nextClip.sourceInMs;
+            if (Math.abs(lastGapSeekSourceMsRef.current - targetMs) > 1) {
+              lastGapSeekSourceMsRef.current = targetMs;
+              video.currentTime = targetMs / 1000;
+              if (audioRef.current) audioRef.current.currentTime = targetMs / 1000;
+            }
             lastTickSetMsRef.current = nextClip.timelineStartMs;
             setCurrentTime(nextClip.timelineStartMs);
           } else {
             // No more clips — loop to start
             const firstSourceMs = timelineToSourceMs(0, freshClips, reel.sourceStartMs ?? reel.startMs);
             if (firstSourceMs !== null) {
+              lastGapSeekSourceMsRef.current = firstSourceMs;
               video.currentTime = firstSourceMs / 1000;
               if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000;
-
             }
             lastTickSetMsRef.current = 0;
             setCurrentTime(0);
@@ -368,6 +377,8 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
     if (Math.abs(video.currentTime - targetSec) > 0.05) {
       video.currentTime = targetSec;
       if (audioRef.current) audioRef.current.currentTime = targetSec;
+      // Clear gap seek tracker so the tick loop won't treat this as a duplicate
+      lastGapSeekSourceMsRef.current = -Infinity;
     }
 
     // Mute audio during gaps when seeking
