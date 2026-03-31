@@ -184,10 +184,6 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
   // Track the last time value set by the animation tick, so the seek effect
   // can distinguish tick-driven store updates from user-initiated seeks.
   const lastTickSetMsRef = useRef<number>(-Infinity);
-  // When we seek the video to a new clip, track the target source position.
-  // Until the video reaches near this position, skip gap-handling to prevent
-  // cascading seeks (the video element takes time to complete a seek).
-  const pendingSeekSourceMs = useRef<number | null>(null);
   const dragStart = useRef({ x: 0, y: 0, cx: 0, cy: 0, scale: 0 });
   const [, setDragMode] = useState<DragMode>(null);
 
@@ -259,20 +255,6 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
         const freshReel = useReelStore.getState().reels.find((r) => r.id === reelId);
         const freshClips = freshReel?.composition.clips ?? [];
 
-        // If we're waiting for a seek to complete, check if the video has
-        // reached the target. Until then, skip processing to prevent cascading
-        // seeks (the gap handler would fire again before the seek finishes).
-        if (pendingSeekSourceMs.current !== null) {
-          if (Math.abs(currentSourceMs - pendingSeekSourceMs.current) < 500) {
-            // Seek completed (or close enough) — resume normal processing
-            pendingSeekSourceMs.current = null;
-          } else {
-            // Still seeking — skip this frame
-            animFrameRef.current = requestAnimationFrame(tick);
-            return;
-          }
-        }
-
         const timelineMs = sourceToTimelineMs(currentSourceMs, freshClips);
 
         if (timelineMs !== null) {
@@ -284,7 +266,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
             if (firstSourceMs !== null) {
               video.currentTime = firstSourceMs / 1000;
               if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000;
-              pendingSeekSourceMs.current = firstSourceMs;
+
             }
             lastTickSetMsRef.current = 0;
             setCurrentTime(0);
@@ -303,7 +285,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
             // Jump to next clip
             video.currentTime = nextClip.sourceInMs / 1000;
             if (audioRef.current) audioRef.current.currentTime = nextClip.sourceInMs / 1000;
-            pendingSeekSourceMs.current = nextClip.sourceInMs;
+
             lastTickSetMsRef.current = nextClip.timelineStartMs;
             setCurrentTime(nextClip.timelineStartMs);
           } else {
@@ -312,7 +294,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
             if (firstSourceMs !== null) {
               video.currentTime = firstSourceMs / 1000;
               if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000;
-              pendingSeekSourceMs.current = firstSourceMs;
+
             }
             lastTickSetMsRef.current = 0;
             setCurrentTime(0);
