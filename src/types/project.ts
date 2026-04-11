@@ -24,6 +24,8 @@ export interface ProjectState {
   punchlineHints?: PunchlineHint[];
   // AI-identified comedy bits from reinterpretation
   bits?: BitDefinition[];
+  // Custom subtitle style presets (persisted per-project, not in localStorage)
+  customStylePresets?: CustomStylePreset[];
   // DEPRECATED: old single reel settings (kept for migration only)
   reelSettings?: ReelSettings;
 }
@@ -48,6 +50,14 @@ export interface YouTubeSubtitleConfig {
   style: SubtitleStyle;
   stylePreset: string;
   segments?: SubtitleSegment[];  // null/undefined = use transcription.segments
+}
+
+export interface CustomStylePreset {
+  id: string;
+  name: string;
+  description: string;
+  thumbnail: string;
+  style: SubtitleStyle;
 }
 
 export interface ReelVersion {

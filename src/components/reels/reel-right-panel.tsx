@@ -5,6 +5,7 @@ import { useReelStore } from '@/stores/reel-store';
 import { getReelVideoElement } from './reel-video-ref';
 import { ReelSubtitleBox } from './reel-subtitle-box';
 import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
+import { useCustomPresets } from '@/hooks/use-custom-presets';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { RefreshCw, Scissors } from 'lucide-react';
@@ -13,6 +14,7 @@ import type { SubtitleStyle } from '@/types/project';
 
 interface ReelRightPanelProps {
   reelId: string;
+  projectId: string;
 }
 
 // Canvas-based 9:16 preview — captures frames from the shared video element
@@ -117,10 +119,11 @@ function CropPreviewCanvas({ reelId }: { reelId: string }) {
   );
 }
 
-export function ReelRightPanel({ reelId }: ReelRightPanelProps) {
+export function ReelRightPanel({ reelId, projectId }: ReelRightPanelProps) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const setReelSubtitleStyle = useReelStore((s) => s.setReelSubtitleStyle);
   const setReelSubtitlePreset = useReelStore((s) => s.setReelSubtitlePreset);
+  const { customPresets, savePreset, deletePreset } = useCustomPresets(projectId);
   const setReelSubtitleConstraints = useReelStore((s) => s.setReelSubtitleConstraints);
   const regenerateReelSubtitles = useReelStore((s) => s.regenerateReelSubtitles);
   const updateReel = useReelStore((s) => s.updateReel);
@@ -196,6 +199,9 @@ export function ReelRightPanel({ reelId }: ReelRightPanelProps) {
           activePreset={reel.subtitleStylePreset}
           onChange={handleStyleChange}
           onPresetChange={handlePresetChange}
+          customPresets={customPresets}
+          onSaveCustomPreset={savePreset}
+          onDeleteCustomPreset={deletePreset}
         />
 
         {/* Constraints */}

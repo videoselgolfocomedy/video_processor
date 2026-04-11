@@ -7,6 +7,7 @@ import { ComposeSubtitleEditor } from './compose-subtitle-editor';
 import { ClipProperties } from './clip-properties';
 import { MultiTrackTimeline } from './multi-track-timeline';
 import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
+import { useCustomPresets } from '@/hooks/use-custom-presets';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { RefreshCw, Scissors } from 'lucide-react';
@@ -26,6 +27,7 @@ export function ComposeLayout({
   audioSrc,
 }: ComposeLayoutProps) {
   const [saving, setSaving] = useState(false);
+  const { customPresets, savePreset, deletePreset } = useCustomPresets(projectId);
 
   const getCompositionState = useComposeStore((s) => s.getCompositionState);
   const subtitleSegments = useComposeStore((s) => s.subtitleSegments);
@@ -285,6 +287,9 @@ export function ComposeLayout({
                   activePreset={subtitleStylePreset}
                   onChange={(style) => setSubtitleStyle(style)}
                   onPresetChange={(presetId, style) => setSubtitlePreset(presetId, style)}
+                  customPresets={customPresets}
+                  onSaveCustomPreset={savePreset}
+                  onDeleteCustomPreset={deletePreset}
                 />
               </div>
 

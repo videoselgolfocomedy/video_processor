@@ -13,6 +13,10 @@ interface SubtitleStyleEditorProps {
   activePreset: string;
   onChange: (style: SubtitleStyle) => void;
   onPresetChange: (presetId: string, style: SubtitleStyle) => void;
+  /** Custom presets stored in project (persistent). Falls back to localStorage if not provided. */
+  customPresets?: StylePreset[];
+  onSaveCustomPreset?: (name: string, style: SubtitleStyle) => void;
+  onDeleteCustomPreset?: (id: string) => void;
 }
 
 function SliderControl({
@@ -58,6 +62,9 @@ export function SubtitleStyleEditor({
   activePreset,
   onChange,
   onPresetChange,
+  customPresets: externalCustomPresets,
+  onSaveCustomPreset,
+  onDeleteCustomPreset,
 }: SubtitleStyleEditorProps) {
   const update = useCallback(
     (key: keyof SubtitleStyle, value: SubtitleStyle[keyof SubtitleStyle]) => {
@@ -66,7 +73,9 @@ export function SubtitleStyleEditor({
     [style, onChange]
   );
 
-  const [customPresets, setCustomPresets] = useState<StylePreset[]>(() => getCustomPresets());
+  // Use project-stored presets if provided, otherwise fall back to localStorage
+  const [localPresets, setLocalPresets] = useState<StylePreset[]>(() => getCustomPresets());
+  const customPresets = externalCustomPresets ?? localPresets;
   const [savingPreset, setSavingPreset] = useState(false);
   const [presetName, setPresetName] = useState('');
   const [activeTab, setActiveTab] = useState<'presets' | 'custom'>('presets');
@@ -80,17 +89,27 @@ export function SubtitleStyleEditor({
 
   const handleSavePreset = useCallback(() => {
     if (!presetName.trim()) return;
-    const preset = saveCustomPreset(presetName.trim(), style);
-    setCustomPresets(getCustomPresets());
-    onPresetChange(preset.id, preset.style);
+    if (onSaveCustomPreset) {
+      // Save to project (persistent)
+      onSaveCustomPreset(presetName.trim(), style);
+    } else {
+      // Fallback: save to localStorage
+      const preset = saveCustomPreset(presetName.trim(), style);
+      setLocalPresets(getCustomPresets());
+      onPresetChange(preset.id, preset.style);
+    }
     setPresetName('');
     setSavingPreset(false);
-  }, [presetName, style, onPresetChange]);
+  }, [presetName, style, onPresetChange, onSaveCustomPreset]);
 
   const handleDeletePreset = useCallback((id: string) => {
-    deleteCustomPreset(id);
-    setCustomPresets(getCustomPresets());
-  }, []);
+    if (onDeleteCustomPreset) {
+      onDeleteCustomPreset(id);
+    } else {
+      deleteCustomPreset(id);
+      setLocalPresets(getCustomPresets());
+    }
+  }, [onDeleteCustomPreset]);
 
   return (
     <div className="space-y-3">

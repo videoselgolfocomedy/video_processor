@@ -1,12 +1,17 @@
 'use client';
 
 import { useCallback } from 'react';
+import { useParams } from 'next/navigation';
 import { useProjectStore } from '@/stores/project-store';
 import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
+import { useCustomPresets } from '@/hooks/use-custom-presets';
 import type { SubtitleStyle } from '@/types/project';
 
 export function YouTubeSubtitlePanel() {
+  const params = useParams();
+  const projectId = params.id as string;
   const { currentProject, updateCurrentProject } = useProjectStore();
+  const { customPresets, savePreset, deletePreset } = useCustomPresets(projectId);
 
   const handleStyleChange = useCallback(
     (style: SubtitleStyle) => {
@@ -38,6 +43,9 @@ export function YouTubeSubtitlePanel() {
         activePreset={currentProject.youtubeSubtitles.stylePreset}
         onChange={handleStyleChange}
         onPresetChange={handlePresetChange}
+        customPresets={customPresets}
+        onSaveCustomPreset={savePreset}
+        onDeleteCustomPreset={deletePreset}
       />
     </div>
   );

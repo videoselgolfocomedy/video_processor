@@ -7,6 +7,7 @@ import { ReelVideoPlayer } from './reel-video-player';
 import { ReelSubtitleBox } from './reel-subtitle-box';
 import { ReelTimeline } from './reel-timeline';
 import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
+import { useCustomPresets } from '@/hooks/use-custom-presets';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { RefreshCw, Scissors, Trash2, Bold } from 'lucide-react';
@@ -606,6 +607,9 @@ function SubtitleConfigPanel({ reelId }: { reelId: string }) {
   const setReelSubtitleConstraints = useReelStore((s) => s.setReelSubtitleConstraints);
   const regenerateReelSubtitles = useReelStore((s) => s.regenerateReelSubtitles);
   const updateReel = useReelStore((s) => s.updateReel);
+  const params = useParams();
+  const projectId = params.id as string;
+  const { customPresets, savePreset, deletePreset } = useCustomPresets(projectId);
 
   const handleStyleChange = useCallback(
     (style: SubtitleStyle) => setReelSubtitleStyle(reelId, style),
@@ -667,6 +671,9 @@ function SubtitleConfigPanel({ reelId }: { reelId: string }) {
         activePreset={reel.subtitleStylePreset}
         onChange={handleStyleChange}
         onPresetChange={handlePresetChange}
+        customPresets={customPresets}
+        onSaveCustomPreset={savePreset}
+        onDeleteCustomPreset={deletePreset}
       />
 
       {/* Constraints */}

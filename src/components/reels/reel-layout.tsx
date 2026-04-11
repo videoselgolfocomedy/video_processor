@@ -465,7 +465,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
                 }}
               />
             ) : (
-              <ReelRightPanel reelId={activeReelId} />
+              <ReelRightPanel reelId={activeReelId} projectId={projectId} />
             )}
           </div>
         </div>
