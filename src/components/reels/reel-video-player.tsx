@@ -250,6 +250,11 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
     const tick = () => {
       const video = videoRef.current;
       if (!video) return;
+      // Skip tick if video is still seeking or has an error — prevents seek loops
+      if (video.seeking || video.error) {
+        animFrameRef.current = requestAnimationFrame(tick);
+        return;
+      }
       const currentSec = video.currentTime;
       const currentSourceMs = currentSec * 1000;
 
@@ -352,7 +357,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
   // a feedback loop: tick → setCurrentTime → seek effect → video.currentTime → tick
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video || video.seeking) return;
 
     // If playing, only respond to user-initiated seeks (not tick updates).
     // Tick always sets lastTickSetMsRef to the exact value it passes to setCurrentTime,

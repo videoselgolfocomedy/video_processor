@@ -492,8 +492,10 @@ export const useReelStore = create<ReelStore>((set, get) => ({
   trimClip: (reelId, clipId, edge, newMs) => {
     const state = get();
     const reel = state.reels.find((r) => r.id === reelId);
-    // Upper bound: the larger of baseDurationMs or reel.endMs (safety)
-    const maxSourceMs = Math.max(state.baseDurationMs, reel?.endMs ?? 0);
+    // Upper bound for source time: use the max sourceOut across all clips, or a large fallback
+    // baseDurationMs is in compose time which can be much smaller than source time
+    const existingMaxSource = reel ? Math.max(...reel.composition.clips.map(c => c.sourceOutMs || 0), 0) : 0;
+    const maxSourceMs = Math.max(existingMaxSource * 2, state.baseDurationMs * 2, reel?.endMs ?? 0);
     set((s) => ({
       reels: updateReelInList(s.reels, reelId, (r) => ({
         ...r,
