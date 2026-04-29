@@ -473,10 +473,16 @@ export interface ImageOverlayInput {
   opacity: number;   // 0-1
 }
 
+export interface ClipTransform {
+  scale: number;  // 1 = original; >1 zoom in; <1 zoom out
+  x: number;      // -1..1 fraction of output width (positive = shift right)
+  y: number;      // -1..1 fraction of output height (positive = shift down)
+}
+
 export interface RenderReelOptions {
   videoInputPath: string;
   audioInputPath?: string;
-  clips: { sourceInMs: number; sourceOutMs: number }[];
+  clips: { sourceInMs: number; sourceOutMs: number; transform?: ClipTransform }[];
   /** Audio clips mapped to the video concat timeline — specifies silent gaps */
   audioClipRanges?: { startMs: number; endMs: number }[];
   /** Image overlays to burn into the video */
@@ -565,14 +571,55 @@ export function renderReelVideo(options: RenderReelOptions): {
   // If no separate audio, inputs are [v0=0, v1=1, v2=2, ...]
   const inputsPerClip = hasAudio ? 2 : 1;
 
+  // Helper: detect non-identity transform
+  const isIdentityTransform = (t?: ClipTransform): boolean => {
+    if (!t) return true;
+    return Math.abs((t.scale ?? 1) - 1) < 0.001 && Math.abs(t.x ?? 0) < 0.001 && Math.abs(t.y ?? 0) < 0.001;
+  };
+
+  const Wout = options.width;
+  const Hout = options.height;
+
   for (let i = 0; i < clips.length; i++) {
+    const clip = clips[i];
     const vidIdx = i * inputsPerClip;
     const audIdx = hasAudio ? vidIdx + 1 : vidIdx;
 
-    // Process video: setpts + crop
+    // Pre-process video: setpts + global crop (reels) + scale to output size with letterbox/pillarbox.
+    // We pre-scale here (instead of after concat) so per-clip transforms can be applied
+    // independently against a known output canvas size. format=yuv420p normalizes the pixel
+    // format for the downstream concat (otherwise concat can fail when mixing with color sources).
     filterParts.push(
-      `[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter}[v${i}]`
+      `[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter},scale=${Wout}:${Hout}:force_original_aspect_ratio=decrease,pad=${Wout}:${Hout}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v${i}_pre]`
     );
+
+    if (isIdentityTransform(clip.transform)) {
+      // No transform — passthrough rename via setpts (cheap no-op that produces a labeled link)
+      filterParts.push(`[v${i}_pre]setpts=PTS[v${i}]`);
+    } else {
+      // Apply per-clip transform: scale around center, then translate.
+      // Equivalent CSS: translate(x*100%, y*100%) scale(s).
+      // Implementation: scale the pre-frame by s, overlay onto a black canvas at the correct offset.
+      const t = clip.transform!;
+      const s = t.scale ?? 1;
+      const x = t.x ?? 0;
+      const y = t.y ?? 0;
+      const durSec = ((clip.sourceOutMs - clip.sourceInMs) / 1000).toFixed(3);
+
+      // Scaled dimensions (must be even for libx264)
+      const scaledW = `trunc(iw*${s.toFixed(4)}/2)*2`;
+      const scaledH = `trunc(ih*${s.toFixed(4)}/2)*2`;
+
+      // Overlay top-left such that the scaled frame's center lands at (Wout/2 + x*Wout, Hout/2 + y*Hout)
+      // top-left = center - scaledSize/2 = Wout*(1-s)/2 + x*Wout
+      const offsetX = Math.round(Wout * (1 - s) / 2 + x * Wout);
+      const offsetY = Math.round(Hout * (1 - s) / 2 + y * Hout);
+
+      filterParts.push(`[v${i}_pre]scale=${scaledW}:${scaledH}[v${i}_zoom]`);
+      filterParts.push(`color=c=black:s=${Wout}x${Hout}:r=${options.fps}:d=${durSec}[v${i}_bg_raw]`);
+      filterParts.push(`[v${i}_bg_raw]format=yuv420p[v${i}_bg]`);
+      filterParts.push(`[v${i}_bg][v${i}_zoom]overlay=x=${offsetX}:y=${offsetY}:eof_action=endall,format=yuv420p,setsar=1[v${i}]`);
+    }
 
     // Process audio: reset pts
     filterParts.push(
@@ -586,10 +633,9 @@ export function renderReelVideo(options: RenderReelOptions): {
     `${concatInputs}concat=n=${clips.length}:v=1:a=1[outv][outa]`
   );
 
-  // Scale to output size
+  // Each clip is already at output size after pre-scaling, so no post-concat scale is needed.
+  // The remaining chain (image overlays + ASS subtitles) consumes the concat output directly.
   let videoLabel = 'outv';
-  filterParts.push(`[outv]scale=${options.width}:${options.height}[scaled]`);
-  videoLabel = 'scaled';
 
   // Apply image overlays (between scale and ASS subtitles)
   for (let imgIdx = 0; imgIdx < imageOverlays.length; imgIdx++) {

@@ -9,6 +9,16 @@ import type { SubtitleSegment, SubtitleStyle, CompositionClip } from '@/types/pr
 
 const FPS = 30;
 
+// Build a CSS transform string from a clip transform (matches compose-preview).
+function transformToCss(t?: { scale: number; x: number; y: number }): string | undefined {
+  if (!t) return undefined;
+  const scale = t.scale ?? 1;
+  const x = t.x ?? 0;
+  const y = t.y ?? 0;
+  if (Math.abs(scale - 1) < 0.001 && Math.abs(x) < 0.001 && Math.abs(y) < 0.001) return undefined;
+  return `translate(${x * 100}%, ${y * 100}%) scale(${scale})`;
+}
+
 interface SubtitlePreviewProps {
   segments: SubtitleSegment[];
   style: SubtitleStyle;
@@ -39,13 +49,22 @@ const PreviewComposition: React.FC<{
           const from = Math.round((clip.timelineStartMs / 1000) * fps);
           const dur = Math.max(1, Math.round(((clip.timelineEndMs - clip.timelineStartMs) / 1000) * fps));
           const startFrom = Math.round((clip.sourceInMs / 1000) * fps);
+          const transformCss = transformToCss(clip.transform);
           return (
             <Sequence key={clip.id} from={from} durationInFrames={dur}>
-              <Video
-                src={videoSrc}
-                startFrom={startFrom}
-                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-              />
+              <AbsoluteFill style={{ overflow: 'hidden' }}>
+                <Video
+                  src={videoSrc}
+                  startFrom={startFrom}
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'contain',
+                    transform: transformCss,
+                    transformOrigin: 'center center',
+                  }}
+                />
+              </AbsoluteFill>
             </Sequence>
           );
         })
