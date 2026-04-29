@@ -223,7 +223,7 @@ export function ComposeLayout({
   return (
     <div className="flex h-full flex-col">
       {/* Row 1: Full-width Preview (compact) */}
-      <div className="flex-shrink-0 flex-grow-0" style={{ height: '30%', minHeight: 160 }}>
+      <div className="flex-shrink-0 flex-grow-0 overflow-hidden" style={{ height: '30%', minHeight: 160 }}>
         <ComposePreview
           projectId={projectId}
           videoSrc={videoSrc}

@@ -18,11 +18,29 @@ interface MergedRange {
   timelineStartMs: number;
   timelineEndMs: number;
   sourceInMs: number;
+  transform?: { scale: number; x: number; y: number };
 }
 
-function mergeContiguousClips(
-  trackClips: { id: string; timelineStartMs: number; timelineEndMs: number; sourceInMs: number; sourceOutMs: number }[]
-): MergedRange[] {
+interface MergeableClip {
+  id: string;
+  timelineStartMs: number;
+  timelineEndMs: number;
+  sourceInMs: number;
+  sourceOutMs: number;
+  transform?: { scale: number; x: number; y: number };
+}
+
+function transformsEqual(
+  a?: { scale: number; x: number; y: number },
+  b?: { scale: number; x: number; y: number }
+): boolean {
+  const aScale = a?.scale ?? 1; const bScale = b?.scale ?? 1;
+  const aX = a?.x ?? 0; const bX = b?.x ?? 0;
+  const aY = a?.y ?? 0; const bY = b?.y ?? 0;
+  return Math.abs(aScale - bScale) < 0.001 && Math.abs(aX - bX) < 0.001 && Math.abs(aY - bY) < 0.001;
+}
+
+function mergeContiguousClips(trackClips: MergeableClip[]): MergedRange[] {
   if (trackClips.length === 0) return [];
   const sorted = [...trackClips].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
   const merged: MergedRange[] = [];
@@ -31,6 +49,7 @@ function mergeContiguousClips(
     timelineStartMs: sorted[0].timelineStartMs,
     timelineEndMs: sorted[0].timelineEndMs,
     sourceInMs: sorted[0].sourceInMs,
+    transform: sorted[0].transform,
   };
 
   for (let i = 1; i < sorted.length; i++) {
@@ -39,8 +58,12 @@ function mergeContiguousClips(
     const expectedSourceIn = current.sourceInMs + (current.timelineEndMs - current.timelineStartMs);
     const sourceGap = Math.abs(next.sourceInMs - expectedSourceIn);
 
-    // Contiguous: timeline gap < threshold AND source position is continuous
-    if (timeGap < CONTIGUOUS_THRESHOLD_MS && sourceGap < CONTIGUOUS_THRESHOLD_MS) {
+    // Contiguous: timeline gap < threshold AND source position is continuous AND transforms match
+    if (
+      timeGap < CONTIGUOUS_THRESHOLD_MS &&
+      sourceGap < CONTIGUOUS_THRESHOLD_MS &&
+      transformsEqual(current.transform, next.transform)
+    ) {
       current.timelineEndMs = next.timelineEndMs;
       // Keep current.sourceInMs — the Video plays continuously from the original startFrom
     } else {
@@ -50,11 +73,24 @@ function mergeContiguousClips(
         timelineStartMs: next.timelineStartMs,
         timelineEndMs: next.timelineEndMs,
         sourceInMs: next.sourceInMs,
+        transform: next.transform,
       };
     }
   }
   merged.push(current);
   return merged;
+}
+
+// Build a CSS transform string from a clip transform.
+// scale: 1=original, >1=zoom in. x/y: -1..1 fraction of composition size (positive = right/down).
+function transformToCss(t?: { scale: number; x: number; y: number }): string | undefined {
+  if (!t) return undefined;
+  const scale = t.scale ?? 1;
+  const x = t.x ?? 0;
+  const y = t.y ?? 0;
+  if (Math.abs(scale - 1) < 0.001 && Math.abs(x) < 0.001 && Math.abs(y) < 0.001) return undefined;
+  // translate as percentage of element (which fills 100% of composition), then scale around center
+  return `translate(${x * 100}%, ${y * 100}%) scale(${scale})`;
 }
 
 // --- Remotion Composition ---
@@ -115,14 +151,23 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
         const from = Math.round((range.timelineStartMs / 1000) * FPS);
         const dur = Math.max(1, Math.round(((range.timelineEndMs - range.timelineStartMs) / 1000) * FPS));
         const startFrom = Math.round((range.sourceInMs / 1000) * FPS);
+        const transformCss = transformToCss(range.transform);
         return (
           <Sequence key={range.id} from={from} durationInFrames={dur}>
-            <Video
-              src={videoSrc}
-              startFrom={startFrom}
-              volume={0}
-              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-            />
+            <AbsoluteFill style={{ overflow: 'hidden' }}>
+              <Video
+                src={videoSrc}
+                startFrom={startFrom}
+                volume={0}
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'contain',
+                  transform: transformCss,
+                  transformOrigin: 'center center',
+                }}
+              />
+            </AbsoluteFill>
           </Sequence>
         );
       })}
@@ -133,13 +178,32 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
         if (!src) return null;
         const from = Math.round((clip.timelineStartMs / 1000) * FPS);
         const dur = Math.max(1, Math.round(((clip.timelineEndMs - clip.timelineStartMs) / 1000) * FPS));
+        const transformCss = transformToCss(clip.transform);
         return (
           <Sequence key={clip.id} from={from} durationInFrames={dur}>
-            <AbsoluteFill style={{ opacity: clip.opacity ?? 1 }}>
+            <AbsoluteFill style={{ opacity: clip.opacity ?? 1, overflow: 'hidden' }}>
               {clip.type === 'image' ? (
-                <Img src={src} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                <Img
+                  src={src}
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'contain',
+                    transform: transformCss,
+                    transformOrigin: 'center center',
+                  }}
+                />
               ) : (
-                <Video src={src} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                <Video
+                  src={src}
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'contain',
+                    transform: transformCss,
+                    transformOrigin: 'center center',
+                  }}
+                />
               )}
             </AbsoluteFill>
           </Sequence>
@@ -288,6 +352,19 @@ export function ComposePreview({
   // store, so we only need durationMs and mediaBin here for the Player wrapper.
   const durationMs = useComposeStore((s) => s.durationMs);
   const mediaBin = useComposeStore((s) => s.mediaBin);
+  const compositionAspect = useComposeStore((s) => s.aspectRatio);
+  const setCompositionAspect = useComposeStore((s) => s.setAspectRatio);
+
+  // Composition canvas dimensions per aspect ratio (multiples of 2 required by H.264)
+  const { compositionWidth, compositionHeight } = useMemo(() => {
+    switch (compositionAspect) {
+      case '9:16': return { compositionWidth: 1080, compositionHeight: 1920 };
+      case '1:1':  return { compositionWidth: 1080, compositionHeight: 1080 };
+      case '4:5':  return { compositionWidth: 1080, compositionHeight: 1350 };
+      case '16:9':
+      default:     return { compositionWidth: 1920, compositionHeight: 1080 };
+    }
+  }, [compositionAspect]);
 
   // Refs to break the bidirectional sync loop
   const playerCausedUpdate = useRef(false);
@@ -404,26 +481,50 @@ export function ComposePreview({
     };
   }, []);
 
+  // Composition dimensions derived from aspect ratio
+  const aspectRatioCss = `${compositionWidth} / ${compositionHeight}`;
+
   return (
-    <div className="flex justify-center rounded-lg bg-black p-1">
-      <Player
-        ref={playerRef}
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        component={ComposeComposition as React.ComponentType<any>}
-        inputProps={inputProps}
-        durationInFrames={durationInFrames}
-        compositionWidth={1920}
-        compositionHeight={1080}
-        fps={FPS}
-        style={{
-          width: '100%',
-          maxHeight: 340,
-          aspectRatio: '16/9',
-        }}
-        controls={false}
-        loop={false}
-        autoPlay={false}
-      />
+    <div className="flex h-full flex-col bg-black">
+      {/* Aspect ratio selector */}
+      <div className="flex items-center justify-center gap-1 px-2 py-1 border-b border-border/50 bg-background/20 flex-shrink-0">
+        <span className="text-[10px] text-muted-foreground mr-1">Formato:</span>
+        {(['16:9', '9:16', '1:1', '4:5'] as const).map((ratio) => (
+          <button
+            key={ratio}
+            onClick={() => setCompositionAspect(ratio)}
+            className={`px-2 py-0.5 rounded text-[10px] border ${
+              compositionAspect === ratio
+                ? 'bg-primary/20 border-primary text-primary'
+                : 'border-border text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {ratio}
+          </button>
+        ))}
+      </div>
+
+      {/* Player — fits container by height */}
+      <div className="flex flex-1 min-h-0 items-center justify-center p-1">
+        <Player
+          ref={playerRef}
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          component={ComposeComposition as React.ComponentType<any>}
+          inputProps={inputProps}
+          durationInFrames={durationInFrames}
+          compositionWidth={compositionWidth}
+          compositionHeight={compositionHeight}
+          fps={FPS}
+          style={{
+            height: '100%',
+            maxWidth: '100%',
+            aspectRatio: aspectRatioCss,
+          }}
+          controls={false}
+          loop={false}
+          autoPlay={false}
+        />
+      </div>
     </div>
   );
 }

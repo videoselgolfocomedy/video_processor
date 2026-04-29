@@ -9,6 +9,7 @@ import type {
   CompositionTrack,
   MediaBinAsset,
   CompositionState,
+  CompositionAspect,
   SubtitleSegment,
   SubtitleStyle,
   SubtitleConstraints,
@@ -127,6 +128,9 @@ interface ComposeStore {
   clips: CompositionClip[];
   mediaBin: MediaBinAsset[];
 
+  // Composition format
+  aspectRatio: CompositionAspect;
+
   // Subtitles
   subtitleSegments: SubtitleSegment[];
   subtitleStyle: SubtitleStyle;
@@ -199,6 +203,9 @@ interface ComposeStore {
   addSubtitleSegment: () => void;
   syncSubtitlesToClips: () => void;
   regenerateSubtitles: () => void;
+
+  // Composition format
+  setAspectRatio: (ratio: CompositionAspect) => void;
 
   // Style
   setSubtitleStyle: (style: SubtitleStyle) => void;
@@ -279,6 +286,9 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
   tracks: [],
   clips: [],
   mediaBin: [],
+
+  // Composition format
+  aspectRatio: '16:9',
 
   // Subtitles
   subtitleSegments: [],
@@ -909,6 +919,8 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
 
   setSubtitleConstraints: (constraints) => set({ subtitleConstraints: constraints, dirty: true }),
 
+  setAspectRatio: (ratio) => set({ aspectRatio: ratio, dirty: true }),
+
   // Versions
   saveVersion: (label) => {
     const state = get();
@@ -1039,6 +1051,7 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
       tracks,
       clips,
       mediaBin: state.mediaBin,
+      aspectRatio: state.aspectRatio ?? '16:9',
       subtitleSegments: subtitles,
       durationMs,
       subtitleStyle: subtitleStyle ?? defaultComposeStyle,
@@ -1057,7 +1070,7 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
 
   getCompositionState: () => {
     const s = get();
-    return { tracks: s.tracks, clips: s.clips, mediaBin: s.mediaBin };
+    return { tracks: s.tracks, clips: s.clips, mediaBin: s.mediaBin, aspectRatio: s.aspectRatio };
   },
 
   markClean: () => set({ dirty: false }),

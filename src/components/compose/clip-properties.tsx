@@ -246,6 +246,97 @@ export function ClipProperties() {
         </div>
       )}
 
+      {/* Motion: zoom & position for video/image clips (Premiere-style) */}
+      {clip.type !== 'audio' && clip.type !== 'text' && (
+        <div className="space-y-2 border-t border-border pt-2">
+          <div className="flex items-center justify-between">
+            <label className="text-[10px] text-muted-foreground font-medium">Motion (zoom / posición)</label>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-5 px-1.5 text-[10px] text-muted-foreground hover:text-foreground"
+              onClick={() => {
+                saveSnapshot();
+                updateClip(clip.id, { transform: { scale: 1, x: 0, y: 0 } });
+              }}
+              title="Reset motion to default"
+            >
+              Reset
+            </Button>
+          </div>
+
+          {/* Scale (zoom) */}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-muted-foreground w-10">Zoom</span>
+            <Slider
+              value={[Math.round((clip.transform?.scale ?? 1) * 100)]}
+              onValueChange={([v]) => {
+                updateClip(clip.id, {
+                  transform: {
+                    scale: v / 100,
+                    x: clip.transform?.x ?? 0,
+                    y: clip.transform?.y ?? 0,
+                  },
+                });
+              }}
+              min={10} max={400} step={1}
+              className="flex-1"
+            />
+            <span className="text-[10px] text-foreground w-10 text-right font-mono">
+              {Math.round((clip.transform?.scale ?? 1) * 100)}%
+            </span>
+          </div>
+
+          {/* X position */}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-muted-foreground w-10">Pos X</span>
+            <Slider
+              value={[Math.round((clip.transform?.x ?? 0) * 100)]}
+              onValueChange={([v]) => {
+                updateClip(clip.id, {
+                  transform: {
+                    scale: clip.transform?.scale ?? 1,
+                    x: v / 100,
+                    y: clip.transform?.y ?? 0,
+                  },
+                });
+              }}
+              min={-100} max={100} step={1}
+              className="flex-1"
+            />
+            <span className="text-[10px] text-foreground w-10 text-right font-mono">
+              {Math.round((clip.transform?.x ?? 0) * 100)}%
+            </span>
+          </div>
+
+          {/* Y position */}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-muted-foreground w-10">Pos Y</span>
+            <Slider
+              value={[Math.round((clip.transform?.y ?? 0) * 100)]}
+              onValueChange={([v]) => {
+                updateClip(clip.id, {
+                  transform: {
+                    scale: clip.transform?.scale ?? 1,
+                    x: clip.transform?.x ?? 0,
+                    y: v / 100,
+                  },
+                });
+              }}
+              min={-100} max={100} step={1}
+              className="flex-1"
+            />
+            <span className="text-[10px] text-foreground w-10 text-right font-mono">
+              {Math.round((clip.transform?.y ?? 0) * 100)}%
+            </span>
+          </div>
+
+          <p className="text-[9px] text-muted-foreground italic leading-tight">
+            Tip: para zooms diferentes en distintos momentos, divide el clip (S) y ajusta cada segmento.
+          </p>
+        </div>
+      )}
+
       {/* Volume for audio clips */}
       {clip.type === 'audio' && (
         <div className="space-y-1">
