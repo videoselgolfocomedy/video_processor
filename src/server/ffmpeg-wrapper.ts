@@ -402,13 +402,18 @@ export function renderVideo(options: RenderVideoOptions): {
     args.push('-map', '0:a:0?');
   }
 
-  // Video codec
+  // Video codec. Explicit color tagging matches the standard iPhone/source profile
+  // (BT.709 limited-range) so players don't guess and stretch the levels.
   args.push(
     '-c:v', 'libx264',
     '-preset', 'medium',
     '-crf', String(options.crf),
     '-r', String(options.fps),
     '-pix_fmt', 'yuv420p',
+    '-color_range', 'tv',
+    '-colorspace', 'bt709',
+    '-color_primaries', 'bt709',
+    '-color_trc', 'bt709',
   );
 
   // Audio codec
@@ -580,62 +585,77 @@ export function renderReelVideo(options: RenderReelOptions): {
   const Wout = options.width;
   const Hout = options.height;
 
-  for (let i = 0; i < clips.length; i++) {
-    const clip = clips[i];
-    const vidIdx = i * inputsPerClip;
-    const audIdx = hasAudio ? vidIdx + 1 : vidIdx;
+  // Are any clips using a per-clip transform? We use the heavier per-clip pipeline
+  // (pre-scale + format normalization + optional overlay-on-black) ONLY when at
+  // least one clip has a transform. Otherwise we keep the original concat → scale
+  // pipeline, which preserves the source's color characteristics (range / primaries
+  // / transfer) end-to-end. Forcing yuv420p / pad on every clip — even with no
+  // transform — was washing out the colors on iPhone footage because of how
+  // FFmpeg's scale + color filter sources interact with limited-range source.
+  const anyTransform = clips.some((c) => !isIdentityTransform(c.transform));
 
-    // Pre-process video: setpts + global crop (reels) + scale to output size with letterbox/pillarbox.
-    // We pre-scale here (instead of after concat) so per-clip transforms can be applied
-    // independently against a known output canvas size. format=yuv420p normalizes the pixel
-    // format for the downstream concat (otherwise concat can fail when mixing with color sources).
-    filterParts.push(
-      `[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter},scale=${Wout}:${Hout}:force_original_aspect_ratio=decrease,pad=${Wout}:${Hout}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v${i}_pre]`
-    );
+  let videoLabel: string;
 
-    if (isIdentityTransform(clip.transform)) {
-      // No transform — passthrough rename via setpts (cheap no-op that produces a labeled link)
-      filterParts.push(`[v${i}_pre]setpts=PTS[v${i}]`);
-    } else {
-      // Apply per-clip transform: scale around center, then translate.
-      // Equivalent CSS: translate(x*100%, y*100%) scale(s).
-      // Implementation: scale the pre-frame by s, overlay onto a black canvas at the correct offset.
-      const t = clip.transform!;
-      const s = t.scale ?? 1;
-      const x = t.x ?? 0;
-      const y = t.y ?? 0;
-      const durSec = ((clip.sourceOutMs - clip.sourceInMs) / 1000).toFixed(3);
+  if (!anyTransform) {
+    // ── ORIGINAL PIPELINE ─────────────────────────────────────────────
+    // Per-clip: setpts + (optional) crop only.
+    // Concat → single scale to output. Color characteristics flow through unchanged.
+    for (let i = 0; i < clips.length; i++) {
+      const vidIdx = i * inputsPerClip;
+      const audIdx = hasAudio ? vidIdx + 1 : vidIdx;
+      filterParts.push(`[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter}[v${i}]`);
+      filterParts.push(`[${audIdx}:a]asetpts=PTS-STARTPTS[a${i}]`);
+    }
+    const concatInputs = clips.map((_, i) => `[v${i}][a${i}]`).join('');
+    filterParts.push(`${concatInputs}concat=n=${clips.length}:v=1:a=1[outv][outa]`);
+    filterParts.push(`[outv]scale=${Wout}:${Hout}[scaled]`);
+    videoLabel = 'scaled';
+  } else {
+    // ── TRANSFORM PIPELINE ────────────────────────────────────────────
+    // Each clip is pre-scaled to output size, optionally with the per-clip transform
+    // applied via overlay-on-black. format=yuv420p normalizes the chain so it can
+    // mix with color filter sources for the transform background.
+    // We explicitly pin scale's in/out range to "tv" (limited) so the source's
+    // standard BT.709 limited-range encoding is preserved end-to-end.
+    for (let i = 0; i < clips.length; i++) {
+      const clip = clips[i];
+      const vidIdx = i * inputsPerClip;
+      const audIdx = hasAudio ? vidIdx + 1 : vidIdx;
 
-      // Scaled dimensions (must be even for libx264)
-      const scaledW = `trunc(iw*${s.toFixed(4)}/2)*2`;
-      const scaledH = `trunc(ih*${s.toFixed(4)}/2)*2`;
+      filterParts.push(
+        `[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter},scale=${Wout}:${Hout}:force_original_aspect_ratio=decrease:in_range=tv:out_range=tv,pad=${Wout}:${Hout}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v${i}_pre]`
+      );
 
-      // Overlay top-left such that the scaled frame's center lands at (Wout/2 + x*Wout, Hout/2 + y*Hout)
-      // top-left = center - scaledSize/2 = Wout*(1-s)/2 + x*Wout
-      const offsetX = Math.round(Wout * (1 - s) / 2 + x * Wout);
-      const offsetY = Math.round(Hout * (1 - s) / 2 + y * Hout);
+      if (isIdentityTransform(clip.transform)) {
+        filterParts.push(`[v${i}_pre]setpts=PTS[v${i}]`);
+      } else {
+        const t = clip.transform!;
+        const s = t.scale ?? 1;
+        const x = t.x ?? 0;
+        const y = t.y ?? 0;
+        const durSec = ((clip.sourceOutMs - clip.sourceInMs) / 1000).toFixed(3);
 
-      filterParts.push(`[v${i}_pre]scale=${scaledW}:${scaledH}[v${i}_zoom]`);
-      filterParts.push(`color=c=black:s=${Wout}x${Hout}:r=${options.fps}:d=${durSec}[v${i}_bg_raw]`);
-      filterParts.push(`[v${i}_bg_raw]format=yuv420p[v${i}_bg]`);
-      filterParts.push(`[v${i}_bg][v${i}_zoom]overlay=x=${offsetX}:y=${offsetY}:eof_action=endall,format=yuv420p,setsar=1[v${i}]`);
+        const scaledW = `trunc(iw*${s.toFixed(4)}/2)*2`;
+        const scaledH = `trunc(ih*${s.toFixed(4)}/2)*2`;
+
+        const offsetX = Math.round(Wout * (1 - s) / 2 + x * Wout);
+        const offsetY = Math.round(Hout * (1 - s) / 2 + y * Hout);
+
+        filterParts.push(`[v${i}_pre]scale=${scaledW}:${scaledH}:in_range=tv:out_range=tv[v${i}_zoom]`);
+        // Black canvas. Set range=tv so the color value of "black" matches the limited
+        // range of the source frames (16,128,128 in YUV) — otherwise overlay would
+        // mix full-range black (0,128,128) with limited-range video and shift the levels.
+        filterParts.push(`color=c=black:s=${Wout}x${Hout}:r=${options.fps}:d=${durSec}:format=yuv420p[v${i}_bg]`);
+        filterParts.push(`[v${i}_bg][v${i}_zoom]overlay=x=${offsetX}:y=${offsetY}:eof_action=endall,format=yuv420p,setsar=1[v${i}]`);
+      }
+
+      filterParts.push(`[${audIdx}:a]asetpts=PTS-STARTPTS[a${i}]`);
     }
 
-    // Process audio: reset pts
-    filterParts.push(
-      `[${audIdx}:a]asetpts=PTS-STARTPTS[a${i}]`
-    );
+    const concatInputs = clips.map((_, i) => `[v${i}][a${i}]`).join('');
+    filterParts.push(`${concatInputs}concat=n=${clips.length}:v=1:a=1[outv][outa]`);
+    videoLabel = 'outv';
   }
-
-  // Concat all segments (interleaved: v0 a0 v1 a1 ... as concat expects)
-  const concatInputs = clips.map((_, i) => `[v${i}][a${i}]`).join('');
-  filterParts.push(
-    `${concatInputs}concat=n=${clips.length}:v=1:a=1[outv][outa]`
-  );
-
-  // Each clip is already at output size after pre-scaling, so no post-concat scale is needed.
-  // The remaining chain (image overlays + ASS subtitles) consumes the concat output directly.
-  let videoLabel = 'outv';
 
   // Apply image overlays (between scale and ASS subtitles)
   for (let imgIdx = 0; imgIdx < imageOverlays.length; imgIdx++) {
@@ -706,13 +726,19 @@ export function renderReelVideo(options: RenderReelOptions): {
   args.push('-filter_complex', filterParts.join(';'));
   args.push('-map', '[finalv]', '-map', audioLabel);
 
-  // Encoding
+  // Encoding. Explicit color tagging on the output so downstream players don't
+  // guess (and re-stretch) the levels — fixes washed-out / over-bright look on
+  // iPhone source footage which is BT.709 limited-range by default.
   args.push(
     '-c:v', 'libx264',
     '-preset', 'medium',
     '-crf', String(options.crf),
     '-r', String(options.fps),
     '-pix_fmt', 'yuv420p',
+    '-color_range', 'tv',
+    '-colorspace', 'bt709',
+    '-color_primaries', 'bt709',
+    '-color_trc', 'bt709',
     '-c:a', 'aac',
     '-b:a', options.audioBitrate,
     '-movflags', '+faststart',
