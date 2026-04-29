@@ -3,7 +3,7 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import { STYLE_PRESETS, REEL_DEFAULT_CONSTRAINTS } from '@/config/subtitle-styles';
-import { splitLongSegments } from '@/lib/subtitle-utils';
+import { splitLongSegments, clampSegmentToBounds } from '@/lib/subtitle-utils';
 import type {
   ReelDefinition,
   ReelVersion,
@@ -737,11 +737,10 @@ export const useReelStore = create<ReelStore>((set, get) => ({
         .map((seg) => {
           for (const clip of videoClips) {
             if (seg.startMs < clip.timelineEndMs && seg.endMs > clip.timelineStartMs) {
-              return {
-                ...seg,
-                startMs: Math.max(seg.startMs, clip.timelineStartMs),
-                endMs: Math.min(seg.endMs, clip.timelineEndMs),
-              };
+              // Clamp segment AND its words to clip bounds. Without clamping the words
+              // array, splitByWords would later use stale word timings and produce
+              // sub-segments outside the clip's time range.
+              return clampSegmentToBounds(seg, clip.timelineStartMs, clip.timelineEndMs);
             }
           }
           return null;
@@ -749,8 +748,12 @@ export const useReelStore = create<ReelStore>((set, get) => ({
         .filter((s): s is SubtitleSegment => s !== null && (s.endMs - s.startMs) > 100);
     }
 
+    // Sort to keep monotonic startMs order through the split + final array.
+    segments.sort((a, b) => a.startMs - b.startMs);
+
     // Re-apply splitting constraints (only splits segments that exceed limits, leaves others intact)
     const resplit = splitLongSegments(segments, reel.subtitleConstraints.maxCharsPerBlock, reel.subtitleConstraints.maxDurationMs);
+    resplit.sort((a, b) => a.startMs - b.startMs);
 
     set((s) => ({
       reels: updateReelInList(s.reels, reelId, (r) => ({ ...r, subtitleSegments: resplit })),

@@ -2,7 +2,7 @@
 
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
-import { splitLongSegments } from '@/lib/subtitle-utils';
+import { splitLongSegments, clampSegmentToBounds } from '@/lib/subtitle-utils';
 import { STYLE_PRESETS, DEFAULT_CONSTRAINTS } from '@/config/subtitle-styles';
 import type {
   CompositionClip,
@@ -864,16 +864,13 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
         for (const clip of videoClips) {
           if (seg.startMs >= clip.timelineStartMs && seg.endMs <= clip.timelineEndMs) return seg;
           if (seg.startMs < clip.timelineEndMs && seg.endMs > clip.timelineStartMs) {
-            return {
-              ...seg,
-              startMs: Math.max(seg.startMs, clip.timelineStartMs),
-              endMs: Math.min(seg.endMs, clip.timelineEndMs),
-            };
+            return clampSegmentToBounds(seg, clip.timelineStartMs, clip.timelineEndMs);
           }
         }
         return null;
       })
-      .filter((s): s is SubtitleSegment => s !== null && (s.endMs - s.startMs) > 100);
+      .filter((s): s is SubtitleSegment => s !== null && (s.endMs - s.startMs) > 100)
+      .sort((a, b) => a.startMs - b.startMs);
 
     set({ subtitleSegments: synced, dirty: true });
   },
@@ -892,11 +889,7 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
         .map((seg) => {
           for (const clip of videoClips) {
             if (seg.startMs < clip.timelineEndMs && seg.endMs > clip.timelineStartMs) {
-              return {
-                ...seg,
-                startMs: Math.max(seg.startMs, clip.timelineStartMs),
-                endMs: Math.min(seg.endMs, clip.timelineEndMs),
-              };
+              return clampSegmentToBounds(seg, clip.timelineStartMs, clip.timelineEndMs);
             }
           }
           return null;
@@ -904,7 +897,13 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
         .filter((s): s is SubtitleSegment => s !== null && (s.endMs - s.startMs) > 100);
     }
 
+    // Sort BEFORE split so the resulting array stays monotonic by startMs.
+    segments.sort((a, b) => a.startMs - b.startMs);
+
     const resplit = splitLongSegments(segments, state.subtitleConstraints.maxCharsPerBlock, state.subtitleConstraints.maxDurationMs);
+    // Final sort just in case splitLongSegments produced something out of order
+    // (e.g. defensively-clamped sub-segments).
+    resplit.sort((a, b) => a.startMs - b.startMs);
     set({ subtitleSegments: resplit, dirty: true });
   },
 
@@ -1047,12 +1046,27 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
       return false;
     });
 
+    // Auto-repair subtitles loaded from disk: drop words[] arrays whose timings
+    // fall outside the segment's startMs/endMs (legacy bug — words weren't kept
+    // in sync when segments were clamped to clip bounds, causing splitByWords
+    // to later produce sub-segments at wrong times).
+    const repairedSubtitles = subtitles.map((seg) => {
+      if (!seg.words || seg.words.length === 0) return seg;
+      const allWithinBounds = seg.words.every(
+        (w) => w.startMs >= seg.startMs - 1 && w.endMs <= seg.endMs + 1
+      );
+      if (allWithinBounds) return seg;
+      // Drop the corrupt words array — the text is intact and splitByText is used as fallback.
+      return { ...seg, words: undefined };
+    });
+    const sortedSubtitles = [...repairedSubtitles].sort((a, b) => a.startMs - b.startMs);
+
     set({
       tracks,
       clips,
       mediaBin: state.mediaBin,
       aspectRatio: state.aspectRatio ?? '16:9',
-      subtitleSegments: subtitles,
+      subtitleSegments: sortedSubtitles,
       durationMs,
       subtitleStyle: subtitleStyle ?? defaultComposeStyle,
       subtitleStylePreset: subtitleStylePreset ?? 'youtube-classic',

@@ -2,6 +2,48 @@ import { v4 as uuidv4 } from 'uuid';
 import type { SubtitleSegment } from '@/types/project';
 
 /**
+ * Clamp a segment's start/end to the given bounds AND keep its `words` array
+ * consistent with the new bounds. Without this, a downstream consumer like
+ * `splitByWords` would use stale word timings and produce sub-segments outside
+ * the segment's actual time range — resulting in subtitles that "appear at the
+ * wrong second" after a regenerate.
+ *
+ * Words completely outside the new bounds are dropped. Words that straddle a
+ * bound are clamped to fit. If clamping produces an inconsistent or empty
+ * words list, the words array is dropped so `splitLongSegments` falls back to
+ * text-based splitting (which uses the segment's own start/end).
+ */
+export function clampSegmentToBounds(
+  seg: SubtitleSegment,
+  minMs: number,
+  maxMs: number
+): SubtitleSegment {
+  const newStart = Math.max(seg.startMs, minMs);
+  const newEnd = Math.min(seg.endMs, maxMs);
+
+  if (!seg.words || seg.words.length === 0) {
+    return { ...seg, startMs: newStart, endMs: newEnd };
+  }
+
+  const clampedWords = seg.words
+    .filter((w) => w.endMs > newStart && w.startMs < newEnd)
+    .map((w) => ({
+      ...w,
+      startMs: Math.max(newStart, w.startMs),
+      endMs: Math.min(newEnd, w.endMs),
+    }))
+    .filter((w) => w.endMs > w.startMs);
+
+  // If clamping removed the words, drop the words array — splitByText will be
+  // used as fallback and it doesn't depend on per-word timings.
+  if (clampedWords.length === 0) {
+    return { ...seg, startMs: newStart, endMs: newEnd, words: undefined };
+  }
+
+  return { ...seg, startMs: newStart, endMs: newEnd, words: clampedWords };
+}
+
+/**
  * Split segments that exceed maxChars or maxDurationMs.
  * Splits at word boundaries when word-level timing is available,
  * otherwise splits text at the nearest space to the midpoint.
@@ -46,6 +88,16 @@ function splitByWords(
   const results: SubtitleSegment[] = [];
   let start = 0;
 
+  // Defensive: if word timings are inconsistent with segment bounds (e.g. after a
+  // timeline remap that didn't update the words array), fall back to text splitting.
+  // Otherwise we'd produce sub-segments with timestamps outside the segment's range.
+  const wordsAreWithinBounds = words.every(
+    (w) => w.startMs >= seg.startMs - 1 && w.endMs <= seg.endMs + 1
+  );
+  if (!wordsAreWithinBounds) {
+    return splitByText(seg, maxChars, maxDurationMs);
+  }
+
   while (start < words.length) {
     let end = start + 1;
     let currentText = words[start].text;
@@ -65,10 +117,14 @@ function splitByWords(
     if (end === start) end = start + 1;
 
     const chunkWords = words.slice(start, end);
+    // Clamp the chunk's reported start/end to the segment bounds. This is a safety
+    // net even when wordsAreWithinBounds passed — protects against off-by-one cases.
+    const chunkStart = Math.max(seg.startMs, chunkWords[0].startMs);
+    const chunkEnd = Math.min(seg.endMs, chunkWords[chunkWords.length - 1].endMs);
     results.push({
       id: uuidv4(),
-      startMs: chunkWords[0].startMs,
-      endMs: chunkWords[chunkWords.length - 1].endMs,
+      startMs: chunkStart,
+      endMs: chunkEnd,
       text: chunkWords.map((w) => w.text).join(' '),
       words: chunkWords,
     });
