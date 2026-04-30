@@ -77,11 +77,17 @@ function ExportItem({
     }
   }, []);
 
+  // Stable callbacks: useSSE's effect depends on these, so passing inline arrow
+  // functions causes the EventSource to be recreated every render, which spams
+  // the server with /sse requests in dev mode.
+  const handleComplete = useCallback(() => onRefresh(), [onRefresh]);
+  const handleError = useCallback(() => onRefresh(), [onRefresh]);
+
   useSSE({
     jobId: isActive ? record.jobId || null : null,
     onProgress: handleProgress,
-    onComplete: () => onRefresh(),
-    onError: () => onRefresh(),
+    onComplete: handleComplete,
+    onError: handleError,
   });
 
   return (

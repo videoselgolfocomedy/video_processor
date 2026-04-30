@@ -645,7 +645,10 @@ export function renderReelVideo(options: RenderReelOptions): {
         // Black canvas. Set range=tv so the color value of "black" matches the limited
         // range of the source frames (16,128,128 in YUV) — otherwise overlay would
         // mix full-range black (0,128,128) with limited-range video and shift the levels.
-        filterParts.push(`color=c=black:s=${Wout}x${Hout}:r=${options.fps}:d=${durSec}:format=yuv420p[v${i}_bg]`);
+        // Note: `format` is NOT a parameter of the color filter in FFmpeg 6.x — it
+        // must be chained as a separate filter (",format=...") instead of an option
+        // (":format=..."). The latter throws "Option not found" and aborts FFmpeg.
+        filterParts.push(`color=c=black:s=${Wout}x${Hout}:r=${options.fps}:d=${durSec},format=yuv420p[v${i}_bg]`);
         filterParts.push(`[v${i}_bg][v${i}_zoom]overlay=x=${offsetX}:y=${offsetY}:eof_action=endall,format=yuv420p,setsar=1[v${i}]`);
       }
 
