@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs/promises';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
 import { jobManager } from '@/server/job-manager';
+import { probeColorInfo } from '@/server/ffmpeg-wrapper';
 
 function getFFmpegPath(): string {
   try {
@@ -133,26 +134,57 @@ export async function POST(
     audioDurationSec = Math.max(0, audioDurationSec - offsetSec);
   }
 
+  // Probe color characteristics. iPhone HEVC defaults to BT.2020 + HLG (HDR);
+  // browsers don't tone-map HLG so the muxed video would render washed-out in
+  // every preview (transcription / compose / reels). We re-encode to H.264 SDR
+  // with proper tone mapping when the source is HDR — slower (full re-encode
+  // instead of stream copy) but the muxed file then looks correct everywhere.
+  const colorInfo = await probeColorInfo(videoPath);
+  const isHdr = colorInfo.isHdr;
+  console.log(`[mux] camera color info: ${JSON.stringify(colorInfo)} (isHdr=${isHdr})`);
+
   // Create job
   const job = jobManager.createJob(id, 'mux');
   jobManager.startJob(job.id);
   jobManager.updateProgress(job.id, 5,
-    `Muxando: video + audio (${Math.round(audioDurationSec)}s)${videoSeekSec > 0 ? ` seek=${videoSeekSec.toFixed(1)}s` : ''}...`
+    `Muxando: video${isHdr ? ' (HDR→SDR, será más lento)' : ''} + audio (${Math.round(audioDurationSec)}s)${videoSeekSec > 0 ? ` seek=${videoSeekSec.toFixed(1)}s` : ''}...`
   );
 
   const ffmpeg = getFFmpegPath();
+
+  // Build the video filter chain: tone-map HDR sources, otherwise no video filter.
+  // Built so it can be used either inside an existing -filter_complex (when we
+  // already have audio filtering) or alone via -vf.
+  let videoFilterChain = '';
+  if (isHdr) {
+    const transfer = colorInfo.transfer === 'smpte2084' || colorInfo.transfer === 'arib-std-b67'
+      ? colorInfo.transfer : 'arib-std-b67';
+    const matrix = colorInfo.matrix === 'bt2020c' ? 'bt2020c' : 'bt2020nc';
+    videoFilterChain = `zscale=t=linear:npl=100:p=bt2020:m=${matrix}:tin=${transfer},tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p`;
+  }
+
+  // Video codec args: copy when SDR (fast), libx264 when HDR (re-encode to SDR).
+  const videoCodecArgs = isHdr
+    ? ['-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p',
+       '-color_range:v', 'tv', '-colorspace:v', 'bt709',
+       '-color_primaries:v', 'bt709', '-color_trc:v', 'bt709']
+    : ['-c:v', 'copy'];
 
   let args: string[];
 
   if (!isAlreadyAligned && offsetSec > 0) {
     // Raw board/amplified audio: trim audio by offset, limit output to trimmed audio duration
+    const filterComplex = isHdr
+      ? `[0:v]${videoFilterChain}[v];[1:a]atrim=start=${offsetSec},asetpts=PTS-STARTPTS[aligned]`
+      : `[1:a]atrim=start=${offsetSec},asetpts=PTS-STARTPTS[aligned]`;
+    const videoMap = isHdr ? '[v]' : '0:v:0';
     args = [
       '-i', videoPath,
       '-i', audioPath,
-      '-filter_complex', `[1:a]atrim=start=${offsetSec},asetpts=PTS-STARTPTS[aligned]`,
-      '-map', '0:v:0',
+      '-filter_complex', filterComplex,
+      '-map', videoMap,
       '-map', '[aligned]',
-      '-c:v', 'copy',
+      ...videoCodecArgs,
       '-c:a', 'aac',
       '-b:a', '192k',
       ...(audioDurationSec > 0 ? ['-t', String(audioDurationSec)] : ['-shortest']),
@@ -162,19 +194,19 @@ export async function POST(
     ];
   } else {
     // Mix/aligned file: seek video to the overlap start point, then mux with audio.
-    // IMPORTANT: -ss goes AFTER -i (output seeking) to avoid keyframe-misalignment
-    // that occurs with input seeking + -c:v copy. Input seeking snaps to the nearest
-    // keyframe BEFORE the target, causing video to lead audio by up to 30+ seconds.
-    // Output seeking is slower (must read through video) but frame-accurate.
+    // For SDR copy: -ss goes AFTER -i (output seeking) — input seeking + -c:v copy
+    // snaps to a previous keyframe and desyncs by up to 30s. Output seeking is
+    // slower but frame-accurate.
+    // For HDR re-encode: video is decoded anyway, so input seeking is fine and faster.
     args = [
       '-i', videoPath,
       '-i', audioPath,
+      ...(isHdr && videoFilterChain ? ['-vf', videoFilterChain] : []),
       '-map', '0:v:0',
       '-map', '1:a:0',
-      '-c:v', 'copy',
+      ...videoCodecArgs,
       '-c:a', 'aac',
       '-b:a', '192k',
-      // Output seeking: precise cut, no keyframe drift
       ...(videoSeekSec > 0 ? ['-ss', String(videoSeekSec)] : []),
       ...(audioDurationSec > 0 ? ['-t', String(audioDurationSec)] : ['-shortest']),
       '-y',
@@ -182,6 +214,8 @@ export async function POST(
       outputPath,
     ];
   }
+
+  console.log(`[mux] ${ffmpeg} ${args.join(' ')}`);
 
   const proc = spawn(ffmpeg, args, { stdio: ['ignore', 'pipe', 'pipe'] });
   jobManager.setProcess(job.id, proc);
