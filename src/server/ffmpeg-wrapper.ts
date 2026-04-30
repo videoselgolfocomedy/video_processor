@@ -648,16 +648,34 @@ export function renderReelVideo(options: RenderReelOptions): {
   // FFmpeg's scale + color filter sources interact with limited-range source.
   const anyTransform = clips.some((c) => !isIdentityTransform(c.transform));
 
+  // ── HDR tone-mapping prefix ───────────────────────────────────────
+  // Built once and prepended to each clip's filter chain (when source is HDR).
+  // MUST run before any format=yuv420p / scale that drops bit depth — applying
+  // it post-concat fails with "no path between colorspaces" because the HDR
+  // metadata is gone by then. zscale needs the original 10-bit + tagged
+  // primaries/transfer to do tone mapping.
+  let tonemapPrefix = '';
+  if (options.sourceColorInfo?.isHdr) {
+    const ci = options.sourceColorInfo;
+    const transfer = ci.transfer === 'smpte2084' || ci.transfer === 'arib-std-b67'
+      ? ci.transfer : 'arib-std-b67';
+    const primaries = ci.primaries === 'bt2020' ? 'bt2020' : 'bt2020';
+    const matrix = ci.matrix === 'bt2020c' ? 'bt2020c' : 'bt2020nc';
+    console.log(`[ffmpeg-render-reel] HDR source detected (${primaries}/${transfer}/${matrix}) — tone mapping per clip`);
+    tonemapPrefix = `,zscale=t=linear:npl=100:p=${primaries}:m=${matrix}:tin=${transfer},tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p`;
+  }
+
   let videoLabel: string;
 
   if (!anyTransform) {
     // ── ORIGINAL PIPELINE ─────────────────────────────────────────────
-    // Per-clip: setpts + (optional) crop only.
-    // Concat → single scale to output. Color characteristics flow through unchanged.
+    // Per-clip: setpts + (optional) crop + (optional) tone map.
+    // Concat → single scale to output. Color characteristics flow through unchanged
+    // (when no tone map needed) or are converted to SDR per-clip (when HDR source).
     for (let i = 0; i < clips.length; i++) {
       const vidIdx = i * inputsPerClip;
       const audIdx = hasAudio ? vidIdx + 1 : vidIdx;
-      filterParts.push(`[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter}[v${i}]`);
+      filterParts.push(`[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter}${tonemapPrefix}[v${i}]`);
       filterParts.push(`[${audIdx}:a]asetpts=PTS-STARTPTS[a${i}]`);
     }
     const concatInputs = clips.map((_, i) => `[v${i}][a${i}]`).join('');
@@ -666,18 +684,16 @@ export function renderReelVideo(options: RenderReelOptions): {
     videoLabel = 'scaled';
   } else {
     // ── TRANSFORM PIPELINE ────────────────────────────────────────────
-    // Each clip is pre-scaled to output size, optionally with the per-clip transform
-    // applied via overlay-on-black. format=yuv420p normalizes the chain so it can
-    // mix with color filter sources for the transform background.
-    // We explicitly pin scale's in/out range to "tv" (limited) so the source's
-    // standard BT.709 limited-range encoding is preserved end-to-end.
+    // Tone mapping (if any) runs FIRST so the HDR data is converted while still
+    // 10-bit, BEFORE the scale+pad+format=yuv420p chain that would drop bit depth
+    // and lose the metadata zscale needs.
     for (let i = 0; i < clips.length; i++) {
       const clip = clips[i];
       const vidIdx = i * inputsPerClip;
       const audIdx = hasAudio ? vidIdx + 1 : vidIdx;
 
       filterParts.push(
-        `[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter},scale=${Wout}:${Hout}:force_original_aspect_ratio=decrease:in_range=tv:out_range=tv,pad=${Wout}:${Hout}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v${i}_pre]`
+        `[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter}${tonemapPrefix},scale=${Wout}:${Hout}:force_original_aspect_ratio=decrease:in_range=tv:out_range=tv,pad=${Wout}:${Hout}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v${i}_pre]`
       );
 
       if (isIdentityTransform(clip.transform)) {
@@ -696,12 +712,7 @@ export function renderReelVideo(options: RenderReelOptions): {
         const offsetY = Math.round(Hout * (1 - s) / 2 + y * Hout);
 
         filterParts.push(`[v${i}_pre]scale=${scaledW}:${scaledH}:in_range=tv:out_range=tv[v${i}_zoom]`);
-        // Black canvas. Set range=tv so the color value of "black" matches the limited
-        // range of the source frames (16,128,128 in YUV) — otherwise overlay would
-        // mix full-range black (0,128,128) with limited-range video and shift the levels.
-        // Note: `format` is NOT a parameter of the color filter in FFmpeg 6.x — it
-        // must be chained as a separate filter (",format=...") instead of an option
-        // (":format=..."). The latter throws "Option not found" and aborts FFmpeg.
+        // Black canvas. format=yuv420p chained (not as option — that throws on FFmpeg 6.x).
         filterParts.push(`color=c=black:s=${Wout}x${Hout}:r=${options.fps}:d=${durSec},format=yuv420p[v${i}_bg]`);
         filterParts.push(`[v${i}_bg][v${i}_zoom]overlay=x=${offsetX}:y=${offsetY}:eof_action=endall,format=yuv420p,setsar=1[v${i}]`);
       }
@@ -712,25 +723,6 @@ export function renderReelVideo(options: RenderReelOptions): {
     const concatInputs = clips.map((_, i) => `[v${i}][a${i}]`).join('');
     filterParts.push(`${concatInputs}concat=n=${clips.length}:v=1:a=1[outv][outa]`);
     videoLabel = 'outv';
-  }
-
-  // ── HDR → SDR tone mapping ────────────────────────────────────────
-  // iPhone HEVC is BT.2020 with HLG (arib-std-b67) transfer by default.
-  // Without a proper HDR→SDR conversion, libx264 renders washed-out / over-bright
-  // SDR because the HLG curve gets interpreted as plain gamma. Use zscale +
-  // tonemap (Hable) to convert to BT.709 SDR before downstream filters.
-  if (options.sourceColorInfo?.isHdr) {
-    const ci = options.sourceColorInfo;
-    const transfer = ci.transfer === 'smpte2084' ? 'smpte2084'
-      : ci.transfer === 'arib-std-b67' ? 'arib-std-b67'
-      : 'arib-std-b67'; // default to HLG (most common iPhone case)
-    const primaries = ci.primaries === 'bt2020' ? 'bt2020' : 'bt2020';
-    const matrix = ci.matrix === 'bt2020nc' || ci.matrix === 'bt2020c' ? ci.matrix : 'bt2020nc';
-    console.log(`[ffmpeg-render-reel] HDR source detected (${primaries}/${transfer}/${matrix}) — applying tone mapping`);
-    filterParts.push(
-      `[${videoLabel}]zscale=t=linear:npl=100:p=${primaries}:m=${matrix}:tin=${transfer},tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p[tonemapped]`
-    );
-    videoLabel = 'tonemapped';
   }
 
   // Apply image overlays (between scale and ASS subtitles)
