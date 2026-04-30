@@ -552,6 +552,10 @@ export interface RenderReelOptions {
    * filter chain is inserted after concat so iPhone HLG (or any BT.2020/PQ)
    * footage doesn't render washed out as plain SDR. */
   sourceColorInfo?: ColorInfo;
+  /** Output video codec. 'h264' (default, libx264 8-bit) or 'h265' (libx265,
+   * supports 10-bit yuv420p10le + HDR tags so iPhone HLG sources are
+   * preserved end-to-end and play back identically to the camera-original. */
+  codec?: 'h264' | 'h265';
   onProgress?: (percent: number) => void;
 }
 
@@ -778,19 +782,49 @@ export function renderReelVideo(options: RenderReelOptions): {
   args.push('-filter_complex', filterParts.join(';'));
   args.push('-map', '[finalv]', '-map', audioLabel);
 
-  // Encoding. We deliberately do NOT set explicit -color_range / -colorspace /
-  // -color_primaries / -color_trc here. Forcing the output to claim BT.709 SDR
-  // strips the HLG / BT.2020 metadata that QuickTime and iOS use to tone-map
-  // iPhone HDR footage on playback — the result was a washed-out export
-  // because the player saw "this is plain SDR" and skipped its tone map. By
-  // letting libx264 inherit the source tags we keep the export rendering the
-  // same as the original file in players that understand HDR metadata.
+  // Encoding. Two paths:
+  //
+  // h264 (default): libx264 8-bit yuv420p with NO explicit color tagging — we
+  //   let libx264 inherit the source's color metadata so QuickTime / iOS still
+  //   render the export with the same tone-mapping path they use for the
+  //   camera-original (otherwise they treat it as plain SDR BT.709 and skip
+  //   tone-mapping entirely → washed look).
+  //
+  // h265: libx265 10-bit yuv420p10le with explicit HLG/BT.2020 tags. Required
+  //   when source is HDR (e.g. iPhone HEVC HLG) and we want the export to
+  //   match the original visually in QuickTime — H.264 cannot carry the
+  //   bit-depth or wide-gamut metadata needed for accurate HDR playback,
+  //   HEVC + HLG tags can. Output is still playable in any modern player and
+  //   accepted by YouTube uploads.
+  const codec = options.codec ?? 'h264';
+  if (codec === 'h265') {
+    args.push(
+      '-c:v', 'libx265',
+      '-preset', 'medium',
+      '-crf', String(options.crf),
+      '-r', String(options.fps),
+      '-pix_fmt', 'yuv420p10le',
+      '-tag:v', 'hvc1',
+      // HDR (HLG) color tagging: keeps iPhone HLG content rendering identically
+      // in QuickTime and other HDR-aware players.
+      '-color_range', 'tv',
+      '-colorspace', 'bt2020nc',
+      '-color_primaries', 'bt2020',
+      '-color_trc', 'arib-std-b67',
+      // libx265-specific params for HDR signalling
+      '-x265-params',
+      'colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:range=limited',
+    );
+  } else {
+    args.push(
+      '-c:v', 'libx264',
+      '-preset', 'medium',
+      '-crf', String(options.crf),
+      '-r', String(options.fps),
+      '-pix_fmt', 'yuv420p',
+    );
+  }
   args.push(
-    '-c:v', 'libx264',
-    '-preset', 'medium',
-    '-crf', String(options.crf),
-    '-r', String(options.fps),
-    '-pix_fmt', 'yuv420p',
     '-c:a', 'aac',
     '-b:a', options.audioBitrate,
     '-movflags', '+faststart',

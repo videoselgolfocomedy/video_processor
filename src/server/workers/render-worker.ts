@@ -402,6 +402,7 @@ async function runRender(options: RenderOptions): Promise<void> {
         cropRegion,
         sourceWidth,
         sourceHeight,
+        codec: preset.codec,
         onProgress: (percent) => {
           jobManager.updateProgress(jobId, 2 + percent * 0.96, `Rendering... ${Math.round(percent)}%`);
         },
@@ -685,6 +686,7 @@ async function runRender(options: RenderOptions): Promise<void> {
         cropRegion: undefined, // YouTube exports don't crop
         sourceWidth,
         sourceHeight,
+        codec: preset.codec,
         onProgress: (percent) => {
           jobManager.updateProgress(jobId, 2 + percent * 0.96, `Rendering... ${Math.round(percent)}%`);
         },

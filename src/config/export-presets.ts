@@ -26,6 +26,18 @@ export const EXPORT_PRESETS: ExportPreset[] = [
     orientation: 'horizontal',
   },
   {
+    id: 'youtube_1080_hdr',
+    name: 'YouTube 1080p HDR',
+    description: '1920x1080 HEVC 10-bit HLG — preserva color del iPhone',
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    codec: 'h265',
+    crf: 22,
+    audioBitrate: '256k',
+    orientation: 'horizontal',
+  },
+  {
     id: 'reels',
     name: 'Reels / TikTok',
     description: '1080x1920 vertical, 30fps',
