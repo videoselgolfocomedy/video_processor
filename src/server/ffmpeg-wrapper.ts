@@ -726,19 +726,20 @@ export function renderReelVideo(options: RenderReelOptions): {
   args.push('-filter_complex', filterParts.join(';'));
   args.push('-map', '[finalv]', '-map', audioLabel);
 
-  // Encoding. Explicit color tagging on the output so downstream players don't
-  // guess (and re-stretch) the levels — fixes washed-out / over-bright look on
-  // iPhone source footage which is BT.709 limited-range by default.
+  // Encoding. Color tagging is applied with stream specifier ":v" so it only
+  // affects the video stream — applying it globally previously seemed to make
+  // some FFmpeg builds hang during init. Tagging matches BT.709 limited-range
+  // (the standard SDR/iPhone profile) so players don't re-stretch the levels.
   args.push(
     '-c:v', 'libx264',
     '-preset', 'medium',
     '-crf', String(options.crf),
     '-r', String(options.fps),
     '-pix_fmt', 'yuv420p',
-    '-color_range', 'tv',
-    '-colorspace', 'bt709',
-    '-color_primaries', 'bt709',
-    '-color_trc', 'bt709',
+    '-color_range:v', 'tv',
+    '-colorspace:v', 'bt709',
+    '-color_primaries:v', 'bt709',
+    '-color_trc:v', 'bt709',
     '-c:a', 'aac',
     '-b:a', options.audioBitrate,
     '-movflags', '+faststart',
@@ -748,7 +749,7 @@ export function renderReelVideo(options: RenderReelOptions): {
 
   console.log(`[ffmpeg-render-reel] ${ffmpeg} ${args.join(' ')}`);
 
-  const proc = execFile(ffmpeg, args);
+  const proc = execFile(ffmpeg, args, { maxBuffer: 1024 * 1024 * 64 });
 
   const promise = new Promise<void>((resolve, reject) => {
     let duration = 0;
@@ -757,6 +758,8 @@ export function renderReelVideo(options: RenderReelOptions): {
     duration = expectedDurSec;
 
     let stderrLog = '';
+    let stderrLineBuf = '';
+    let lastProgressMs = Date.now();
 
     proc.stdout?.on('data', (data: Buffer) => {
       const lines = data.toString().split('\n');
@@ -767,25 +770,57 @@ export function renderReelVideo(options: RenderReelOptions): {
             const percent = Math.min(100, (us / 1_000_000 / duration) * 100);
             options.onProgress(percent);
           }
+          lastProgressMs = Date.now();
         }
       }
     });
 
+    // Stream stderr to the server log line-by-line so we can see in real time
+    // what FFmpeg is doing. Without this we'd only see stderr at process close,
+    // which never fires when FFmpeg hangs during init.
     proc.stderr?.on('data', (data: Buffer) => {
-      stderrLog += data.toString();
+      const chunk = data.toString();
+      stderrLog += chunk;
+      stderrLineBuf += chunk;
+      let idx;
+      while ((idx = stderrLineBuf.indexOf('\n')) !== -1) {
+        const line = stderrLineBuf.slice(0, idx).trimEnd();
+        stderrLineBuf = stderrLineBuf.slice(idx + 1);
+        if (line) console.log(`[ffmpeg-render-reel] ${line}`);
+      }
+      // Reset the watchdog on any stderr too — FFmpeg prints lots of init text.
+      lastProgressMs = Date.now();
     });
 
+    // Watchdog: if no progress and no stderr for 90s, assume FFmpeg is hung
+    // and kill it so the user sees a real error instead of waiting forever.
+    const watchdog = setInterval(() => {
+      const idleMs = Date.now() - lastProgressMs;
+      if (idleMs > 90_000) {
+        console.error(`[ffmpeg-render-reel] watchdog: no progress for ${Math.round(idleMs / 1000)}s, killing FFmpeg`);
+        clearInterval(watchdog);
+        proc.kill('SIGTERM');
+        // Give it a moment to exit cleanly, then SIGKILL
+        setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } }, 5000);
+      }
+    }, 10_000);
+
     proc.on('close', (code) => {
+      clearInterval(watchdog);
+      // Flush any remaining buffered stderr
+      if (stderrLineBuf.trim()) console.log(`[ffmpeg-render-reel] ${stderrLineBuf.trimEnd()}`);
       if (code === 0) resolve();
       else {
-        // Log last 500 chars of stderr for debugging
-        const tail = stderrLog.slice(-500);
+        const tail = stderrLog.slice(-1500);
         console.error(`[ffmpeg-render-reel] FFmpeg exited with code ${code}. stderr tail:\n${tail}`);
-        reject(new Error(`FFmpeg reel render exited with code ${code}`));
+        reject(new Error(`FFmpeg reel render exited with code ${code}: ${tail.split('\n').filter(Boolean).slice(-3).join(' | ')}`));
       }
     });
 
-    proc.on('error', reject);
+    proc.on('error', (err) => {
+      clearInterval(watchdog);
+      reject(err);
+    });
   });
 
   return { promise, process: proc };
