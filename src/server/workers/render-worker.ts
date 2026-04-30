@@ -497,8 +497,12 @@ async function runRender(options: RenderOptions): Promise<void> {
       const composeDirPath = getProjectDir(projectId, 'compose');
       const composeDirFiles = await fs.readdir(composeDirPath).catch(() => [] as string[]);
 
-      const muxedFile = exportDirFiles.find((f) => f.startsWith('muxed_') && f.endsWith('.mp4'))
-        || composeDirFiles.find((f) => f.startsWith('muxed_') && f.endsWith('.mp4'));
+      // The muxed container can be .mp4 or .mov (we now keep the source's
+      // container when the camera was .mov so Dolby Vision tags / dvcC atoms
+      // survive the mux). Match either extension when scanning.
+      const isMuxedFile = (f: string) => f.startsWith('muxed_') && (f.endsWith('.mp4') || f.endsWith('.mov'));
+      const muxedFile = exportDirFiles.find(isMuxedFile)
+        || composeDirFiles.find(isMuxedFile);
       if (muxedFile) {
         const muxedPath = exportDirFiles.includes(muxedFile)
           ? path.join(exportDir, muxedFile)
