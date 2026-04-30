@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Music, Subtitles, Download, Film, Layers, Smartphone, Archive } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { formatFileSize } from '@/lib/utils';
+import { StoragePanel } from '@/components/project/storage-panel';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 
@@ -129,6 +130,9 @@ export default function ProjectOverviewPage() {
           </Link>
         ))}
       </div>
+
+      {/* Storage / intermediate files */}
+      <StoragePanel projectId={projectId} />
     </div>
   );
 }

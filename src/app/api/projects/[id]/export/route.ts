@@ -50,7 +50,9 @@ export async function POST(
     exports: [...project.exports, exportRecord],
   });
 
-  // Start render in background
+  // Start render in background. Catch unhandled rejections so a synchronous
+  // throw inside startRender (before its own try/catch can fire) doesn't leave
+  // the job stuck at "Iniciando..." forever.
   startRender({
     projectId: id,
     jobId: job.id,
@@ -61,6 +63,9 @@ export async function POST(
     trimOutMs,
     targetType,
     reelId,
+  }).catch((err) => {
+    console.error('[export] startRender threw:', err);
+    jobManager.failJob(job.id, `Render init failed: ${(err as Error)?.message ?? String(err)}`);
   });
 
   return NextResponse.json({ jobId: job.id, exportId });

@@ -133,11 +133,35 @@ export async function startRender(options: RenderOptions): Promise<void> {
     targetType = 'youtube', reelId,
   } = options;
 
+  console.log(`[render] startRender entered: project=${projectId} preset=${preset.id} target=${targetType} reel=${reelId ?? '-'}`);
+  // Bump progress immediately so the UI moves off the "Iniciando..." state and
+  // the user sees that the worker actually entered.
+  jobManager.updateProgress(jobId, 1, 'Preparando…');
+
+  try {
+    return await runRender(options);
+  } catch (err) {
+    console.error('[render] startRender uncaught error:', err);
+    const job = jobManager.getJob(jobId);
+    if (job && job.status === 'running') {
+      jobManager.failJob(jobId, `Render failed: ${(err as Error)?.message ?? String(err)}`);
+    }
+  }
+}
+
+async function runRender(options: RenderOptions): Promise<void> {
+  const {
+    projectId, jobId, exportId, preset,
+    includeSubtitles = true, trimInMs, trimOutMs,
+    targetType = 'youtube', reelId,
+  } = options;
+
   const project = await getProject(projectId);
   if (!project) {
     jobManager.failJob(jobId, 'Project not found');
     return;
   }
+  console.log(`[render] project loaded, ${project.composition?.clips?.length ?? 0} compose clip(s)`);
 
   const exportDir = getProjectDir(projectId, 'export');
   const outputPath = path.join(exportDir, `${preset.id}_${Date.now()}.mp4`);
@@ -440,6 +464,7 @@ export async function startRender(options: RenderOptions): Promise<void> {
 
     if (composeVideoClips.length > 0) {
       // ---- COMPOSE-BASED YOUTUBE EXPORT ----
+      jobManager.updateProgress(jobId, 1, 'Construyendo timeline…');
       console.log(`[render] YouTube compose export with ${composeVideoClips.length} video clip(s):`,
         composeVideoClips.map((c: CompositionClip) => `[${c.sourceInMs}-${c.sourceOutMs}ms]`).join(', '));
 
