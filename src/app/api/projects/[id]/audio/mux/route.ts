@@ -83,16 +83,7 @@ export async function POST(
   const safeName = path.basename(audioFileName);
   const audioPath = path.join(audioDir, safeName);
   const videoPath = path.join(sourceDir, cameraSource.storedName);
-  // Match the source container when possible. iPhone HEVC Dolby Vision (Profile
-  // 8.4) ships in .mov with the dvh1 codec tag and a dvcC config box; muxing
-  // those into .mp4 with -c:v copy preserves the HEVC bitstream but typically
-  // rewrites the tag to hvc1 and may drop atoms QuickTime uses to enable its
-  // Dolby Vision render path → playback falls back to plain HLG tone mapping
-  // and looks slightly washed compared to the source. Keeping the container as
-  // .mov avoids that re-tagging entirely.
-  const sourceExt = path.extname(cameraSource.storedName).toLowerCase();
-  const outExt = sourceExt === '.mov' ? '.mov' : '.mp4';
-  const outputPath = path.join(exportDir, `muxed_${Date.now()}${outExt}`);
+  const outputPath = path.join(exportDir, `muxed_${Date.now()}.mp4`);
 
   // Verify audio file exists
   try {
@@ -160,17 +151,6 @@ export async function POST(
   // worse.
   let args: string[];
 
-  // Preserve the source codec tag (so Dolby Vision-tagged streams keep dvh1/dvhe)
-  // and copy stream-level metadata. -strict experimental is required for some
-  // Dolby Vision side-data writes in older FFmpeg builds.
-  const copyArgs = [
-    '-c:v', 'copy',
-    '-tag:v', 'copy',
-    '-map_metadata', '0',
-    '-movflags', '+use_metadata_tags',
-    '-strict', 'experimental',
-  ];
-
   if (!isAlreadyAligned && offsetSec > 0) {
     // Raw board/amplified audio: trim audio by offset, limit output to trimmed audio duration
     args = [
@@ -179,7 +159,7 @@ export async function POST(
       '-filter_complex', `[1:a]atrim=start=${offsetSec},asetpts=PTS-STARTPTS[aligned]`,
       '-map', '0:v:0',
       '-map', '[aligned]',
-      ...copyArgs,
+      '-c:v', 'copy',
       '-c:a', 'aac',
       '-b:a', '192k',
       ...(audioDurationSec > 0 ? ['-t', String(audioDurationSec)] : ['-shortest']),
@@ -197,7 +177,7 @@ export async function POST(
       '-i', audioPath,
       '-map', '0:v:0',
       '-map', '1:a:0',
-      ...copyArgs,
+      '-c:v', 'copy',
       '-c:a', 'aac',
       '-b:a', '192k',
       ...(videoSeekSec > 0 ? ['-ss', String(videoSeekSec)] : []),
