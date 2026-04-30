@@ -452,18 +452,13 @@ export function renderVideo(options: RenderVideoOptions): {
     args.push('-map', '0:a:0?');
   }
 
-  // Video codec. Explicit color tagging matches the standard iPhone/source profile
-  // (BT.709 limited-range) so players don't guess and stretch the levels.
+  // Video codec. No explicit color tagging — see comment in renderReelVideo.
   args.push(
     '-c:v', 'libx264',
     '-preset', 'medium',
     '-crf', String(options.crf),
     '-r', String(options.fps),
     '-pix_fmt', 'yuv420p',
-    '-color_range', 'tv',
-    '-colorspace', 'bt709',
-    '-color_primaries', 'bt709',
-    '-color_trc', 'bt709',
   );
 
   // Audio codec
@@ -648,34 +643,19 @@ export function renderReelVideo(options: RenderReelOptions): {
   // FFmpeg's scale + color filter sources interact with limited-range source.
   const anyTransform = clips.some((c) => !isIdentityTransform(c.transform));
 
-  // ── HDR tone-mapping prefix ───────────────────────────────────────
-  // Built once and prepended to each clip's filter chain (when source is HDR).
-  // MUST run before any format=yuv420p / scale that drops bit depth — applying
-  // it post-concat fails with "no path between colorspaces" because the HDR
-  // metadata is gone by then. zscale needs the original 10-bit + tagged
-  // primaries/transfer to do tone mapping.
-  let tonemapPrefix = '';
-  if (options.sourceColorInfo?.isHdr) {
-    const ci = options.sourceColorInfo;
-    const transfer = ci.transfer === 'smpte2084' || ci.transfer === 'arib-std-b67'
-      ? ci.transfer : 'arib-std-b67';
-    const primaries = ci.primaries === 'bt2020' ? 'bt2020' : 'bt2020';
-    const matrix = ci.matrix === 'bt2020c' ? 'bt2020c' : 'bt2020nc';
-    console.log(`[ffmpeg-render-reel] HDR source detected (${primaries}/${transfer}/${matrix}) — tone mapping per clip`);
-    tonemapPrefix = `,zscale=t=linear:npl=100:p=${primaries}:m=${matrix}:tin=${transfer},tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p`;
-  }
-
   let videoLabel: string;
 
   if (!anyTransform) {
     // ── ORIGINAL PIPELINE ─────────────────────────────────────────────
-    // Per-clip: setpts + (optional) crop + (optional) tone map.
-    // Concat → single scale to output. Color characteristics flow through unchanged
-    // (when no tone map needed) or are converted to SDR per-clip (when HDR source).
+    // Per-clip: setpts + (optional) crop only.
+    // Concat → single scale to output. Color metadata (incl. HLG/BT.2020 tags
+    // for HDR iPhone footage) flows through unchanged. libx264 inherits the
+    // tags onto the output H.264, so QuickTime / iOS render the export with
+    // the same tone-mapping it applies to the original file.
     for (let i = 0; i < clips.length; i++) {
       const vidIdx = i * inputsPerClip;
       const audIdx = hasAudio ? vidIdx + 1 : vidIdx;
-      filterParts.push(`[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter}${tonemapPrefix}[v${i}]`);
+      filterParts.push(`[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter}[v${i}]`);
       filterParts.push(`[${audIdx}:a]asetpts=PTS-STARTPTS[a${i}]`);
     }
     const concatInputs = clips.map((_, i) => `[v${i}][a${i}]`).join('');
@@ -684,16 +664,20 @@ export function renderReelVideo(options: RenderReelOptions): {
     videoLabel = 'scaled';
   } else {
     // ── TRANSFORM PIPELINE ────────────────────────────────────────────
-    // Tone mapping (if any) runs FIRST so the HDR data is converted while still
-    // 10-bit, BEFORE the scale+pad+format=yuv420p chain that would drop bit depth
-    // and lose the metadata zscale needs.
+    // Each clip goes through pre-scale + pad + format=yuv420p so we have a
+    // consistent canvas for the optional zoom/translate overlay. We do NOT
+    // attempt our own HDR→SDR tone mapping here — instead we let the colour
+    // metadata flow through the chain unchanged. libx264 inherits the source
+    // tags (HLG / BT.2020) and writes them to the output H.264, matching the
+    // colour treatment of the no-transform pipeline and of the source file
+    // when played back in QuickTime.
     for (let i = 0; i < clips.length; i++) {
       const clip = clips[i];
       const vidIdx = i * inputsPerClip;
       const audIdx = hasAudio ? vidIdx + 1 : vidIdx;
 
       filterParts.push(
-        `[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter}${tonemapPrefix},scale=${Wout}:${Hout}:force_original_aspect_ratio=decrease:in_range=tv:out_range=tv,pad=${Wout}:${Hout}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v${i}_pre]`
+        `[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter},scale=${Wout}:${Hout}:force_original_aspect_ratio=decrease,pad=${Wout}:${Hout}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v${i}_pre]`
       );
 
       if (isIdentityTransform(clip.transform)) {
@@ -711,7 +695,7 @@ export function renderReelVideo(options: RenderReelOptions): {
         const offsetX = Math.round(Wout * (1 - s) / 2 + x * Wout);
         const offsetY = Math.round(Hout * (1 - s) / 2 + y * Hout);
 
-        filterParts.push(`[v${i}_pre]scale=${scaledW}:${scaledH}:in_range=tv:out_range=tv[v${i}_zoom]`);
+        filterParts.push(`[v${i}_pre]scale=${scaledW}:${scaledH}[v${i}_zoom]`);
         // Black canvas. format=yuv420p chained (not as option — that throws on FFmpeg 6.x).
         filterParts.push(`color=c=black:s=${Wout}x${Hout}:r=${options.fps}:d=${durSec},format=yuv420p[v${i}_bg]`);
         filterParts.push(`[v${i}_bg][v${i}_zoom]overlay=x=${offsetX}:y=${offsetY}:eof_action=endall,format=yuv420p,setsar=1[v${i}]`);
@@ -794,20 +778,19 @@ export function renderReelVideo(options: RenderReelOptions): {
   args.push('-filter_complex', filterParts.join(';'));
   args.push('-map', '[finalv]', '-map', audioLabel);
 
-  // Encoding. Color tagging is applied with stream specifier ":v" so it only
-  // affects the video stream — applying it globally previously seemed to make
-  // some FFmpeg builds hang during init. Tagging matches BT.709 limited-range
-  // (the standard SDR/iPhone profile) so players don't re-stretch the levels.
+  // Encoding. We deliberately do NOT set explicit -color_range / -colorspace /
+  // -color_primaries / -color_trc here. Forcing the output to claim BT.709 SDR
+  // strips the HLG / BT.2020 metadata that QuickTime and iOS use to tone-map
+  // iPhone HDR footage on playback — the result was a washed-out export
+  // because the player saw "this is plain SDR" and skipped its tone map. By
+  // letting libx264 inherit the source tags we keep the export rendering the
+  // same as the original file in players that understand HDR metadata.
   args.push(
     '-c:v', 'libx264',
     '-preset', 'medium',
     '-crf', String(options.crf),
     '-r', String(options.fps),
     '-pix_fmt', 'yuv420p',
-    '-color_range:v', 'tv',
-    '-colorspace:v', 'bt709',
-    '-color_primaries:v', 'bt709',
-    '-color_trc:v', 'bt709',
     '-c:a', 'aac',
     '-b:a', options.audioBitrate,
     '-movflags', '+faststart',
