@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs/promises';
 import { jobManager } from '@/server/job-manager';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
-import { renderVideo, renderReelVideo, type ImageOverlayInput } from '@/server/ffmpeg-wrapper';
+import { renderVideo, renderReelVideo, probeColorInfo, type ImageOverlayInput } from '@/server/ffmpeg-wrapper';
 import { generateASS } from '@/server/ass-generator';
 import type { ASSTextOverlay } from '@/server/ass-generator';
 import type { ExportPreset, SubtitleStyle, SubtitleSegment, CropRegion, CompositionClip } from '@/types/project';
@@ -385,8 +385,12 @@ async function runRender(options: RenderOptions): Promise<void> {
 
       jobManager.updateProgress(jobId, 2, 'Starting FFmpeg render...');
 
+      const reelVideoInputPath = muxedVideoSrc ?? videoSrc;
+      const reelColorInfo = await probeColorInfo(reelVideoInputPath);
+      console.log(`[render] reel source color: ${JSON.stringify(reelColorInfo)}`);
+
       const { promise: reelPromise, process: reelProc } = renderReelVideo({
-        videoInputPath: muxedVideoSrc ?? videoSrc,
+        videoInputPath: reelVideoInputPath,
         audioInputPath: audioSrc,
         clips: videoClips,
         audioClipRanges,
@@ -402,6 +406,7 @@ async function runRender(options: RenderOptions): Promise<void> {
         cropRegion,
         sourceWidth,
         sourceHeight,
+        sourceColorInfo: reelColorInfo,
         onProgress: (percent) => {
           jobManager.updateProgress(jobId, 2 + percent * 0.96, `Rendering... ${Math.round(percent)}%`);
         },
@@ -668,6 +673,9 @@ async function runRender(options: RenderOptions): Promise<void> {
 
       jobManager.updateProgress(jobId, 2, 'Starting FFmpeg compose render...');
 
+      const composeColorInfo = await probeColorInfo(composeVideoSrc);
+      console.log(`[render] compose source color: ${JSON.stringify(composeColorInfo)}`);
+
       const { promise: composePromise, process: composeProc } = renderReelVideo({
         videoInputPath: composeVideoSrc,
         audioInputPath: composeAudioSrc,
@@ -685,6 +693,7 @@ async function runRender(options: RenderOptions): Promise<void> {
         cropRegion: undefined, // YouTube exports don't crop
         sourceWidth,
         sourceHeight,
+        sourceColorInfo: composeColorInfo,
         onProgress: (percent) => {
           jobManager.updateProgress(jobId, 2 + percent * 0.96, `Rendering... ${Math.round(percent)}%`);
         },

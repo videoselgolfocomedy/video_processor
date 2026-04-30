@@ -33,6 +33,56 @@ export interface ProbeResult {
   format: string;
 }
 
+export interface ColorInfo {
+  /** Pixel format, e.g. "yuv420p10le" — useful to detect 10-bit HDR sources */
+  pixFmt?: string;
+  /** Color primaries, e.g. "bt709" / "bt2020" */
+  primaries?: string;
+  /** Transfer characteristics, e.g. "bt709" / "smpte2084" (PQ) / "arib-std-b67" (HLG) */
+  transfer?: string;
+  /** Color matrix, e.g. "bt709" / "bt2020nc" */
+  matrix?: string;
+  /** Color range, "tv" (limited) or "pc" (full) */
+  range?: string;
+  /** Convenience flag: true when source is HDR (PQ/HLG transfer or BT.2020 primaries) */
+  isHdr: boolean;
+}
+
+/**
+ * Probe a video's color characteristics so the renderer can decide whether
+ * to do HDR→SDR tone mapping. iPhone-shot HEVC is BT.2020 / HLG by default;
+ * a plain `scale` filter renders that as washed-out / over-bright SDR.
+ */
+export async function probeColorInfo(filePath: string): Promise<ColorInfo> {
+  const ffprobe = getFFprobePath();
+  try {
+    const { stdout } = await execFileAsync(ffprobe, [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=pix_fmt,color_primaries,color_transfer,color_space,color_range',
+      '-of', 'json',
+      filePath,
+    ], { timeout: 15000 });
+    const data = JSON.parse(stdout);
+    const stream = data.streams?.[0] ?? {};
+    const pixFmt = stream.pix_fmt as string | undefined;
+    const primaries = stream.color_primaries as string | undefined;
+    const transfer = stream.color_transfer as string | undefined;
+    const matrix = stream.color_space as string | undefined;
+    const range = stream.color_range as string | undefined;
+
+    const isHdrTransfer = transfer === 'smpte2084' || transfer === 'arib-std-b67';
+    const isWideGamut = primaries === 'bt2020' || matrix === 'bt2020nc' || matrix === 'bt2020c';
+    const is10bit = !!pixFmt && pixFmt.includes('10');
+    const isHdr = isHdrTransfer || (isWideGamut && is10bit);
+
+    return { pixFmt, primaries, transfer, matrix, range, isHdr };
+  } catch (err) {
+    console.warn(`[ffmpeg-wrapper] probeColorInfo failed for ${filePath}:`, (err as Error).message);
+    return { isHdr: false };
+  }
+}
+
 export async function probeFile(filePath: string): Promise<ProbeResult> {
   const ffprobe = getFFprobePath();
   const { stdout } = await execFileAsync(ffprobe, [
@@ -503,6 +553,10 @@ export interface RenderReelOptions {
   cropRegion?: { centerX: number; centerY: number; scale: number };
   sourceWidth?: number;
   sourceHeight?: number;
+  /** Source color characteristics. When .isHdr=true, an HDR→SDR tone-mapping
+   * filter chain is inserted after concat so iPhone HLG (or any BT.2020/PQ)
+   * footage doesn't render washed out as plain SDR. */
+  sourceColorInfo?: ColorInfo;
   onProgress?: (percent: number) => void;
 }
 
@@ -658,6 +712,25 @@ export function renderReelVideo(options: RenderReelOptions): {
     const concatInputs = clips.map((_, i) => `[v${i}][a${i}]`).join('');
     filterParts.push(`${concatInputs}concat=n=${clips.length}:v=1:a=1[outv][outa]`);
     videoLabel = 'outv';
+  }
+
+  // ── HDR → SDR tone mapping ────────────────────────────────────────
+  // iPhone HEVC is BT.2020 with HLG (arib-std-b67) transfer by default.
+  // Without a proper HDR→SDR conversion, libx264 renders washed-out / over-bright
+  // SDR because the HLG curve gets interpreted as plain gamma. Use zscale +
+  // tonemap (Hable) to convert to BT.709 SDR before downstream filters.
+  if (options.sourceColorInfo?.isHdr) {
+    const ci = options.sourceColorInfo;
+    const transfer = ci.transfer === 'smpte2084' ? 'smpte2084'
+      : ci.transfer === 'arib-std-b67' ? 'arib-std-b67'
+      : 'arib-std-b67'; // default to HLG (most common iPhone case)
+    const primaries = ci.primaries === 'bt2020' ? 'bt2020' : 'bt2020';
+    const matrix = ci.matrix === 'bt2020nc' || ci.matrix === 'bt2020c' ? ci.matrix : 'bt2020nc';
+    console.log(`[ffmpeg-render-reel] HDR source detected (${primaries}/${transfer}/${matrix}) — applying tone mapping`);
+    filterParts.push(
+      `[${videoLabel}]zscale=t=linear:npl=100:p=${primaries}:m=${matrix}:tin=${transfer},tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p[tonemapped]`
+    );
+    videoLabel = 'tonemapped';
   }
 
   // Apply image overlays (between scale and ASS subtitles)
