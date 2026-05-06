@@ -324,7 +324,85 @@ ffprobe -v error -select_streams v:0 -show_entries \
 
 ---
 
-## 13. Where the project memory lives
+## 13. Project portability — moving / archiving a project
+
+A project is the directory `projects/<uuid>/` next to the repo. Each
+sub-directory has a different role:
+
+| Path | Essential? | Notes |
+|---|---|---|
+| `project.json` | ✅ **YES** — single source of truth (cuts, subs, reels, styles, versions, exports). ~100-200 KB. | Without this you start from scratch. |
+| `source/` | ✅ **YES** — raw uploads (camera `.mov`, board `.mp3`/`.wav`). Typically GB-scale. | Without these the muxing / transcription / alignment can't be redone. |
+| `audio/` | ⚠ Useful — derived audio (extracted camera, aligned ambient, mix variants, amplified). ~1 GB. | Drop to save space, but the user has to re-run extract → align → mix → amplify, which takes 5-15 min. |
+| `export/muxed_*.mp4` | ⚠ Useful — the synced video referenced by every downstream step. ~1-2 GB. | Drop to save space, but you'll have to re-mux (~30 s for SDR, several min if HDR re-encode is enabled). |
+| `export/*.mp4` (renders) | ❌ Drop — final renders. | Re-derived from `project.json` + muxed file. |
+| `export/*.ass`, `export/debug_*` | ❌ Drop — generated per render. | Auto-recreated. |
+| `compose/`, `transcription/` | ⚠ Sometimes empty, sometimes hold media-bin extras (cutaways, image overlays). Copy if non-empty. | |
+
+### Minimum bundle to move a project to another machine
+
+```
+projects/<uuid>/
+  project.json
+  source/<all files>
+```
+
+After copying, on the new machine:
+1. Drop the directory under `projects/` next to a clean checkout of
+   `videoselgolfocomedy/video_processor`.
+2. `npm install && npm run dev`
+3. Open the project in the UI. Everything (cuts, subs, reels, styles)
+   loads from `project.json`.
+4. Re-run **Sync & Mix → Mux** to regenerate `muxed_*.mp4`. Compose
+   clip times reference muxed timeline; they stay valid because the
+   audio drives duration.
+5. (Optional) Re-extract camera audio, re-align, re-mix if you want
+   the working audio files back.
+
+### Full bundle (no rebuild needed on the other side)
+
+Add `audio/` and `export/muxed_*.mp4`:
+
+```
+projects/<uuid>/
+  project.json
+  source/...
+  audio/...
+  export/muxed_*.mp4
+```
+
+This is what to copy if you want to move the project AND open it
+ready to edit/export immediately.
+
+### Lightweight cloud backup (no media)
+
+UI button "Backup" → `/api/projects/[id]/backup` produces a zip with:
+- `project.json` (paths sanitized to relative)
+- `export/*.srt`, `export/*.ass`
+- `compose/` files <10 MB
+- Fonts matching the subtitle style
+
+It does **NOT** include source video, source audio, working audio, or
+muxed file. Useful for transferring just the *state* — you'll re-upload
+the media on the other side. The matching `POST /api/projects/[id]/backup`
+restore route recreates the project from such a zip.
+
+### What's safe to delete to free up disk space
+
+If a project is "done" (you've shipped the renders) and you want to
+keep it editable:
+- Delete `export/*.mp4` renders → ~hundreds of MB to GBs reclaimed.
+- Delete `export/debug_*.ass` → trivial.
+- Keep `export/muxed_*.mp4`, `audio/`, `source/`, and `project.json`.
+
+If a project is fully archived (you don't expect to re-edit, just
+keep the result):
+- Keep ONLY the rendered output(s) you care about.
+- Delete the whole `projects/<uuid>/` directory.
+
+---
+
+## 14. Where the project memory lives
 
 - `MEMORY.md` (this file's older sibling, in `~/.claude/projects/...`)
   is auto-loaded by Claude Code from your home dir for every session.
