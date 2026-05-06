@@ -71,8 +71,13 @@ function TextOverlayPreview({ reelId, canvasWidth }: {
               padding: ts.backgroundColor ? `${2 * scale}px ${4 * scale}px` : undefined,
               borderRadius: ts.backgroundColor ? 2 : undefined,
               textAlign: 'center',
+              // pre-wrap honours user newlines and wraps at whitespace.
+              // word-break: normal (the default) means we DON'T break a single
+              // long word mid-letter — matches libass behaviour in the export,
+              // so what you see in the preview is what you get in the file.
               whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
+              wordBreak: 'normal',
+              overflowWrap: 'normal',
               lineHeight: ts.lineHeight ?? 1.2,
               textShadow: ts.shadowColor
                 ? `${(ts.shadowX ?? 0) * scale}px ${(ts.shadowY ?? 0) * scale}px ${(ts.shadowBlur ?? 0) * scale}px ${ts.shadowColor}`

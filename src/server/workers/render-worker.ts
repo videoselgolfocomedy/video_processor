@@ -213,6 +213,13 @@ async function runRender(options: RenderOptions): Promise<void> {
     subtitleStyle = reel.subtitleStyle;
     cropRegion = reel.cropRegion;
 
+    console.log(`[render] Reel "${reel.name ?? reel.id}" loaded: ${reel.composition.clips.length} clip(s) total`);
+    const trackBreakdown = reel.composition.clips.reduce<Record<string, number>>((acc, c) => {
+      acc[c.trackId] = (acc[c.trackId] ?? 0) + 1;
+      return acc;
+    }, {});
+    console.log(`[render] Reel clips per track: ${JSON.stringify(trackBreakdown)}`);
+
     // Get video clips from rv1 track, sorted by timeline position
     const videoClips = reel.composition.clips
       .filter((c) => c.trackId === 'rv1')
@@ -448,7 +455,10 @@ async function runRender(options: RenderOptions): Promise<void> {
       return; // Early return — reel rendering is handled separately
     }
 
-    // Fallback: no clips, use simple trim (reel.startMs to reel.endMs)
+    // Fallback: no clips on rv1, use simple trim (reel.startMs to reel.endMs).
+    // This path uses the camera source directly (not muxed) and applies trim,
+    // which is rarely what the user wants if they've been editing the reel.
+    console.log(`[render] Reel has no rv1 clips — falling back to simple trim ${reel.startMs}–${reel.endMs}ms on camera source. If you expected timeline edits to apply, the reel timeline may be empty.`);
     segments = reel.subtitleSegments; // Already 0-based, don't shift again
     segmentsAlreadyShifted = true;
     trimStartMs = reel.startMs;

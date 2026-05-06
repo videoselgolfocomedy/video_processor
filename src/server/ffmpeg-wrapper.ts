@@ -475,10 +475,13 @@ export function renderVideo(options: RenderVideoOptions): {
 
   console.log(`[ffmpeg-render] ${ffmpeg} ${args.join(' ')}`);
 
-  const proc = execFile(ffmpeg, args);
+  const proc = execFile(ffmpeg, args, { maxBuffer: 1024 * 1024 * 64 });
 
   const promise = new Promise<void>((resolve, reject) => {
     let duration = 0;
+    let stderrLog = '';
+    let stderrLineBuf = '';
+    let lastProgressMs = Date.now();
 
     proc.stdout?.on('data', (data: Buffer) => {
       const lines = data.toString().split('\n');
@@ -489,23 +492,57 @@ export function renderVideo(options: RenderVideoOptions): {
             const percent = Math.min(100, (us / 1_000_000 / duration) * 100);
             options.onProgress(percent);
           }
+          lastProgressMs = Date.now();
         }
       }
     });
 
+    // Live-stream stderr line-by-line, the same way renderReelVideo does, so
+    // we can see what FFmpeg is doing in real time. Without this, a hung
+    // simple render produces zero diagnostics.
     proc.stderr?.on('data', (data: Buffer) => {
-      const match = data.toString().match(/Duration:\s*(\d+):(\d+):(\d+)/);
+      const chunk = data.toString();
+      stderrLog += chunk;
+      stderrLineBuf += chunk;
+      const match = chunk.match(/Duration:\s*(\d+):(\d+):(\d+)/);
       if (match) {
         duration = parseInt(match[1]) * 3600 + parseInt(match[2]) * 60 + parseInt(match[3]);
       }
+      let idx;
+      while ((idx = stderrLineBuf.indexOf('\n')) !== -1) {
+        const line = stderrLineBuf.slice(0, idx).trimEnd();
+        stderrLineBuf = stderrLineBuf.slice(idx + 1);
+        if (line) console.log(`[ffmpeg-render] ${line}`);
+      }
+      lastProgressMs = Date.now();
     });
+
+    // Watchdog: kill FFmpeg after 90s with no stderr/progress activity.
+    const watchdog = setInterval(() => {
+      const idleMs = Date.now() - lastProgressMs;
+      if (idleMs > 90_000) {
+        console.error(`[ffmpeg-render] watchdog: no progress for ${Math.round(idleMs / 1000)}s, killing FFmpeg`);
+        clearInterval(watchdog);
+        proc.kill('SIGTERM');
+        setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } }, 5000);
+      }
+    }, 10_000);
 
     proc.on('close', (code) => {
+      clearInterval(watchdog);
+      if (stderrLineBuf.trim()) console.log(`[ffmpeg-render] ${stderrLineBuf.trimEnd()}`);
       if (code === 0) resolve();
-      else reject(new Error(`FFmpeg render exited with code ${code}`));
+      else {
+        const tail = stderrLog.slice(-1500);
+        console.error(`[ffmpeg-render] FFmpeg exited with code ${code}. stderr tail:\n${tail}`);
+        reject(new Error(`FFmpeg render exited with code ${code}: ${tail.split('\n').filter(Boolean).slice(-3).join(' | ')}`));
+      }
     });
 
-    proc.on('error', reject);
+    proc.on('error', (err) => {
+      clearInterval(watchdog);
+      reject(err);
+    });
   });
 
   return { promise, process: proc };
