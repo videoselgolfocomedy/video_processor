@@ -6,6 +6,7 @@ import { Loader2, FolderOpen, Upload } from 'lucide-react';
 import { useProjectStore } from '@/stores/project-store';
 import { ProjectCard } from './project-card';
 import { CreateProjectDialog } from './create-project-dialog';
+import { RestoreMissingFilesDialog, type CopyTarget } from './restore-missing-files-dialog';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 
@@ -16,6 +17,15 @@ export function ProjectList() {
   const { toast } = useToast();
   const restoreInputRef = useRef<HTMLInputElement>(null);
   const [restoring, setRestoring] = useState(false);
+  const [restoreReport, setRestoreReport] = useState<{
+    open: boolean;
+    projectId: string;
+    projectName: string;
+    projectDir?: string;
+    requiredFiles: CopyTarget[];
+    recommendedFiles: CopyTarget[];
+    regenerableFiles: CopyTarget[];
+  } | null>(null);
 
   useEffect(() => {
     fetchProjects();
@@ -44,14 +54,29 @@ export function ProjectList() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
 
-      toast({
-        title: `Proyecto restaurado: ${data.projectName}`,
-        description: data.missingFiles?.length > 0
-          ? `Faltan ${data.missingFiles.length} archivos fuente — impórtalos desde la página Import`
-          : 'Restauración completa',
-      });
+      const requiredFiles: CopyTarget[] = data.requiredFiles ?? [];
+      const recommendedFiles: CopyTarget[] = data.recommendedFiles ?? [];
+      const regenerableFiles: CopyTarget[] = data.regenerableFiles ?? [];
+      const total = requiredFiles.length + recommendedFiles.length + regenerableFiles.length;
+
       fetchProjects();
-      router.push(`/project/${data.projectId}`);
+
+      if (total > 0) {
+        // Show the missing-files modal so the user can see exactly what to copy
+        // and where. Modal handles routing to the project itself (Open button).
+        setRestoreReport({
+          open: true,
+          projectId: data.projectId,
+          projectName: data.projectName,
+          projectDir: data.projectDir,
+          requiredFiles,
+          recommendedFiles,
+          regenerableFiles,
+        });
+      } else {
+        toast({ title: `Proyecto restaurado: ${data.projectName}`, description: 'Restauración completa' });
+        router.push(`/project/${data.projectId}`);
+      }
     } catch (err) {
       toast({ title: 'Error al restaurar', description: (err as Error).message, variant: 'destructive' });
     } finally {
@@ -123,6 +148,20 @@ export function ProjectList() {
             />
           ))}
         </div>
+      )}
+
+      {restoreReport && (
+        <RestoreMissingFilesDialog
+          open={restoreReport.open}
+          onOpenChange={(open) => setRestoreReport(open ? restoreReport : null)}
+          projectId={restoreReport.projectId}
+          projectName={restoreReport.projectName}
+          projectDir={restoreReport.projectDir}
+          requiredFiles={restoreReport.requiredFiles}
+          recommendedFiles={restoreReport.recommendedFiles}
+          regenerableFiles={restoreReport.regenerableFiles}
+          onContinue={() => router.push(`/project/${restoreReport.projectId}`)}
+        />
       )}
     </div>
   );

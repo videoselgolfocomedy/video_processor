@@ -12,16 +12,20 @@ import type { ProjectState } from '@/types/project';
  *
  * Includes:
  * - project.json (with paths sanitized to relative)
- * - manifest.json (file references, sizes, checksums)
- * - SRT files from export/ dir
+ * - manifest.json: { requiredFiles, recommendedFiles, regenerableFiles }
+ *     each file ref carries originalPath (where it lived on the source
+ *     machine) AND relativePath (where it should land on the new machine).
+ *     The restore route uses these to build a full "missing files" report
+ *     showing the user exactly what to copy and where.
+ * - SRT/ASS files from export/ dir
  * - compose/ media bin files (if small enough)
  * - fonts used by the project subtitle style
  *
  * Does NOT include:
- * - Source video/audio files (too large)
- * - Audio intermediates (regenerable)
- * - Muxed videos (regenerable)
- * - Exported rendered videos (regenerable)
+ * - Source video/audio files (too large)              → requiredFiles
+ * - Audio intermediates (extracted, mix, amplified…)   → recommendedFiles
+ * - Muxed videos (re-derived by re-running mux step)   → regenerableFiles
+ * - Exported rendered videos (re-derived from project) → not listed
  */
 export async function GET(
   _request: NextRequest,
@@ -35,64 +39,107 @@ export async function GET(
 
   const projectDir = getProjectDir(id);
 
+  // File reference shape used in the manifest. originalPath is the absolute path
+  // the file had on the source machine — useful when the user is copying media
+  // off the original machine. relativePath is project-relative so the restore
+  // can compute the destination on the new machine.
+  type FileRef = {
+    role: string;
+    fileName: string;
+    originalName?: string;
+    size?: number;
+    relativePath: string;       // e.g. "source/foo.mov"
+    originalPath: string;       // e.g. "/Users/.../projects/<id>/source/foo.mov"
+  };
+
   // Build manifest of referenced files
   const manifest: {
     version: string;
     exportedAt: string;
     projectId: string;
     projectName: string;
-    requiredFiles: { role: string; fileName: string; originalName: string; size?: number; path: string }[];
-    audioFiles: { name: string; role: string; size?: number }[];
+    requiredFiles: FileRef[];     // user MUST copy these for the project to work
+    recommendedFiles: FileRef[];  // SKIP audio reprocess if copied (still optional)
+    regenerableFiles: FileRef[];  // muxed video etc — derivable from required+recommended
     includedFiles: string[];
   } = {
-    version: '1.0',
+    version: '2.0',
     exportedAt: new Date().toISOString(),
     projectId: project.id,
     projectName: project.name,
     requiredFiles: [],
-    audioFiles: [],
+    recommendedFiles: [],
+    regenerableFiles: [],
     includedFiles: ['project.json', 'manifest.json'],
   };
 
-  // Catalog source files (not included, but referenced)
+  async function statSize(absPath: string): Promise<number | undefined> {
+    try { return (await fs.stat(absPath)).size; } catch { return undefined; }
+  }
+
+  // 1. Sources (required) — original camera video + board audio
   for (const source of project.sources) {
-    const sourcePath = path.join(getProjectDir(id, 'source'), source.storedName);
-    let size: number | undefined;
-    try {
-      const stat = await fs.stat(sourcePath);
-      size = stat.size;
-    } catch { /* file may not exist */ }
+    const fileName = source.storedName;
+    const absPath = path.join(getProjectDir(id, 'source'), fileName);
     manifest.requiredFiles.push({
-      role: source.type || 'other',
-      fileName: source.storedName,
+      role: source.type === 'video' ? 'cameraVideo' : `source-${source.type ?? 'other'}`,
+      fileName,
       originalName: source.originalName,
-      size,
-      path: `source/${source.storedName}`,
+      size: await statSize(absPath),
+      relativePath: `source/${fileName}`,
+      originalPath: absPath,
     });
   }
 
-  // Catalog key audio files (mix, amplified, ambient)
+  // 2. Working audio files (recommended) — saves re-running extract / align / mix / amplify
   const audioDir = getProjectDir(id, 'audio');
-  const keyAudioFiles: { name: string; role: string }[] = [];
-  if (project.sync.selectedAudioPath) {
-    const name = path.basename(project.sync.selectedAudioPath);
-    keyAudioFiles.push({ name, role: 'selectedAudio' });
+  const seenAudioNames = new Set<string>();
+  const addAudio = async (relPath: string | undefined, role: string) => {
+    if (!relPath) return;
+    const fileName = path.basename(relPath);
+    if (seenAudioNames.has(fileName)) return;
+    seenAudioNames.add(fileName);
+    const absPath = path.join(audioDir, fileName);
+    manifest.recommendedFiles.push({
+      role,
+      fileName,
+      size: await statSize(absPath),
+      relativePath: `audio/${fileName}`,
+      originalPath: absPath,
+    });
+  };
+  for (const t of project.audio?.extractedTracks ?? []) {
+    await addAudio(t.path, 'extractedCameraAudio');
   }
-  if (project.audio.ambientPath) {
-    const name = path.basename(project.audio.ambientPath);
-    keyAudioFiles.push({ name, role: 'ambient' });
-  }
-  if (project.audio.amplifiedBoardPath) {
-    const name = path.basename(project.audio.amplifiedBoardPath);
-    keyAudioFiles.push({ name, role: 'amplifiedBoard' });
-  }
-  for (const af of keyAudioFiles) {
-    let size: number | undefined;
-    try {
-      const stat = await fs.stat(path.join(audioDir, af.name));
-      size = stat.size;
-    } catch { /* */ }
-    manifest.audioFiles.push({ ...af, size });
+  await addAudio(project.audio?.ambientPath, 'ambientAligned');
+  await addAudio(project.audio?.cameraAmbientPath, 'cameraAmbientCleanup');
+  await addAudio(project.audio?.amplifiedBoardPath, 'amplifiedBoard');
+  await addAudio(project.sync?.mixedAudioPath, 'mixed');
+  await addAudio(project.sync?.selectedAudioPath, 'selectedAudio');
+
+  // 3. Muxed video (regenerable) — re-derived by re-running the mux step
+  if (project.sync?.muxedVideoPath) {
+    const fileName = path.basename(project.sync.muxedVideoPath);
+    // Muxed file lives in export/ historically (current default) but legacy
+    // projects had it under audio/ — handle both.
+    const exportDir = getProjectDir(id, 'export');
+    const candidates = [
+      { dir: 'export', abs: path.join(exportDir, fileName) },
+      { dir: 'audio',  abs: path.join(audioDir, fileName) },
+    ];
+    for (const c of candidates) {
+      const size = await statSize(c.abs);
+      if (size !== undefined) {
+        manifest.regenerableFiles.push({
+          role: 'muxedVideo',
+          fileName,
+          size,
+          relativePath: `${c.dir}/${fileName}`,
+          originalPath: c.abs,
+        });
+        break;
+      }
+    }
   }
 
   // Sanitize project.json — convert absolute paths to relative
