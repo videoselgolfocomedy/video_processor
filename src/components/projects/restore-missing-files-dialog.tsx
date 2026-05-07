@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { Copy, Check, AlertTriangle, Info, Wrench } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { Copy, Check, AlertTriangle, Info, Wrench, HardDrive, Loader2 } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -11,6 +11,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { useToast } from '@/hooks/use-toast';
 
 export interface CopyTarget {
   role: string;
@@ -158,6 +159,41 @@ export function RestoreMissingFilesDialog({
     } catch { /* ignore */ }
   };
 
+  // ── Media zip import ──────────────────────────────────────────────
+  // The user generated a "Backup media" zip on the source machine; here we
+  // accept it and POST it to /api/projects/[id]/backup/media so the binaries
+  // get extracted into source/, audio/, export/ in this project's directory.
+  const mediaInputRef = useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<null | { written: number; skipped: number }>(null);
+  const { toast } = useToast();
+
+  const handleMediaImport = async (file: File) => {
+    setImporting(true);
+    setImportResult(null);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch(`/api/projects/${projectId}/backup/media`, { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Import failed');
+      setImportResult({ written: data.written?.length ?? 0, skipped: data.skipped?.length ?? 0 });
+      toast({
+        title: 'Media importada',
+        description: `${data.written?.length ?? 0} archivos extraídos en el proyecto.`,
+      });
+    } catch (err) {
+      toast({
+        title: 'Error al importar media',
+        description: (err as Error).message,
+        variant: 'destructive',
+      });
+    } finally {
+      setImporting(false);
+      if (mediaInputRef.current) mediaInputRef.current.value = '';
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
@@ -196,21 +232,69 @@ export function RestoreMissingFilesDialog({
           />
 
           {total > 0 && (
-            <div className="rounded-lg border border-border bg-muted/20 p-3">
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <h3 className="text-sm font-medium">Script bash para copiar todo</h3>
-                <Button size="sm" variant="outline" onClick={copyScript}>
-                  {scriptCopied ? <Check className="h-3 w-3 mr-1 text-green-500" /> : <Copy className="h-3 w-3 mr-1" />}
-                  Copiar script
-                </Button>
+            <>
+              {/* Media zip drop-in: easiest path for users with a "Backup media"
+                  zip from the source machine. One-click and the binaries land
+                  in the right subdirectories. */}
+              <div className="rounded-lg border border-purple-500/40 bg-purple-500/5 p-3 space-y-2">
+                <div className="flex items-start gap-2">
+                  <HardDrive className="h-4 w-4 text-purple-400 mt-0.5 flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <h3 className="text-sm font-medium">Importar zip de media</h3>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      Si en la máquina origen pulsaste <strong>“Backup media”</strong> y bajaste el zip pesado, súbelo aquí: lo extrae automáticamente en <code className="font-mono bg-muted/40 px-1 rounded">source/</code>, <code className="font-mono bg-muted/40 px-1 rounded">audio/</code> y <code className="font-mono bg-muted/40 px-1 rounded">export/</code> de este proyecto.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 pl-6">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={importing}
+                    onClick={() => mediaInputRef.current?.click()}
+                  >
+                    {importing ? (
+                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                    ) : (
+                      <HardDrive className="mr-1 h-3 w-3" />
+                    )}
+                    Subir media zip
+                  </Button>
+                  <input
+                    ref={mediaInputRef}
+                    type="file"
+                    accept=".zip"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) handleMediaImport(f);
+                    }}
+                  />
+                  {importResult && (
+                    <span className="text-[11px] text-green-400">
+                      {importResult.written} archivos extraídos
+                      {importResult.skipped > 0 && ` (${importResult.skipped} omitidos)`}
+                    </span>
+                  )}
+                </div>
               </div>
-              <p className="text-[11px] text-muted-foreground mb-2">
-                Si la máquina origen es accesible (montaje, disco externo, ssh con rutas idénticas), pega esto en una terminal en la máquina destino:
-              </p>
-              <pre className="text-[10px] font-mono bg-background/50 border border-border rounded p-2 overflow-x-auto max-h-40">
-                {bashScript}
-              </pre>
-            </div>
+
+              <div className="rounded-lg border border-border bg-muted/20 p-3">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <h3 className="text-sm font-medium">…o un script bash para copiar a mano</h3>
+                  <Button size="sm" variant="outline" onClick={copyScript}>
+                    {scriptCopied ? <Check className="h-3 w-3 mr-1 text-green-500" /> : <Copy className="h-3 w-3 mr-1" />}
+                    Copiar script
+                  </Button>
+                </div>
+                <p className="text-[11px] text-muted-foreground mb-2">
+                  Si en lugar del zip de media tienes los archivos sueltos accesibles desde la máquina destino (disco externo montado, ssh con rutas idénticas, etc.), pega esto en un terminal:
+                </p>
+                <pre className="text-[10px] font-mono bg-background/50 border border-border rounded p-2 overflow-x-auto max-h-40">
+                  {bashScript}
+                </pre>
+              </div>
+            </>
           )}
         </div>
 

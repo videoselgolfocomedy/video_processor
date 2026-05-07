@@ -374,18 +374,37 @@ projects/<uuid>/
 This is what to copy if you want to move the project AND open it
 ready to edit/export immediately.
 
-### Lightweight cloud backup (no media)
+### Backup buttons in the project overview
 
-UI button "Backup" → `/api/projects/[id]/backup` produces a zip with:
-- `project.json` (paths sanitized to relative)
-- `export/*.srt`, `export/*.ass`
-- `compose/` files <10 MB
-- Fonts matching the subtitle style
+There are now **two** backup buttons:
 
-It does **NOT** include source video, source audio, working audio, or
-muxed file. Useful for transferring just the *state* — you'll re-upload
-the media on the other side. The matching `POST /api/projects/[id]/backup`
-restore route recreates the project from such a zip.
+- **Backup** → `GET /api/projects/[id]/backup` — lightweight zip with
+  `project.json` (paths sanitised to relative), `export/*.srt`,
+  `export/*.ass`, `compose/` files <10 MB, and fonts matching the
+  subtitle style. NO source video / audio / muxed. Few MB.
+- **Backup media** → `GET /api/projects/[id]/backup/media` — heavy zip
+  with `source/*`, `audio/*` (extracted, ambient_aligned, mix,
+  amplified, selected), and `export/muxed_*.mp4`. The media-only
+  companion to the lightweight backup. Several GB.
+
+### Restore flow
+
+1. **Projects page → "Restaurar backup"** → upload the lightweight zip.
+   POST `/api/projects/restore` creates a NEW project (new UUID, name +
+   "(restored)"), extracts the small assets, and returns a three-tier
+   missing-files report (required / recommended / regenerable) with
+   each entry's `originalPath` (where it lived on the source machine)
+   and `destinationPath` (where it must land on this machine).
+2. **Modal opens** showing the report. Three options:
+   - **Subir media zip** (preferred) — drop in the heavy backup zip;
+     POST `/api/projects/[id]/backup/media` extracts entries under
+     `source/`, `audio/`, `export/`, `compose/`, `transcription/` of
+     the new project's directory.
+   - **Copiar script bash** — generated `cp` lines from `originalPath`
+     to `destinationPath` for users moving files via mounted disks.
+   - **Manual** — copy each row's destination path with the click-to-
+     copy button.
+3. Click "Abrir proyecto" to land on the restored project's overview.
 
 ### What's safe to delete to free up disk space
 

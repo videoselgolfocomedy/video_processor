@@ -2,7 +2,7 @@
 
 import { useProjectStore } from '@/stores/project-store';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Music, Subtitles, Download, Film, Layers, Smartphone, Archive } from 'lucide-react';
+import { Music, Subtitles, Download, Film, Layers, Smartphone, Archive, HardDrive } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { formatFileSize } from '@/lib/utils';
 import { StoragePanel } from '@/components/project/storage-panel';
@@ -63,17 +63,30 @@ export default function ProjectOverviewPage() {
             {currentProject.sources.length} source files
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            window.open(`/api/projects/${projectId}/backup`, '_blank');
-          }}
-          title="Descargar backup del proyecto (sin videos fuente)"
-        >
-          <Archive className="mr-1.5 h-4 w-4" />
-          Backup
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              window.open(`/api/projects/${projectId}/backup`, '_blank');
+            }}
+            title="Backup ligero del proyecto: project.json + estilos + fonts (sin vídeo/audio pesado). Acompáñalo con el botón 'Backup media' para llevarte también los archivos pesados."
+          >
+            <Archive className="mr-1.5 h-4 w-4" />
+            Backup
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              window.open(`/api/projects/${projectId}/backup/media`, '_blank');
+            }}
+            title="Backup pesado: source/, audio/, muxed video. Aplícalo en la máquina destino con el botón 'Importar media' del modal que aparece al restaurar."
+          >
+            <HardDrive className="mr-1.5 h-4 w-4" />
+            Backup media
+          </Button>
+        </div>
       </div>
 
       {/* Source files summary */}
