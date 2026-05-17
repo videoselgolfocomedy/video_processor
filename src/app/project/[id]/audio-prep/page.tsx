@@ -364,6 +364,15 @@ export default function AudioPrepPage() {
               alignmentOffsetMs={currentProject.audio.alignmentOffsetMs}
               amplifiedBoardPath={currentProject.audio.amplifiedBoardPath}
               amplifyApplied={currentProject.audio.amplifyApplied ?? false}
+              boardOriginalName={boardSource?.originalName}
+              boardStoredName={boardSource?.storedName}
+              rawCameraPath={
+                currentProject.audio.extractedTracks.find(
+                  (t) => cameraSource && t.sourceFileId === cameraSource.id
+                )?.path
+              }
+              ambientPath={currentProject.audio.ambientPath}
+              cleanedAmbientPath={currentProject.audio.cameraAmbientPath}
             />
           )}
 

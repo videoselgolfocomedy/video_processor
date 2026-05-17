@@ -13,8 +13,15 @@ const CONTIGUOUS_THRESHOLD_MS = 50; // clips within 50ms are considered contiguo
 
 // Merge contiguous clips from the same source into single ranges to avoid
 // mounting multiple <Video> elements which causes a black flash at cuts.
+// The `key` field is derived from the merged range CONTENTS (track + bounds +
+// source position), not from any underlying clip id. This is critical: after
+// `splitAllAtPlayhead` the two halves get new UUIDs but merge back into the
+// same contiguous range. If we keyed by id, React would unmount and remount
+// the <Sequence>/<Audio> during active playback, which leaves Remotion's
+// audio element in a permanently-silent state until page reload.
 interface MergedRange {
-  id: string;
+  /** Stable across split-and-remerge — based on bounds, not clip ids. */
+  key: string;
   timelineStartMs: number;
   timelineEndMs: number;
   sourceInMs: number;
@@ -40,17 +47,30 @@ function transformsEqual(
   return Math.abs(aScale - bScale) < 0.001 && Math.abs(aX - bX) < 0.001 && Math.abs(aY - bY) < 0.001;
 }
 
-function mergeContiguousClips(trackClips: MergeableClip[]): MergedRange[] {
+function rangeKey(prefix: string, r: Pick<MergedRange, 'timelineStartMs' | 'timelineEndMs' | 'sourceInMs' | 'transform'>): string {
+  const t = r.transform;
+  const tStr = t ? `${t.scale.toFixed(3)}_${t.x.toFixed(3)}_${t.y.toFixed(3)}` : '0';
+  return `${prefix}:${r.timelineStartMs}-${r.timelineEndMs}@${r.sourceInMs}#${tStr}`;
+}
+
+function mergeContiguousClips(trackClips: MergeableClip[], keyPrefix: string): MergedRange[] {
   if (trackClips.length === 0) return [];
   const sorted = [...trackClips].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
   const merged: MergedRange[] = [];
-  let current: MergedRange = {
-    id: sorted[0].id,
+  let current = {
     timelineStartMs: sorted[0].timelineStartMs,
     timelineEndMs: sorted[0].timelineEndMs,
     sourceInMs: sorted[0].sourceInMs,
     transform: sorted[0].transform,
   };
+
+  const finalize = (r: typeof current) => ({
+    key: rangeKey(keyPrefix, r),
+    timelineStartMs: r.timelineStartMs,
+    timelineEndMs: r.timelineEndMs,
+    sourceInMs: r.sourceInMs,
+    transform: r.transform,
+  });
 
   for (let i = 1; i < sorted.length; i++) {
     const next = sorted[i];
@@ -67,9 +87,8 @@ function mergeContiguousClips(trackClips: MergeableClip[]): MergedRange[] {
       current.timelineEndMs = next.timelineEndMs;
       // Keep current.sourceInMs — the Video plays continuously from the original startFrom
     } else {
-      merged.push(current);
+      merged.push(finalize(current));
       current = {
-        id: next.id,
         timelineStartMs: next.timelineStartMs,
         timelineEndMs: next.timelineEndMs,
         sourceInMs: next.sourceInMs,
@@ -77,7 +96,7 @@ function mergeContiguousClips(trackClips: MergeableClip[]): MergedRange[] {
       };
     }
   }
-  merged.push(current);
+  merged.push(finalize(current));
   return merged;
 }
 
@@ -139,8 +158,8 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
   // Base video/audio clips on v1/a1 tracks — merge contiguous to avoid black flash
   const v1Clips = clips.filter((c) => c.trackId === 'v1');
   const a1Clips = clips.filter((c) => c.trackId === 'a1');
-  const v1Merged = mergeContiguousClips(v1Clips);
-  const a1Merged = mergeContiguousClips(a1Clips);
+  const v1Merged = mergeContiguousClips(v1Clips, 'v1');
+  const a1Merged = mergeContiguousClips(a1Clips, 'a1');
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#000' }}>
@@ -153,7 +172,7 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
         const startFrom = Math.round((range.sourceInMs / 1000) * FPS);
         const transformCss = transformToCss(range.transform);
         return (
-          <Sequence key={range.id} from={from} durationInFrames={dur}>
+          <Sequence key={range.key} from={from} durationInFrames={dur}>
             <AbsoluteFill style={{ overflow: 'hidden' }}>
               <Video
                 src={videoSrc}
@@ -271,7 +290,7 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
         const dur = Math.max(1, Math.round(((range.timelineEndMs - range.timelineStartMs) / 1000) * FPS));
         const startFrom = Math.round((range.sourceInMs / 1000) * FPS);
         return (
-          <Sequence key={range.id} from={from} durationInFrames={dur}>
+          <Sequence key={range.key} from={from} durationInFrames={dur}>
             <Audio src={audioSrc} startFrom={startFrom} />
           </Sequence>
         );
@@ -305,8 +324,9 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
                 left: `${(pos.x - pos.width / 2) * 100}%`,
                 top: `${pos.y * 100}%`,
                 width: `${pos.width * 100}%`,
+                // Center on y — see comment in reel-timeline-view.tsx.
                 transform: 'translateY(-50%)',
-                textAlign: 'center',
+                textAlign: style?.textAlign ?? 'center',
                 opacity: clip.opacity ?? 1,
                 fontSize: style?.fontSize ?? 48,
                 fontFamily: style?.fontFamily ?? 'Inter',

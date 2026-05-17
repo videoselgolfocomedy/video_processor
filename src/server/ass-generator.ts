@@ -554,6 +554,7 @@ export interface ASSTextOverlay {
   shadowBlur?: number;
   shadowColor?: string;
   lineHeight?: number;
+  textAlign?: 'left' | 'center' | 'right';
 }
 
 export function generateASS(
@@ -649,32 +650,32 @@ export function generateASS(
       }
       const shadowBackColour = ov.shadowColor ? cssColorToASS(ov.shadowColor) : backColour;
 
-      // Position: use alignment + per-event margin overrides for proper text wrapping
-      // \pos breaks text wrapping in ASS, so we use margins instead
+      // Position the text box centred on (ov.x, ov.y). The horizontal
+      // alignment INSIDE that box is controlled by ov.textAlign, mapped to
+      // libass numpad alignments 4/5/6 (middle-left / center / right).
+      //
+      // For each alignment we also shift the \pos coordinate to the matching
+      // edge of the conceptual box so the box still occupies the same
+      // rectangle regardless of how text sits inside it:
+      //   center → \pos at the box centre (alignment 5)
+      //   left   → \pos at the box LEFT edge (alignment 4)
+      //   right  → \pos at the box RIGHT edge (alignment 6)
+      //
+      // This mirrors CSS where the box has `transform: translate(-50%, -50%)`
+      // and the text inside uses `text-align: left|center|right`.
       const maxWidthPx = Math.round((ov.width ?? 0.8) * width);
       const halfW = maxWidthPx / 2;
 
-      // Horizontal margins: center the text area around ov.x
+      // Horizontal margins still bound the wrap width via MarginL/MarginR.
       const marginL = Math.max(0, Math.round(ov.x * width - halfW));
       const marginR = Math.max(0, Math.round((1 - ov.x) * width - halfW));
 
-      // Vertical alignment and margin based on Y position
-      let alignment: number;
-      let marginV: number;
-      if (ov.y <= 0.33) {
-        // Top: alignment 8 (top-center), marginV from top
-        alignment = 8;
-        marginV = Math.round(ov.y * height);
-      } else if (ov.y >= 0.67) {
-        // Bottom: alignment 2 (bottom-center), marginV from bottom
-        alignment = 2;
-        marginV = Math.round((1 - ov.y) * height);
-      } else {
-        // Middle: alignment 5 (center), marginV adjusts center offset
-        alignment = 5;
-        // MarginV for center alignment doesn't offset in ASS — use \pos for Y only
-        marginV = 0;
-      }
+      const textAlign = ov.textAlign ?? 'center';
+      const alignment =
+        textAlign === 'left' ? 4 :
+        textAlign === 'right' ? 6 :
+        5;
+      const marginV = 0;
 
       overlayStyles.push([
         `Style: ${styleName}`,
@@ -700,14 +701,18 @@ export function generateASS(
 
       const escapedText = wrapEmojiWithFont(escapeASSText(ov.text), ov.fontFamily ?? 'Inter');
 
-      // For center-Y positions, we need \pos for vertical placement since MarginV
-      // doesn't offset center alignment. For top/bottom, margins handle everything.
-      let overrideTags = '';
-      if (ov.y > 0.33 && ov.y < 0.67) {
-        const posX = Math.round(ov.x * width);
-        const posY = Math.round(ov.y * height);
-        overrideTags = `{\\pos(${posX},${posY})}`;
-      }
+      // \pos pixel coords match the alignment anchor:
+      //  - alignment 5 (center): \pos at the box CENTRE (x*W, y*H)
+      //  - alignment 4 (left):   \pos at the box LEFT edge  (x*W - halfW, y*H)
+      //  - alignment 6 (right):  \pos at the box RIGHT edge (x*W + halfW, y*H)
+      const posXcenter = ov.x * width;
+      const posX = Math.round(
+        alignment === 4 ? posXcenter - halfW :
+        alignment === 6 ? posXcenter + halfW :
+        posXcenter
+      );
+      const posY = Math.round(ov.y * height);
+      const overrideTags = `{\\pos(${posX},${posY})}`;
 
       // Per-event margin overrides (columns 5-7 in Dialogue line)
       events.push(

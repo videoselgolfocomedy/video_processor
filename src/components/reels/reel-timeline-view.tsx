@@ -3,6 +3,7 @@
 import { useCallback, useRef, useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import { useReelStore } from '@/stores/reel-store';
+import { addToLibrary, removeFromLibrary, useTextOverlayLibrary, type TextOverlayPreset } from '@/lib/text-overlay-library';
 import { ReelVideoPlayer } from './reel-video-player';
 import { ReelSubtitleBox } from './reel-subtitle-box';
 import { ReelTimeline } from './reel-timeline';
@@ -10,7 +11,7 @@ import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-edito
 import { useCustomPresets } from '@/hooks/use-custom-presets';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { RefreshCw, Scissors, Trash2, Bold } from 'lucide-react';
+import { RefreshCw, Scissors, Trash2, Bold, Frame, BookmarkPlus, Library, Trash } from 'lucide-react';
 import { splitLongSegments } from '@/lib/subtitle-utils';
 import { formatTimestamp } from '@/lib/utils';
 import { getReelVideoElement } from './reel-video-ref';
@@ -24,12 +25,26 @@ interface ReelTimelineViewProps {
 
 /* ── Text overlay rendering on canvas ──────────────────────────────── */
 
-function TextOverlayPreview({ reelId, canvasWidth }: {
+/**
+ * Maps the `textAlign` we store on each clip to the corresponding CSS value
+ * for the preview and a self-anchored block (relative to the bounding box).
+ * The box itself is always centred on overlayPosition (x, y), so the only
+ * thing that changes here is how glyphs sit inside that fixed box.
+ */
+function cssTextAlign(align?: 'left' | 'center' | 'right'): 'left' | 'center' | 'right' {
+  return align ?? 'center';
+}
+
+function TextOverlayPreview({ reelId, canvasWidth, canvasHeight }: {
   reelId: string;
   canvasWidth: number;
+  canvasHeight: number;
 }) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const currentTimeMs = useReelStore((s) => s.currentTimeMs);
+  const selectedClipIds = useReelStore((s) => s.selectedClipIds);
+  const updateClip = useReelStore((s) => s.updateClip);
+  const selectClip = useReelStore((s) => s.selectClip);
 
   if (!reel || canvasWidth <= 0) return null;
 
@@ -53,39 +68,136 @@ function TextOverlayPreview({ reelId, canvasWidth }: {
           backgroundColor: undefined,
         };
         const pos = clip.overlayPosition ?? { x: 0.5, y: 0.5, width: 0.8 };
+        const align = cssTextAlign(ts.textAlign);
+        const boxWidthPx = pos.width * canvasWidth;
+        const isSelected = selectedClipIds.includes(clip.id);
+
+        // Drag handlers — let the user reposition the box by clicking and
+        // dragging in the preview. Cursor pixel deltas are converted to
+        // fractional deltas using canvasWidth/Height, so updates are
+        // resolution-independent.
+        const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+          e.preventDefault();
+          e.stopPropagation();
+          selectClip(clip.id);
+          const startClientX = e.clientX;
+          const startClientY = e.clientY;
+          const startPos = { x: pos.x, y: pos.y };
+          const target = e.currentTarget;
+          target.setPointerCapture(e.pointerId);
+
+          const onMove = (ev: PointerEvent) => {
+            const dxFrac = (ev.clientX - startClientX) / Math.max(1, canvasWidth);
+            const dyFrac = (ev.clientY - startClientY) / Math.max(1, canvasHeight);
+            const newX = Math.max(0, Math.min(1, startPos.x + dxFrac));
+            const newY = Math.max(0, Math.min(1, startPos.y + dyFrac));
+            updateClip(reelId, clip.id, {
+              overlayPosition: { ...pos, x: newX, y: newY },
+            });
+          };
+          const onUp = () => {
+            target.removeEventListener('pointermove', onMove);
+            target.removeEventListener('pointerup', onUp);
+            target.removeEventListener('pointercancel', onUp);
+            try { target.releasePointerCapture(e.pointerId); } catch { /* */ }
+          };
+          target.addEventListener('pointermove', onMove);
+          target.addEventListener('pointerup', onUp);
+          target.addEventListener('pointercancel', onUp);
+        };
 
         return (
+          // Outer box: fixed width = pos.width × canvas; centred on (x, y).
+          // Drawing this as a separate element makes the bounding box explicit
+          // and matches what the export will produce (libass treats the same
+          // rectangle as its wrap frame). It's also the drag handle.
           <div
             key={clip.id}
-            className="absolute pointer-events-none"
+            className="absolute"
+            onPointerDown={handlePointerDown}
             style={{
               left: `${pos.x * 100}%`,
               top: `${pos.y * 100}%`,
               transform: 'translate(-50%, -50%)',
-              maxWidth: `${pos.width * 100}%`,
-              fontFamily: `${ts.fontFamily}, sans-serif`,
-              fontSize: ts.fontSize * scale,
-              fontWeight: ts.fontWeight,
-              color: ts.color,
-              backgroundColor: ts.backgroundColor ?? undefined,
-              padding: ts.backgroundColor ? `${2 * scale}px ${4 * scale}px` : undefined,
-              borderRadius: ts.backgroundColor ? 2 : undefined,
-              textAlign: 'center',
-              // pre-wrap honours user newlines and wraps at whitespace.
-              // word-break: normal (the default) means we DON'T break a single
-              // long word mid-letter — matches libass behaviour in the export,
-              // so what you see in the preview is what you get in the file.
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'normal',
-              overflowWrap: 'normal',
-              lineHeight: ts.lineHeight ?? 1.2,
-              textShadow: ts.shadowColor
-                ? `${(ts.shadowX ?? 0) * scale}px ${(ts.shadowY ?? 0) * scale}px ${(ts.shadowBlur ?? 0) * scale}px ${ts.shadowColor}`
-                : undefined,
+              width: boxWidthPx,
+              // Faint dashed border on every overlay so the user always sees
+              // the box. The currently-selected overlay shows a stronger
+              // border so it stands out — this matches the "cajita" the user
+              // asked for so alignment is obvious at a glance.
+              border: isSelected
+                ? '1px dashed rgba(255,200,80,0.9)'
+                : '1px dashed rgba(255,255,255,0.25)',
               zIndex: 15,
+              cursor: 'move',
+              touchAction: 'none', // prevent browser gesture handling on touch
+              userSelect: 'none',
+              WebkitUserSelect: 'none',
             }}
           >
-            {clip.textContent || ''}
+            {/* Tiny crosshair at the (x, y) anchor — only when selected.
+                Reinforces that x,y refers to the BOX CENTRE, not a corner. */}
+            {isSelected && (
+              <div
+                style={{
+                  position: 'absolute',
+                  left: '50%',
+                  top: '50%',
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: 'rgba(255,200,80,0.95)',
+                  transform: 'translate(-50%, -50%)',
+                  boxShadow: '0 0 0 1px rgba(0,0,0,0.6)',
+                }}
+              />
+            )}
+            {/* Debug label: shows the actual pos.y the preview is rendering
+                with. If this doesn't match the value in the panel, the store
+                has drifted from disk; if it matches but the visible position
+                seems off, the canvas dims aren't what we think. */}
+            <div
+              style={{
+                position: 'absolute',
+                top: -14,
+                left: 0,
+                fontFamily: 'monospace',
+                fontSize: 9,
+                color: isSelected ? 'rgba(255,200,80,0.95)' : 'rgba(255,255,255,0.5)',
+                background: 'rgba(0,0,0,0.6)',
+                padding: '0 3px',
+                borderRadius: 2,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              y={pos.y.toFixed(2)} x={pos.x.toFixed(2)} w={pos.width.toFixed(2)}
+            </div>
+            {/* Text itself */}
+            <div
+              style={{
+                width: '100%',
+                fontFamily: `${ts.fontFamily}, sans-serif`,
+                fontSize: ts.fontSize * scale,
+                fontWeight: ts.fontWeight,
+                color: ts.color,
+                backgroundColor: ts.backgroundColor ?? undefined,
+                padding: ts.backgroundColor ? `${2 * scale}px ${4 * scale}px` : undefined,
+                borderRadius: ts.backgroundColor ? 2 : undefined,
+                textAlign: align,
+                whiteSpace: 'pre-wrap',
+                // break-word lets the box clip when a single word is too long
+                // for pos.width — matches libass's WrapStyle behaviour in the
+                // export and avoids the silent overflow we had with
+                // word-break:normal.
+                wordBreak: 'normal',
+                overflowWrap: 'break-word',
+                lineHeight: ts.lineHeight ?? 1.2,
+                textShadow: ts.shadowColor
+                  ? `${(ts.shadowX ?? 0) * scale}px ${(ts.shadowY ?? 0) * scale}px ${(ts.shadowBlur ?? 0) * scale}px ${ts.shadowColor}`
+                  : undefined,
+              }}
+            >
+              {clip.textContent || ''}
+            </div>
           </div>
         );
       })}
@@ -139,13 +251,146 @@ function ImageOverlayPreview({ reelId }: { reelId: string }) {
   );
 }
 
+/* ── Instagram safe-zone overlay ─────────────────────────────────────── */
+
+/**
+ * Reference dimensions for Instagram Reels safe zones (1080×1920 base).
+ * Numbers from the official IG Creator hub guidelines (2024 update):
+ *  - Top UI (header / username / follow): occupies ~250 px from the top.
+ *  - Bottom UI (caption, audio strip, like/comment/share buttons, progress
+ *    bar): occupies ~530 px from the bottom.
+ *  - Profile-grid crop: 1080×1350 (4:5) centred → vertical visible band
+ *    spans y = (1920−1350)/2 = 285 to y = 1635.
+ *
+ * Expressed as fractions of canvas height so they scale to any preview size.
+ */
+const IG_TOP_UI_FRAC = 250 / 1920;        // ≈ 0.130
+const IG_BOTTOM_UI_FRAC = 530 / 1920;     // ≈ 0.276
+const IG_GRID_CROP_TOP = 285 / 1920;      // ≈ 0.148
+const IG_GRID_CROP_BOTTOM = 1635 / 1920;  // ≈ 0.852
+
+function InstagramSafeZones({ width, height }: { width: number; height: number }) {
+  if (width <= 0 || height <= 0) return null;
+  const gridTop = IG_GRID_CROP_TOP * height;
+  const gridBottom = IG_GRID_CROP_BOTTOM * height;
+  const topUiBottom = IG_TOP_UI_FRAC * height;
+  const bottomUiTop = (1 - IG_BOTTOM_UI_FRAC) * height;
+
+  return (
+    <div
+      className="absolute inset-0 pointer-events-none"
+      style={{ width, height }}
+    >
+      {/* Profile grid crop (4:5 centred) — dashed outline */}
+      <div
+        className="absolute border-2 border-dashed border-pink-400/80"
+        style={{
+          left: 0,
+          top: gridTop,
+          width,
+          height: gridBottom - gridTop,
+        }}
+      />
+      {/* Top UI shaded region */}
+      <div
+        className="absolute bg-red-500/15 border-b border-red-500/40"
+        style={{ left: 0, top: 0, width, height: topUiBottom }}
+      />
+      {/* Bottom UI shaded region */}
+      <div
+        className="absolute bg-red-500/15 border-t border-red-500/40"
+        style={{ left: 0, top: bottomUiTop, width, height: height - bottomUiTop }}
+      />
+      {/* Labels */}
+      <div
+        className="absolute text-[9px] font-mono text-red-300/90 px-1 py-0.5 bg-black/40 rounded"
+        style={{ left: 4, top: 4 }}
+      >
+        IG header
+      </div>
+      <div
+        className="absolute text-[9px] font-mono text-red-300/90 px-1 py-0.5 bg-black/40 rounded"
+        style={{ left: 4, top: bottomUiTop + 2 }}
+      >
+        IG footer (caption/audio/buttons)
+      </div>
+      <div
+        className="absolute text-[9px] font-mono text-pink-300/90 px-1 py-0.5 bg-black/40 rounded"
+        style={{ left: 4, top: gridTop + 4 }}
+      >
+        Grid 4:5 (1080×1350)
+      </div>
+    </div>
+  );
+}
+
 /* ── Small 9:16 canvas preview ──────────────────────────────────────── */
+
+/**
+ * Returns the load state of the display fonts the text overlays use.
+ *
+ * The families list is JOINED into a stable string for the effect's
+ * dependency array — otherwise every render passes a NEW array reference
+ * (`['Anton', ...]` literal in the call site), the effect re-fires, calls
+ * setState, triggers another render, and so on. The infinite loop freezes
+ * the page: the user reported "Edit Reel button does nothing" and that's
+ * the React main thread being pegged at 100% re-rendering.
+ */
+function useFontLoadStatus(families: string[]): Record<string, 'loading' | 'loaded' | 'unavailable'> {
+  const familiesKey = families.join('|');
+  const [status, setStatus] = useState<Record<string, 'loading' | 'loaded' | 'unavailable'>>(() => {
+    const init: Record<string, 'loading' | 'loaded' | 'unavailable'> = {};
+    for (const f of families) init[f] = 'loading';
+    return init;
+  });
+
+  useEffect(() => {
+    if (typeof document === 'undefined' || !document.fonts) return;
+    const list = familiesKey.split('|');
+    let cancelled = false;
+
+    const update = async () => {
+      const next: Record<string, 'loading' | 'loaded' | 'unavailable'> = {};
+      for (const f of list) {
+        const test = `16px "${f}"`;
+        try {
+          await document.fonts.load(test);
+          next[f] = document.fonts.check(test) ? 'loaded' : 'unavailable';
+        } catch {
+          next[f] = 'unavailable';
+        }
+      }
+      if (!cancelled) setStatus(next);
+    };
+
+    update();
+    // No `loadingdone` listener: it can re-fire when our own `load()` calls
+    // resolve, which would loop us back through update() → setState → render
+    // → effect. One-shot check at mount is enough.
+    return () => { cancelled = true; };
+  }, [familiesKey]);
+
+  return status;
+}
 
 function TimelineCanvasPreview({ reelId }: { reelId: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const animRef = useRef<number>(0);
   const [canvasDims, setCanvasDims] = useState({ width: 0, height: 0 });
+  const fontStatus = useFontLoadStatus(['Anton', 'Bebas Neue', 'Oswald']);
+  // Persist the safe-zone toggle across reloads (per-user preference).
+  const [showSafeZones, setShowSafeZones] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.localStorage.getItem('reel-show-safe-zones') === '1';
+  });
+  const toggleSafeZones = useCallback(() => {
+    setShowSafeZones((v) => {
+      const next = !v;
+      try { window.localStorage.setItem('reel-show-safe-zones', next ? '1' : '0'); } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
 
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const sourceResolution = useReelStore((s) => s.sourceResolution);
@@ -245,12 +490,59 @@ function TimelineCanvasPreview({ reelId }: { reelId: string }) {
             <TextOverlayPreview
               reelId={reelId}
               canvasWidth={canvasDims.width}
+              canvasHeight={canvasDims.height}
             />
             <ReelSubtitleBox
               reelId={reelId}
               canvasWidth={canvasDims.width}
               canvasHeight={canvasDims.height}
             />
+            {showSafeZones && (
+              <InstagramSafeZones width={canvasDims.width} height={canvasDims.height} />
+            )}
+            {/* Safe-zones toggle — small floating button in the corner so it
+                doesn't take space in the toolbar. Preview-only: never affects
+                the FFmpeg export. */}
+            <button
+              type="button"
+              onClick={toggleSafeZones}
+              className={`absolute top-1 right-1 flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
+                showSafeZones
+                  ? 'bg-pink-500/30 text-pink-200 border border-pink-400/60'
+                  : 'bg-black/40 text-muted-foreground hover:text-foreground border border-transparent'
+              }`}
+              title={showSafeZones ? 'Hide Instagram safe zones' : 'Show Instagram safe zones (grid 4:5 + UI overlays)'}
+            >
+              <Frame className="h-2.5 w-2.5" />
+              IG
+            </button>
+            {/* Font-load indicator. If any expected display font isn't loaded
+                in the browser, the preview is rendering with a fallback like
+                sans-serif — which is much wider than Anton/Bebas Neue and
+                produces a real visual mismatch versus the libass export.
+                This badge makes that state visible at a glance: ✓ all loaded,
+                ✗ at least one missing. */}
+            {(() => {
+              const states = Object.values(fontStatus);
+              const anyMissing = states.some((s) => s === 'unavailable');
+              const stillLoading = states.some((s) => s === 'loading');
+              const color = anyMissing
+                ? 'bg-red-500/40 text-red-100 border-red-400/70'
+                : stillLoading
+                  ? 'bg-yellow-500/30 text-yellow-100 border-yellow-400/60'
+                  : 'bg-green-500/30 text-green-200 border-green-400/60';
+              const labelChar = anyMissing ? '✗' : stillLoading ? '…' : '✓';
+              const detail = Object.entries(fontStatus)
+                .map(([f, s]) => `${f}: ${s}`).join(' · ');
+              return (
+                <div
+                  className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-[9px] font-mono border ${color}`}
+                  title={`Display fonts: ${detail}. If any is "unavailable" the preview is using a fallback and will look wider than the export.`}
+                >
+                  Anton {labelChar}
+                </div>
+              );
+            })()}
           </>
         )}
       </div>
@@ -611,6 +903,7 @@ function SubtitleConfigPanel({ reelId }: { reelId: string }) {
   const setReelSubtitlePreset = useReelStore((s) => s.setReelSubtitlePreset);
   const setReelSubtitleConstraints = useReelStore((s) => s.setReelSubtitleConstraints);
   const regenerateReelSubtitles = useReelStore((s) => s.regenerateReelSubtitles);
+  const syncReelSubtitlesFromBase = useReelStore((s) => s.syncReelSubtitlesFromBase);
   const updateReel = useReelStore((s) => s.updateReel);
   const params = useParams();
   const projectId = params.id as string;
@@ -714,8 +1007,25 @@ function SubtitleConfigPanel({ reelId }: { reelId: string }) {
           <Button
             size="sm" variant="outline" className="text-xs h-7"
             onClick={() => regenerateReelSubtitles(reelId)}
+            title="Re-derive from the reel's own subtitleSegments + clip boundaries (preserves text edits)"
           >
             <RefreshCw className="mr-1 h-3 w-3" /> Regen
+          </Button>
+          <Button
+            size="sm" variant="outline" className="text-xs h-7 text-amber-300 border-amber-700/40"
+            onClick={() => {
+              const ok = window.confirm(
+                'Reemplazar los subtítulos de este reel con los actuales de la transcripción.\n\n' +
+                'Esto BORRA cualquier edición que hayas hecho a los subs en este reel ' +
+                '(Delete + Close Gap, cambios de texto, etc.). Úsalo solo si el reel ' +
+                'tiene un snapshot antiguo desincronizado con la transcripción actual.\n\n' +
+                '¿Continuar?'
+              );
+              if (ok) syncReelSubtitlesFromBase(reelId);
+            }}
+            title="Replace this reel's subs with whatever the transcription currently has for the reel's time range. Destroys per-reel edits."
+          >
+            <RefreshCw className="mr-1 h-3 w-3" /> Sync from transcript
           </Button>
           {violations > 0 && (
             <Button size="sm" variant="outline" className="text-xs h-7" onClick={handleAutoSplit}>
@@ -731,6 +1041,9 @@ function SubtitleConfigPanel({ reelId }: { reelId: string }) {
 /* ── Text clip config panel ─────────────────────────────────────────── */
 
 const FONT_FAMILIES = [
+  // Display / condensed faces — both bundled in fonts/ for FFmpeg ASS render
+  // and loaded via Google Fonts in layout.tsx for browser preview.
+  'Bebas Neue', 'Anton',
   'Inter', 'Arial', 'Helvetica Neue', 'Helvetica', 'Georgia', 'Times New Roman',
   'Courier New', 'Verdana', 'Impact', 'Comic Sans MS',
   'Trebuchet MS', 'Palatino', 'Garamond', 'Bookman',
@@ -745,6 +1058,8 @@ function TextClipConfigPanel({ reelId }: { reelId: string }) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const firstSelectedId = useReelStore((s) => s.selectedClipIds[0] ?? null);
   const updateClip = useReelStore((s) => s.updateClip);
+  const library = useTextOverlayLibrary();
+  const [showLibrary, setShowLibrary] = useState(false);
 
   const clip = reel?.composition.clips.find((c) => c.id === firstSelectedId);
   if (!clip || clip.type !== 'text') return null;
@@ -776,9 +1091,109 @@ function TextClipConfigPanel({ reelId }: { reelId: string }) {
     });
   };
 
+  // Save current clip's style + content + position as a reusable preset in the
+  // browser-wide library (persists across projects and reels).
+  const handleSaveAsPreset = () => {
+    const defaultName = (clip.textContent ?? '').slice(0, 32).trim() || 'Untitled preset';
+    const name = window.prompt('Nombre del preset:', defaultName);
+    if (!name?.trim()) return;
+    addToLibrary({
+      name: name.trim(),
+      textContent: clip.textContent ?? '',
+      textStyle: ts,
+      overlayPosition: pos,
+    });
+  };
+
+  // Apply a saved preset to the currently selected clip — keeps the clip's
+  // timeline position and ID, only replaces style/content/overlayPosition.
+  const applyPreset = (preset: TextOverlayPreset) => {
+    updateClip(reelId, clip.id, {
+      textContent: preset.textContent,
+      textStyle: { ...preset.textStyle },
+      overlayPosition: { ...preset.overlayPosition },
+    });
+    setShowLibrary(false);
+  };
+
   return (
     <div className="overflow-y-auto p-3 space-y-3">
-      <h3 className="text-xs font-medium text-orange-400">Text Overlay</h3>
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-medium text-orange-400">Text Overlay</h3>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={handleSaveAsPreset}
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground border border-border rounded"
+            title="Guardar este overlay como preset (compartido entre proyectos)"
+          >
+            <BookmarkPlus className="h-2.5 w-2.5" />
+            Save preset
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowLibrary((v) => !v)}
+            className={`flex items-center gap-1 px-1.5 py-0.5 text-[10px] border rounded ${
+              showLibrary
+                ? 'border-orange-400/60 text-orange-300 bg-orange-500/10'
+                : 'border-border text-muted-foreground hover:text-foreground'
+            }`}
+            title="Aplicar un preset guardado"
+          >
+            <Library className="h-2.5 w-2.5" />
+            Library {library.length > 0 && <span className="opacity-70">({library.length})</span>}
+          </button>
+        </div>
+      </div>
+
+      {/* Library picker */}
+      {showLibrary && (
+        <div className="rounded border border-border bg-muted/20 p-2 space-y-1.5">
+          {library.length === 0 ? (
+            <p className="text-[10px] text-muted-foreground text-center py-2">
+              Sin presets guardados. Pulsa &ldquo;Save preset&rdquo; para guardar este overlay y reutilizarlo en otros reels/proyectos.
+            </p>
+          ) : (
+            library.map((preset) => (
+              <div
+                key={preset.id}
+                className="group flex items-center gap-2 px-1.5 py-1 rounded hover:bg-muted/40"
+              >
+                <button
+                  type="button"
+                  onClick={() => applyPreset(preset)}
+                  className="flex-1 min-w-0 text-left"
+                  title="Aplicar este preset al clip actual"
+                >
+                  <div className="text-[11px] truncate font-medium">{preset.name}</div>
+                  <div
+                    className="text-[9px] truncate text-muted-foreground"
+                    style={{
+                      fontFamily: `${preset.textStyle.fontFamily}, sans-serif`,
+                      fontWeight: preset.textStyle.fontWeight,
+                      color: preset.textStyle.color,
+                    }}
+                  >
+                    {preset.textContent || '(sin texto)'}
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (window.confirm(`¿Borrar preset "${preset.name}"?`)) {
+                      removeFromLibrary(preset.id);
+                    }
+                  }}
+                  className="p-1 text-muted-foreground hover:text-red-400 opacity-0 group-hover:opacity-100"
+                  title="Borrar preset"
+                >
+                  <Trash className="h-2.5 w-2.5" />
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      )}
 
       {/* Text content */}
       <div>
@@ -862,6 +1277,33 @@ function TextClipConfigPanel({ reelId }: { reelId: string }) {
               </button>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Text alignment inside the bounding box */}
+      <div>
+        <label className="block text-[10px] text-muted-foreground mb-0.5">
+          Alignment <span className="text-muted-foreground/60">(within box)</span>
+        </label>
+        <div className="grid grid-cols-3 gap-1">
+          {(['left', 'center', 'right'] as const).map((opt) => {
+            const active = (ts.textAlign ?? 'center') === opt;
+            return (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => updateTextStyle({ textAlign: opt })}
+                className={`px-2 py-1 text-[11px] rounded border transition-colors ${
+                  active
+                    ? 'border-orange-400/60 bg-orange-500/15 text-orange-300'
+                    : 'border-border text-muted-foreground hover:text-foreground'
+                }`}
+                title={`Align ${opt}`}
+              >
+                {opt[0].toUpperCase() + opt.slice(1)}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -980,38 +1422,50 @@ function TextClipConfigPanel({ reelId }: { reelId: string }) {
         </div>
       </div>
 
-      {/* Preview */}
+      {/* Preview — mirrors the canvas overlay so what you tweak here matches
+          exactly what's drawn over the video and what the export produces. */}
       <div>
         <label className="block text-[10px] text-muted-foreground mb-0.5">Preview</label>
         <div
           className="relative rounded border border-border overflow-hidden bg-black"
           style={{ height: 80 }}
         >
-          <span
+          <div
             style={{
               position: 'absolute',
               left: `${pos.x * 100}%`,
               top: `${pos.y * 100}%`,
               transform: 'translate(-50%, -50%)',
-              maxWidth: `${pos.width * 100}%`,
-              fontFamily: ts.fontFamily,
-              fontSize: Math.min(24, ts.fontSize * 0.3),
-              fontWeight: ts.fontWeight,
-              color: ts.color,
-              backgroundColor: ts.backgroundColor ?? undefined,
-              padding: ts.backgroundColor ? '2px 4px' : undefined,
-              borderRadius: ts.backgroundColor ? 2 : undefined,
-              textAlign: 'center',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-              lineHeight: ts.lineHeight ?? 1.2,
-              textShadow: ts.shadowColor
-                ? `${ts.shadowX ?? 0}px ${ts.shadowY ?? 0}px ${ts.shadowBlur ?? 0}px ${ts.shadowColor}`
-                : undefined,
+              // The mini preview width tracks pos.width so the box visually
+              // represents the real frame the text lives in.
+              width: `${pos.width * 100}%`,
+              border: '1px dashed rgba(255,200,80,0.7)',
+              boxSizing: 'border-box',
             }}
           >
-            {clip.textContent || 'Text'}
-          </span>
+            <div
+              style={{
+                width: '100%',
+                fontFamily: ts.fontFamily,
+                fontSize: Math.min(24, ts.fontSize * 0.3),
+                fontWeight: ts.fontWeight,
+                color: ts.color,
+                backgroundColor: ts.backgroundColor ?? undefined,
+                padding: ts.backgroundColor ? '2px 4px' : undefined,
+                borderRadius: ts.backgroundColor ? 2 : undefined,
+                textAlign: cssTextAlign(ts.textAlign),
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'normal',
+                overflowWrap: 'break-word',
+                lineHeight: ts.lineHeight ?? 1.2,
+                textShadow: ts.shadowColor
+                  ? `${ts.shadowX ?? 0}px ${ts.shadowY ?? 0}px ${ts.shadowBlur ?? 0}px ${ts.shadowColor}`
+                  : undefined,
+              }}
+            >
+              {clip.textContent || 'Text'}
+            </div>
+          </div>
         </div>
       </div>
     </div>

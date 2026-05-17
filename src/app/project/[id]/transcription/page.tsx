@@ -351,10 +351,19 @@ export default function TranscriptionPage() {
   // Compute total duration from segments or video
   const videoSource = currentProject.sources.find((s) => s.type === 'video');
   const audioSourceEntry = currentProject.sources.find((s) => s.type === 'audio');
-  // When using muxed video, its duration matches the audio source (not the original camera)
-  const videoDurationMs = useMuxedVideo && muxedVideoName && audioSourceEntry?.duration
-    ? audioSourceEntry.duration * 1000
-    : (videoSource?.duration ? videoSource.duration * 1000 : 0);
+  // For muxed video: prefer the duration probed at mux time (stored in
+  // sync.muxedDurationMs). With mix_* audio files the muxed output is the
+  // overlap region (camera-length), NOT the audio-source-length. The old
+  // fallback to audioSourceEntry.duration produced 98 min for a 47 min file,
+  // which is why the player showed a frozen final frame past the real end.
+  // For projects muxed before muxedDurationMs was tracked, fall back to the
+  // camera duration (correct for the common mix-file case).
+  const muxedDurationMs = currentProject.sync.muxedDurationMs;
+  const cameraDurationMs = videoSource?.duration ? videoSource.duration * 1000 : 0;
+  const audioDurationMs = audioSourceEntry?.duration ? audioSourceEntry.duration * 1000 : 0;
+  const videoDurationMs = useMuxedVideo && muxedVideoName
+    ? (muxedDurationMs ?? cameraDurationMs ?? audioDurationMs)
+    : cameraDurationMs;
   const totalDurationMs = hasSegments
     ? Math.max(...segments.map((s) => s.endMs), videoDurationMs)
     : videoDurationMs || 10000;

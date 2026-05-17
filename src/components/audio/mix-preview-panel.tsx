@@ -28,6 +28,12 @@ interface MixPreviewPanelProps {
   alignmentOffsetMs?: number;
   amplifiedBoardPath?: string;
   amplifyApplied?: boolean;
+  // File-name visibility — what's actually being fed to FFmpeg.
+  boardOriginalName?: string;
+  boardStoredName?: string;
+  rawCameraPath?: string;
+  ambientPath?: string;          // subtracted / aligned ambient (in audio/)
+  cleanedAmbientPath?: string;
 }
 
 export function MixPreviewPanel({
@@ -39,6 +45,11 @@ export function MixPreviewPanel({
   alignmentOffsetMs,
   amplifiedBoardPath,
   amplifyApplied,
+  boardOriginalName,
+  boardStoredName,
+  rawCameraPath,
+  ambientPath,
+  cleanedAmbientPath,
 }: MixPreviewPanelProps) {
   const [boardVolume, setBoardVolume] = useState(1.0);
   const [ambientVolume, setAmbientVolume] = useState(0.5);
@@ -114,6 +125,28 @@ export function MixPreviewPanel({
   ];
   const availableAmbientOptions = ambientOptions.filter((o) => o.available);
 
+  // Resolve the actual file the mix-preview API will use, mirroring its logic
+  // in src/app/api/projects/[id]/audio/mix-preview/route.ts.
+  const fileNameOf = (p?: string | null) => (p ? p.split('/').pop() ?? null : null);
+  const activeBoardName = useAmplified && amplifiedBoardPath
+    ? fileNameOf(amplifiedBoardPath)
+    : boardStoredName || boardOriginalName || null;
+  const activeBoardSubtitle = useAmplified && amplifiedBoardPath
+    ? 'amplificado'
+    : boardOriginalName ? `original (${boardOriginalName})` : null;
+  let activeAmbientName: string | null = null;
+  let activeAmbientSubtitle = '';
+  if (ambientSource === 'raw') {
+    activeAmbientName = fileNameOf(rawCameraPath);
+    activeAmbientSubtitle = 'cámara extraída sin procesar';
+  } else if (ambientSource === 'subtracted') {
+    activeAmbientName = fileNameOf(ambientPath);
+    activeAmbientSubtitle = ambientIsAlignOnly ? 'cámara alineada' : 'voz sustraída';
+  } else {
+    activeAmbientName = fileNameOf(cleanedAmbientPath);
+    activeAmbientSubtitle = 'ambiente limpio';
+  }
+
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -143,6 +176,35 @@ export function MixPreviewPanel({
                   Ajuste manual: <strong className="text-foreground">{manualAdjustMs > 0 ? '+' : ''}{manualAdjustMs}ms</strong>
                 </p>
               )}
+            </div>
+          </div>
+        </div>
+
+        {/* Active files — what the mix will actually consume */}
+        <div className="rounded-md border border-border p-3 space-y-1.5">
+          <p className="text-xs font-medium text-muted-foreground">Archivos que se mezclarán</p>
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2 text-xs">
+              <FileAudio className="h-3.5 w-3.5 text-green-400 flex-none" />
+              <span className="text-muted-foreground">Mesa:</span>
+              <span className="font-mono truncate" title={activeBoardName ?? undefined}>
+                {activeBoardName ?? '—'}
+              </span>
+              {activeBoardSubtitle && (
+                <span className="ml-auto flex-none text-[10px] text-muted-foreground/70">
+                  {activeBoardSubtitle}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              <FileAudio className="h-3.5 w-3.5 text-blue-400 flex-none" />
+              <span className="text-muted-foreground">Ambiente:</span>
+              <span className="font-mono truncate" title={activeAmbientName ?? undefined}>
+                {activeAmbientName ?? '—'}
+              </span>
+              <span className="ml-auto flex-none text-[10px] text-muted-foreground/70">
+                {activeAmbientSubtitle}
+              </span>
             </div>
           </div>
         </div>

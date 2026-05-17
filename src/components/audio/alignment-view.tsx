@@ -2,7 +2,10 @@
 
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { GitCompareArrows } from 'lucide-react';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { GitCompareArrows, AlertTriangle, Check, Loader2 } from 'lucide-react';
+import { useToast } from '@/hooks/use-toast';
 
 interface AlignmentData {
   mic_envelope: number[];
@@ -14,10 +17,34 @@ interface AlignmentData {
   camera_duration_s: number;
   overlap_s: number;
   correlation: number;
+  /** GCC-PHAT peak / noise floor. >5 = strong, <2 = unreliable. */
+  peak_to_noise?: number;
+  manual_override?: boolean;
 }
 
 interface AlignmentViewProps {
   projectId: string;
+  onOffsetChanged?: () => void;
+}
+
+// Parse "mm:ss" or "mm:ss.ms" or "123.4" (seconds) into milliseconds.
+// Returns null on invalid input.
+function parseOffsetInput(text: string): number | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  if (trimmed.includes(':')) {
+    const parts = trimmed.split(':');
+    if (parts.length !== 2) return null;
+    const m = Number(parts[0]);
+    const s = Number(parts[1]);
+    if (!Number.isFinite(m) || !Number.isFinite(s)) return null;
+    const sign = m < 0 || (parts[0].startsWith('-')) ? -1 : 1;
+    return sign * (Math.abs(m) * 60 + s) * 1000;
+  }
+  // Plain number = seconds
+  const n = Number(trimmed);
+  if (!Number.isFinite(n)) return null;
+  return n * 1000;
 }
 
 function formatTime(seconds: number): string {
@@ -180,9 +207,13 @@ function DualWaveformCanvas({
   );
 }
 
-export function AlignmentView({ projectId }: AlignmentViewProps) {
+export function AlignmentView({ projectId, onOffsetChanged }: AlignmentViewProps) {
   const [data, setData] = useState<AlignmentData | null>(null);
   const [error, setError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [manualInput, setManualInput] = useState('');
+  const [applying, setApplying] = useState(false);
+  const { toast } = useToast();
 
   useEffect(() => {
     const url = `/api/projects/${projectId}/audio/file?name=alignment_data.json&t=${Date.now()}`;
@@ -191,14 +222,64 @@ export function AlignmentView({ projectId }: AlignmentViewProps) {
         if (!res.ok) throw new Error('Not found');
         return res.json();
       })
-      .then(setData)
+      .then((d: AlignmentData) => {
+        setData(d);
+        // Pre-fill the input with the current offset in mm:ss for easy tweaking
+        const sec = d.offset_ms / 1000;
+        const sign = sec < 0 ? '-' : '';
+        const abs = Math.abs(sec);
+        const m = Math.floor(abs / 60);
+        const s = (abs % 60).toFixed(1);
+        setManualInput(`${sign}${m}:${s.padStart(4, '0')}`);
+      })
       .catch(() => setError(true));
-  }, [projectId]);
+  }, [projectId, reloadKey]);
+
+  const applyManual = useCallback(async () => {
+    const offsetMs = parseOffsetInput(manualInput);
+    if (offsetMs === null) {
+      toast({
+        title: 'Formato no válido',
+        description: 'Usa "mm:ss" (ej: 3:30) o segundos (ej: 210)',
+        variant: 'destructive',
+      });
+      return;
+    }
+    setApplying(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/audio/alignment-offset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ offsetMs }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error || `Error ${res.status}`);
+      }
+      toast({ title: 'Offset actualizado', description: `${(offsetMs / 1000).toFixed(2)}s aplicado` });
+      setReloadKey((k) => k + 1);
+      onOffsetChanged?.();
+    } catch (err) {
+      toast({
+        title: 'No se pudo aplicar',
+        description: (err as Error).message,
+        variant: 'destructive',
+      });
+    } finally {
+      setApplying(false);
+    }
+  }, [projectId, manualInput, toast, onOffsetChanged]);
 
   if (error || !data) return null;
 
   const offsetSec = Math.abs(data.offset_seconds);
   const micLeads = data.offset_ms > 0;
+  // Trust the PHAT peak/noise ratio when it's available (more reliable than
+  // the waveform correlation, which can be high by accident on near-silence).
+  const ptn = data.peak_to_noise;
+  const lowConfidence = !data.manual_override && (
+    ptn !== undefined ? ptn < 2 : data.correlation < 0.1
+  );
 
   return (
     <Card>
@@ -219,8 +300,62 @@ export function AlignmentView({ projectId }: AlignmentViewProps) {
             Solapamiento: <strong className="text-foreground">{formatTime(data.overlap_s)}</strong>
           </span>
           <span>
-            Correlación: <strong className="text-foreground">{data.correlation.toFixed(3)}</strong>
+            Correlación: <strong className="text-foreground">
+              {data.correlation.toFixed(3)}
+            </strong>
           </span>
+          {ptn !== undefined && (
+            <span>
+              Peak/ruido: <strong className={lowConfidence ? 'text-red-400' : ptn >= 5 ? 'text-green-400' : 'text-foreground'}>
+                {ptn.toFixed(1)}×
+              </strong>
+            </span>
+          )}
+          {data.manual_override && (
+            <span className="inline-flex items-center gap-1 text-amber-400">
+              <Check className="h-3 w-3" /> ajuste manual
+            </span>
+          )}
+        </div>
+
+        {/* Low-correlation warning + manual override input.
+            Correlation < 0.1 means cross-correlation found a noise peak (the
+            true alignment couldn't be detected). User must enter the real
+            offset manually. */}
+        {lowConfidence && (
+          <div className="rounded-md border border-red-500/40 bg-red-500/5 p-2.5 flex items-start gap-2">
+            <AlertTriangle className="h-4 w-4 text-red-400 mt-0.5 flex-none" />
+            <div className="text-[11px] text-muted-foreground space-y-0.5">
+              <p className="text-red-400 font-medium">
+                {ptn !== undefined
+                  ? `Pico GCC-PHAT muy débil (${ptn.toFixed(1)}× el ruido). El offset detectado probablemente es incorrecto.`
+                  : `Correlación muy baja (${data.correlation.toFixed(3)}). El offset detectado probablemente es incorrecto.`}
+              </p>
+              <p>
+                Introduce abajo el offset real entre mesa y cámara para corregirlo a mano.
+              </p>
+            </div>
+          </div>
+        )}
+
+        <div className="rounded-md border border-border p-2.5 space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium">Ajuste manual del offset</span>
+            <span className="text-[10px] text-muted-foreground">mm:ss o segundos · positivo = mesa empieza antes</span>
+          </div>
+          <div className="flex gap-2">
+            <Input
+              value={manualInput}
+              onChange={(e) => setManualInput(e.target.value)}
+              placeholder="3:30"
+              className="h-8 text-xs font-mono flex-1"
+              disabled={applying}
+              onKeyDown={(e) => { if (e.key === 'Enter') applyManual(); }}
+            />
+            <Button size="sm" variant="outline" onClick={applyManual} disabled={applying} className="h-8">
+              {applying ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Aplicar'}
+            </Button>
+          </div>
         </div>
 
         {/* Before alignment */}

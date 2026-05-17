@@ -1099,3 +1099,31 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
     return px / s.zoomLevel + s.scrollOffsetMs;
   },
 }));
+
+// Auto-recompute durationMs whenever clips or subtitle segments change.
+//
+// `durationMs` was originally set once at loadComposition() and then left
+// stale through all mutations — so after ripple-delete / split / clip removal
+// the timeline ruler and Player's durationInFrames kept reporting the
+// original (longer) duration. The "go to end" button + Player end-of-stream
+// behaviour got stuck way past the actual content.
+//
+// Strategy: subscribe to the store and re-derive durationMs from the max of
+// (clip.timelineEndMs, subtitleSegment.endMs). The guard `state.clips ===
+// prevState.clips && state.subtitleSegments === prevState.subtitleSegments`
+// prevents this firing on unrelated state changes (playback time, selection,
+// zoom). The `state.durationMs === next` check avoids a feedback loop where
+// our own setState would re-trigger the subscription.
+useComposeStore.subscribe((state, prevState) => {
+  if (
+    state.clips === prevState.clips &&
+    state.subtitleSegments === prevState.subtitleSegments
+  ) return;
+
+  let next = 0;
+  for (const c of state.clips) if (c.timelineEndMs > next) next = c.timelineEndMs;
+  for (const s of state.subtitleSegments) if (s.endMs > next) next = s.endMs;
+
+  if (state.durationMs === next) return;
+  useComposeStore.setState({ durationMs: next });
+});

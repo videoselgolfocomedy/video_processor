@@ -15,6 +15,90 @@ import type { ExportPreset, SubtitleStyle, SubtitleSegment, CropRegion, Composit
  */
 const BASE_WIDTH = 1080;
 
+/**
+ * libass interprets the ASS `Fontsize` field as the WIN-METRICS HEIGHT
+ * (usWinAscent + usWinDescent, the OS/2 "Windows clipping box") of the
+ * font, while CSS `font-size` interprets it as the EM SIZE (unitsPerEm).
+ * For display fonts like Anton, Oswald and Bebas Neue, winHeight is
+ * 1.2–1.7× UPM — so the same fontSize value produces text 30–50 %
+ * narrower (and shorter) in libass than in the browser preview.
+ *
+ * Computed per font with fontTools (usWinAscent + usWinDescent) / UPM:
+ *
+ *   Anton:        3548 / 2048 = 1.733
+ *   Oswald:       1702 / 1000 = 1.702
+ *   Montserrat:   1562 / 1000 = 1.562
+ *   Open Sans:    2953 / 2048 = 1.442
+ *   Roboto:       2701 / 2048 = 1.319
+ *   Bebas Neue:   1300 / 1000 = 1.300
+ *   Inter:        2478 / 2048 = 1.210
+ *
+ * Earlier I used the sTypo-based ratios (~1.5 for Anton) which made the
+ * export 86 % of the natural CSS size — closer but still off by ~14 %.
+ * Empirically extracting a frame from the export and measuring "PARTIDOS
+ * DE" confirmed libass really uses the usWin metrics here. Multiplying by
+ * winHeight/UPM produces a 1:1 match with the browser preview.
+ */
+const FONT_LIBASS_SIZE_RATIO: Record<string, number> = {
+  'Anton': 1.733,
+  'Bebas Neue': 1.300,
+  'Inter': 1.210,
+  'Montserrat': 1.562,
+  'Open Sans': 1.442,
+  'Oswald': 1.702,
+  'Roboto': 1.319,
+};
+
+function libassFontSize(family: string | undefined, browserFontSize: number, scale: number): number {
+  const ratio = family ? (FONT_LIBASS_SIZE_RATIO[family] ?? 1.0) : 1.0;
+  return Math.round(browserFontSize * scale * ratio);
+}
+
+/**
+ * Mark an export record as failed in project.json AND signal the job failure
+ * through the JobManager. Both are required:
+ *   - jobManager.failJob → SSE 'error' event → frontend's onError callback
+ *   - project.exports update → status='error' + error message in the queue UI
+ * Previously the three render paths only called failJob, so the queue showed
+ * a permanent spinner with no error text after a render crashed.
+ */
+async function failExport(
+  projectId: string,
+  exportId: string,
+  jobId: string,
+  errOrMessage: unknown,
+  context: string,
+): Promise<void> {
+  // Accept either an Error/unknown (from .catch) or a literal string (from
+  // timeout/validation paths) so callers can preserve specific messages.
+  const message = typeof errOrMessage === 'string'
+    ? errOrMessage
+    : `Render failed: ${(errOrMessage as Error)?.message ?? String(errOrMessage)}`;
+  console.error(`[render] ${context}:`, errOrMessage);
+  try {
+    const currentProject = await getProject(projectId);
+    if (currentProject) {
+      const exports = currentProject.exports.map((e) =>
+        e.id === exportId
+          ? {
+              ...e,
+              status: 'error' as const,
+              error: message,
+              completedAt: new Date().toISOString(),
+            }
+          : e
+      );
+      await updateProject(projectId, { exports });
+    }
+  } catch (updateErr) {
+    console.error(`[render] failExport: could not update project.exports:`, updateErr);
+  }
+  const job = jobManager.getJob(jobId);
+  if (job && job.status === 'running') {
+    jobManager.failJob(jobId, message);
+  }
+}
+
 function scaleStyleForOutput(style: SubtitleStyle, outputWidth: number): SubtitleStyle {
   const s = outputWidth / BASE_WIDTH;
   if (s === 1) return style;
@@ -270,7 +354,7 @@ async function runRender(options: RenderOptions): Promise<void> {
                 x: tc.overlayPosition?.x ?? 0.5,
                 y: tc.overlayPosition?.y ?? 0.5,
                 width: tc.overlayPosition?.width ?? 0.8,
-                fontSize: Math.round((tc.textStyle?.fontSize ?? 40) * scale),
+                fontSize: libassFontSize(tc.textStyle?.fontFamily, tc.textStyle?.fontSize ?? 40, scale),
                 fontFamily: tc.textStyle?.fontFamily ?? 'Inter',
                 fontWeight: tc.textStyle?.fontWeight ?? 400,
                 color: tc.textStyle?.color ?? '#ffffff',
@@ -280,11 +364,24 @@ async function runRender(options: RenderOptions): Promise<void> {
                 shadowBlur: tc.textStyle?.shadowBlur,
                 shadowColor: tc.textStyle?.shadowColor,
                 lineHeight: tc.textStyle?.lineHeight,
+                textAlign: tc.textStyle?.textAlign,
               });
             }
           }
         }
         console.log(`[render] ${assTextOverlays.length} text overlay(s) for ASS export`);
+        // Verbose dump: useful for diagnosing preview/export mismatches —
+        // print each overlay's position, size, font and timing as the
+        // export pipeline sees them, so the user can compare against the
+        // values shown in the Text Overlay panel.
+        for (const ov of assTextOverlays) {
+          console.log(
+            `[render]   text="${ov.text.replace(/\n/g, '\\n').slice(0, 40)}" ` +
+            `pos=(${ov.x.toFixed(3)}, ${ov.y.toFixed(3)}) w=${ov.width?.toFixed(3)} ` +
+            `font=${ov.fontFamily}/${ov.fontSize}px align=${ov.textAlign ?? 'center'} ` +
+            `t=${ov.startMs}-${ov.endMs}ms`
+          );
+        }
       }
 
       // Generate ASS for the concatenated output (subtitles + text overlays)
@@ -417,11 +514,11 @@ async function runRender(options: RenderOptions): Promise<void> {
 
       jobManager.setProcess(jobId, reelProc);
 
-      const timeout = setTimeout(() => {
+      const timeout = setTimeout(async () => {
         const job = jobManager.getJob(jobId);
         if (job && job.status === 'running') {
           reelProc.kill('SIGTERM');
-          jobManager.failJob(jobId, 'Render timed out (2h limit)');
+          await failExport(projectId, exportId, jobId, 'Render timed out (2h limit)', 'Reel render timeout');
         }
       }, RENDER_TIMEOUT_MS);
 
@@ -439,13 +536,9 @@ async function runRender(options: RenderOptions): Promise<void> {
           }
           jobManager.completeJob(jobId, { outputPath });
         })
-        .catch((err) => {
+        .catch(async (err) => {
           clearTimeout(timeout);
-          console.error(`[render] Reel render failed:`, err);
-          const job = jobManager.getJob(jobId);
-          if (job && job.status === 'running') {
-            jobManager.failJob(jobId, `Render failed: ${(err as Error).message}`);
-          }
+          await failExport(projectId, exportId, jobId, err, 'Reel render failed');
         })
         .finally(async () => {
           if (assFilePath2) {
@@ -566,7 +659,7 @@ async function runRender(options: RenderOptions): Promise<void> {
                 x: tc.overlayPosition?.x ?? 0.5,
                 y: tc.overlayPosition?.y ?? 0.5,
                 width: tc.overlayPosition?.width ?? 0.8,
-                fontSize: Math.round((tc.textStyle?.fontSize ?? 40) * scale),
+                fontSize: libassFontSize(tc.textStyle?.fontFamily, tc.textStyle?.fontSize ?? 40, scale),
                 fontFamily: tc.textStyle?.fontFamily ?? 'Inter',
                 fontWeight: tc.textStyle?.fontWeight ?? 400,
                 color: tc.textStyle?.color ?? '#ffffff',
@@ -576,6 +669,7 @@ async function runRender(options: RenderOptions): Promise<void> {
                 shadowBlur: tc.textStyle?.shadowBlur,
                 shadowColor: tc.textStyle?.shadowColor,
                 lineHeight: tc.textStyle?.lineHeight,
+                textAlign: tc.textStyle?.textAlign,
               });
             }
           }
@@ -704,11 +798,11 @@ async function runRender(options: RenderOptions): Promise<void> {
 
       jobManager.setProcess(jobId, composeProc);
 
-      const composeTimeout = setTimeout(() => {
+      const composeTimeout = setTimeout(async () => {
         const job = jobManager.getJob(jobId);
         if (job && job.status === 'running') {
           composeProc.kill('SIGTERM');
-          jobManager.failJob(jobId, 'Render timed out (2h limit)');
+          await failExport(projectId, exportId, jobId, 'Render timed out (2h limit)', 'Compose render timeout');
         }
       }, RENDER_TIMEOUT_MS);
 
@@ -726,13 +820,9 @@ async function runRender(options: RenderOptions): Promise<void> {
           }
           jobManager.completeJob(jobId, { outputPath });
         })
-        .catch((err) => {
+        .catch(async (err) => {
           clearTimeout(composeTimeout);
-          console.error(`[render] YouTube compose render failed:`, err);
-          const job = jobManager.getJob(jobId);
-          if (job && job.status === 'running') {
-            jobManager.failJob(jobId, `Render failed: ${(err as Error).message}`);
-          }
+          await failExport(projectId, exportId, jobId, err, 'YouTube compose render failed');
         })
         .finally(async () => {
           if (composeAssFilePath) {
@@ -802,11 +892,11 @@ async function runRender(options: RenderOptions): Promise<void> {
 
   jobManager.setProcess(jobId, proc);
 
-  const timeout = setTimeout(() => {
+  const timeout = setTimeout(async () => {
     const job = jobManager.getJob(jobId);
     if (job && job.status === 'running') {
       proc.kill('SIGTERM');
-      jobManager.failJob(jobId, 'Render timed out (2h limit)');
+      await failExport(projectId, exportId, jobId, 'Render timed out (2h limit)', 'Simple render timeout');
     }
   }, RENDER_TIMEOUT_MS);
 
@@ -830,12 +920,9 @@ async function runRender(options: RenderOptions): Promise<void> {
       }
       jobManager.completeJob(jobId, { outputPath });
     })
-    .catch((err) => {
+    .catch(async (err) => {
       clearTimeout(timeout);
-      const job = jobManager.getJob(jobId);
-      if (job && job.status === 'running') {
-        jobManager.failJob(jobId, `Render failed: ${(err as Error).message}`);
-      }
+      await failExport(projectId, exportId, jobId, err, 'Simple render failed');
     })
     .finally(async () => {
       if (assFilePath) {

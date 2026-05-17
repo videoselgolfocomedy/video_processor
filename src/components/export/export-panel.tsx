@@ -148,6 +148,16 @@ export function ExportPanel({
   const sourceWidth = videoSource?.resolution?.width || 1920;
   const sourceHeight = videoSource?.resolution?.height || 1080;
 
+  // Warn when the active preset would upscale the source: the export gets
+  // bigger (4× pixels = ~6× file size for 1080p→4K) without any real detail
+  // gain — only blockier pixels. libx264 happily encodes the upscale but the
+  // user perceives "they look the same" because the source pixels are the
+  // ceiling.
+  const upscaling = !!activePreset && activePreset.width > sourceWidth;
+  const upscaleFactor = activePreset && upscaling
+    ? (activePreset.width / sourceWidth).toFixed(1)
+    : null;
+
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -186,6 +196,21 @@ export function ExportPanel({
             </button>
           ))}
         </div>
+
+        {/* Upscale warning */}
+        {upscaling && activePreset && (
+          <div className="rounded-md border border-yellow-500/40 bg-yellow-500/5 p-2.5 flex items-start gap-2">
+            <Info className="h-3.5 w-3.5 text-yellow-400 mt-0.5 flex-none" />
+            <div className="text-[11px] text-muted-foreground">
+              <p className="text-yellow-400 font-medium">
+                Upscale {upscaleFactor}×: fuente {sourceWidth}×{sourceHeight} → preset {activePreset.width}×{activePreset.height}
+              </p>
+              <p>
+                Tu cámara grabó en {sourceHeight}p. El export no añade detalle real — solo ocupa más espacio (≈{Math.round(Number(upscaleFactor) ** 2)}× el tamaño de un export a la resolución nativa). Recomendado: usa el preset {sourceHeight}p para mismo resultado visual y archivo más pequeño.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Range selector */}
         {activePreset && (

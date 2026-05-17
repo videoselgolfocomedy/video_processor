@@ -17,7 +17,7 @@ interface BitsSuggestionPanelProps {
   onCreateReel: (label: string, startMs: number, endMs: number, sourceStartMs?: number, sourceEndMs?: number) => void;
 }
 
-interface BitWithCoverage extends BitDefinition {
+interface BitWithCoverage extends BitWithSourceTimes {
   coverage: number;
 }
 
@@ -26,18 +26,19 @@ export function BitsSuggestionPanel({ bits, compositionClips, onCreateReel }: Bi
   const mainClips = compositionClips.filter((c) => c.trackId === 'v1');
   const hasComposition = mainClips.length > 0;
 
-  // Helper: map compose timeline time → source time using compose clips
-  const composeToSource = (composeMs: number): number => {
-    for (const clip of mainClips) {
-      if (composeMs >= clip.timelineStartMs && composeMs <= clip.timelineEndMs) {
-        return clip.sourceInMs + (composeMs - clip.timelineStartMs);
-      }
-    }
-    return composeMs; // fallback: already source time
-  };
-
-  // Compute overlap coverage for each bit
-  // If no compose editing done yet, show all bits at 100%
+  // Compute overlap coverage for each bit.
+  //
+  // CRITICAL: bits generated with source='compose' have startMs/endMs in
+  // COMPOSE timeline space (relative to the edited timeline), not source
+  // space. The /bits route enriches them with sourceStartMs/sourceEndMs in
+  // source space. Clip ranges (sourceInMs/sourceOutMs) are in source space.
+  // To compute the overlap we must compare in the SAME coordinate space —
+  // prefer the bit's source-mapped times when available, otherwise assume
+  // the bit times are already source-space (bits generated from 'full').
+  //
+  // Previous bug: comparing bit.startMs (compose) against clip.sourceInMs
+  // (source) → overlap=0 for every bit → all 9 bits filtered out → the
+  // panel rendered "No bits identified" despite bits.length===9 in state.
   const bitsWithCoverage: BitWithCoverage[] = bits
     .map((bit) => {
       const bitDuration = bit.endMs - bit.startMs;
@@ -47,16 +48,21 @@ export function BitsSuggestionPanel({ bits, compositionClips, onCreateReel }: Bi
         return { ...bit, coverage: 1 };
       }
 
+      const bitSrcStart = bit.sourceStartMs ?? bit.startMs;
+      const bitSrcEnd = bit.sourceEndMs ?? bit.endMs;
+      const bitSrcDuration = bitSrcEnd - bitSrcStart;
+      if (bitSrcDuration <= 0) return null;
+
       let overlapSum = 0;
       for (const clip of mainClips) {
         const overlap = Math.max(
           0,
-          Math.min(bit.endMs, clip.sourceOutMs) - Math.max(bit.startMs, clip.sourceInMs)
+          Math.min(bitSrcEnd, clip.sourceOutMs) - Math.max(bitSrcStart, clip.sourceInMs)
         );
         overlapSum += overlap;
       }
 
-      const coverage = overlapSum / bitDuration;
+      const coverage = overlapSum / bitSrcDuration;
       if (coverage <= 0) return null;
 
       return { ...bit, coverage };
@@ -116,10 +122,13 @@ export function BitsSuggestionPanel({ bits, compositionClips, onCreateReel }: Bi
                 variant="outline"
                 className="h-6 px-2 text-[10px]"
                 onClick={() => {
-                  // Always compute source times from compose clips — more reliable
-                  // than depending on sourceStartMs stored in the bit
-                  const srcStart = hasComposition ? composeToSource(bit.startMs) : bit.startMs;
-                  const srcEnd = hasComposition ? composeToSource(bit.endMs) : bit.endMs;
+                  // Source times for muxed-video seeking. Prefer the value the
+                  // /bits route enriched the bit with (computed from the compose
+                  // clips at detection time, which is the authoritative mapping);
+                  // fall back to bit.startMs/endMs which are already source-space
+                  // when bits were detected from source='full'.
+                  const srcStart = bit.sourceStartMs ?? bit.startMs;
+                  const srcEnd = bit.sourceEndMs ?? bit.endMs;
                   onCreateReel(bit.label, bit.startMs, bit.endMs, srcStart, srcEnd);
                 }}
               >

@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs/promises';
-import { createReadStream } from 'fs';
+import { createReadStream, createWriteStream } from 'fs';
+import os from 'os';
 import path from 'path';
+import { v4 as uuidv4 } from 'uuid';
 import archiver from 'archiver';
+import Busboy from 'busboy';
 import { Readable } from 'stream';
 import { getProject, getProjectDir } from '@/server/project-manager';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 /**
  * GET /api/projects/[id]/backup/media → Heavy media bundle (.zip)
@@ -128,6 +134,59 @@ const unzipper = require('unzipper');
 
 const ALLOWED_PREFIXES = ['source/', 'audio/', 'export/', 'compose/', 'transcription/'];
 
+// Stream the multipart upload to a temp file on disk via busboy. We can't use
+// `request.formData()` here because Next's built-in parser buffers the whole
+// body in memory and rejects multi-GB media zips with "Failed to parse body as
+// FormData".
+function streamZipToTempFile(request: NextRequest): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const contentType = request.headers.get('content-type') || '';
+    const busboy = Busboy({ headers: { 'content-type': contentType } });
+
+    const tmpPath = path.join(os.tmpdir(), `media-import-${uuidv4()}.zip`);
+    let fileSeen = false;
+    let writePromise: Promise<void> | null = null;
+
+    busboy.on('file', (_fieldname, stream, _info) => {
+      if (fileSeen) {
+        stream.resume();
+        return;
+      }
+      fileSeen = true;
+      const writeStream = createWriteStream(tmpPath);
+      stream.pipe(writeStream);
+      writePromise = new Promise<void>((res, rej) => {
+        writeStream.on('finish', () => res());
+        writeStream.on('error', rej);
+        stream.on('error', rej);
+      });
+    });
+
+    busboy.on('finish', async () => {
+      if (!writePromise) {
+        reject(new Error('No file received'));
+        return;
+      }
+      try {
+        await writePromise;
+        resolve(tmpPath);
+      } catch (err) {
+        reject(err);
+      }
+    });
+
+    busboy.on('error', reject);
+
+    const body = request.body;
+    if (!body) {
+      reject(new Error('No request body'));
+      return;
+    }
+    const nodeStream = Readable.fromWeb(body as import('stream/web').ReadableStream);
+    nodeStream.pipe(busboy);
+  });
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -139,16 +198,12 @@ export async function POST(
   }
   const projectDir = getProjectDir(id);
 
+  let tmpPath: string | null = null;
   try {
-    const formData = await request.formData();
-    const file = formData.get('file') as File | null;
-    if (!file) {
-      return NextResponse.json({ error: 'No file provided' }, { status: 400 });
-    }
+    tmpPath = await streamZipToTempFile(request);
 
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    const directory = await unzipper.Open.buffer(buffer);
+    // Open the zip from disk so we don't have to load multi-GB into memory.
+    const directory = await unzipper.Open.file(tmpPath);
 
     const written: { path: string; size: number }[] = [];
     const skipped: { path: string; reason: string }[] = [];
@@ -157,8 +212,6 @@ export async function POST(
       const entryPath: string = entry.path;
       if (entry.type === 'Directory') continue;
 
-      // Reject entries that aren't in an allowed project subdirectory or that
-      // try to escape via .. — basic safety against malicious zips.
       const normalised = path.posix.normalize(entryPath);
       if (normalised.startsWith('..') || normalised.startsWith('/') || normalised.includes('/../')) {
         skipped.push({ path: entryPath, reason: 'unsafe path' });
@@ -171,9 +224,19 @@ export async function POST(
 
       const targetPath = path.join(projectDir, normalised);
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
-      const content = await entry.buffer();
-      await fs.writeFile(targetPath, content);
-      written.push({ path: normalised, size: content.length });
+
+      // Stream entry → file instead of buffering each one in memory.
+      const stat = await new Promise<{ size: number }>((res, rej) => {
+        const out = createWriteStream(targetPath);
+        let size = 0;
+        const src = entry.stream();
+        src.on('data', (chunk: Buffer) => { size += chunk.length; });
+        src.on('error', rej);
+        out.on('error', rej);
+        out.on('finish', () => res({ size }));
+        src.pipe(out);
+      });
+      written.push({ path: normalised, size: stat.size });
     }
 
     return NextResponse.json({
@@ -189,5 +252,9 @@ export async function POST(
       { error: `Failed to import media zip: ${(err as Error).message}` },
       { status: 500 }
     );
+  } finally {
+    if (tmpPath) {
+      try { await fs.unlink(tmpPath); } catch { /* ignore */ }
+    }
   }
 }

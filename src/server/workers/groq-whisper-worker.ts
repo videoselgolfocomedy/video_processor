@@ -5,6 +5,7 @@ import { jobManager } from '@/server/job-manager';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
 import { convertForGroq } from '@/server/ffmpeg-wrapper';
 import { resolveTranscriptionAudio } from '@/server/workers/whisper-worker';
+import { resolveKey } from '@/server/settings-manager';
 import type { SubtitleSegment } from '@/types/project';
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
@@ -26,9 +27,14 @@ export interface GroqWhisperOptions {
 export async function runGroqTranscription(options: GroqWhisperOptions): Promise<void> {
   const { projectId, jobId, language, model } = options;
 
-  const apiKey = process.env.GROQ_API_KEY;
+  // Read the key from settings.json (Settings UI) or fall back to env var.
+  // The Settings UI is the primary source; .env.local is the legacy fallback.
+  const apiKey = await resolveKey('groq');
   if (!apiKey) {
-    jobManager.failJob(jobId, 'GROQ_API_KEY no configurada. Añade GROQ_API_KEY=gsk_... en .env.local');
+    jobManager.failJob(
+      jobId,
+      'Groq API key no configurada. Añádela en /settings o en GROQ_API_KEY=gsk_... en .env.local'
+    );
     return;
   }
 

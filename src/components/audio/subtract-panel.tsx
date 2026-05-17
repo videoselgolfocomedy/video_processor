@@ -325,7 +325,7 @@ export function SubtractPanel({
             </div>
 
             {/* Alignment visualization: before & after sync */}
-            <AlignmentView projectId={projectId} />
+            <AlignmentView projectId={projectId} onOffsetChanged={onComplete} />
 
             {/* Result waveform + player */}
             {ambientUrl && ambientFileName && (

@@ -3,6 +3,7 @@ import { getProject, updateProject, getProjectDir } from '@/server/project-manag
 import { jobManager } from '@/server/job-manager';
 import { runWhisperTranscription, resolveTranscriptionAudio } from '@/server/workers/whisper-worker';
 import { runGroqTranscription } from '@/server/workers/groq-whisper-worker';
+import { resolveKey } from '@/server/settings-manager';
 
 /**
  * GET /api/projects/[id]/transcribe
@@ -22,11 +23,17 @@ export async function GET(
   const audioDir = getProjectDir(id, 'audio');
   const resolved = resolveTranscriptionAudio(project, sourceDir, audioDir);
 
+  // Check both env var and the key saved via /settings (resolveKey reads both).
+  // The rest of the codebase already uses resolveKey('groq') — this endpoint
+  // was the outlier, leaving the UI permanently disabled even when the user
+  // had pasted the key into Settings.
+  const groqKey = await resolveKey('groq');
+
   return NextResponse.json({
     audioSource: resolved
       ? { path: resolved.path, label: resolved.label, fileName: resolved.path.split('/').pop() }
       : null,
-    groqAvailable: !!process.env.GROQ_API_KEY,
+    groqAvailable: !!groqKey,
   });
 }
 

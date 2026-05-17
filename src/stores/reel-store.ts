@@ -26,6 +26,30 @@ const defaultReelTracks: CompositionTrack[] = [
 
 const defaultReelStyle = STYLE_PRESETS.find((p) => p.id === 'reel-punchline')!.style;
 
+/**
+ * Effective playable duration of a reel = max(clip.timelineEndMs, subtitle.endMs).
+ *
+ * `reel.endMs - reel.startMs` is the SOURCE WINDOW the reel sliced from the
+ * muxed video (used for the trim bar). After internal edits the user may have
+ * removed content from the end, so the playable timeline can be shorter than
+ * the source window. The controls' timecode display and the video-player end
+ * boundary should reflect the edited length, not the original slice.
+ */
+export function getReelEffectiveDurationMs(reel: ReelDefinition | undefined): number {
+  if (!reel) return 0;
+  const sourceWindow = reel.endMs - reel.startMs;
+  let maxEnd = 0;
+  for (const c of reel.composition?.clips ?? []) {
+    if (c.timelineEndMs > maxEnd) maxEnd = c.timelineEndMs;
+  }
+  for (const s of reel.subtitleSegments ?? []) {
+    if (s.endMs > maxEnd) maxEnd = s.endMs;
+  }
+  // If the reel hasn't been edited (no clips populated yet), fall back to the
+  // source-window length so a fresh reel still reports its full size.
+  return maxEnd > 0 ? maxEnd : sourceWindow;
+}
+
 interface UndoEntry {
   reel: ReelDefinition;
   selectedClipIds: string[];
@@ -63,6 +87,17 @@ interface ReelStore {
     durationMs: number,
     sourceRes: { width: number; height: number } | null
   ) => void;
+  /**
+   * Refresh ONLY `baseSegments` (and durationMs) from the parent
+   * transcription, without touching any reel's saved subtitleSegments.
+   * Used by the /reels page effect to keep baseSegments live so that
+   * createReel always operates against the latest transcription, while
+   * existing reels remain immutable to outside changes.
+   */
+  refreshBaseSegments: (
+    baseSegments: SubtitleSegment[],
+    durationMs?: number
+  ) => void;
   selectReel: (id: string | null) => void;
   markClean: () => void;
 
@@ -92,6 +127,7 @@ interface ReelStore {
 
   // Subtitles
   regenerateReelSubtitles: (reelId: string) => void;
+  syncReelSubtitlesFromBase: (reelId: string) => void;
   updateReelSubtitleSegment: (reelId: string, segId: string, updates: Partial<SubtitleSegment>) => void;
   setReelSubtitleStyle: (reelId: string, style: SubtitleStyle) => void;
   setReelSubtitlePreset: (reelId: string, presetId: string, style: SubtitleStyle) => void;
@@ -272,6 +308,13 @@ export const useReelStore = create<ReelStore>((set, get) => ({
   redoStack: [],
 
   loadReels: (reels, baseSegments, durationMs, sourceRes) => {
+    // Load reels AS-IS from disk. Earlier I tried to auto-refresh each
+    // reel's subtitleSegments from baseSegments on every load — that fixed
+    // stale-snapshot reels but ALSO blew away any per-reel edits the user
+    // had made (Delete + Close Gap on subs, text rewrites, etc.) every
+    // time they navigated to /export and back. Manual edits matter more
+    // than auto-syncing, so loading is now read-only. A stale-snapshot
+    // reel can be re-synced explicitly via `syncReelSubtitlesFromBase`.
     set({
       reels,
       baseSegments,
@@ -283,6 +326,44 @@ export const useReelStore = create<ReelStore>((set, get) => ({
       dirty: false,
       selectedClipIds: [],
     });
+  },
+
+  refreshBaseSegments: (baseSegments, durationMs) => {
+    // Touch ONLY baseSegments (and optionally durationMs). Existing reels'
+    // `subtitleSegments` are left exactly as they are on disk. This is the
+    // hook the page uses to keep baseSegments live so that the NEXT
+    // createReel call snapshots against the latest transcription — without
+    // ever wiping a reel the user has already edited.
+    set((s) => ({
+      baseSegments,
+      baseDurationMs: durationMs ?? s.baseDurationMs,
+    }));
+  },
+
+  /**
+   * Re-derive a reel's subtitleSegments from the current baseSegments
+   * (= transcription.segments). Use when the parent transcription has
+   * changed since the reel was created and the reel's snapshot is stale.
+   * DESTROYS per-reel edits to those subs — the caller (UI button) should
+   * confirm with the user first.
+   */
+  syncReelSubtitlesFromBase: (reelId: string) => {
+    const state = get();
+    const reel = state.reels.find((r) => r.id === reelId);
+    if (!reel) return;
+    const fresh = filterSegmentsToRange(
+      state.baseSegments,
+      reel.startMs,
+      reel.endMs,
+      reel.subtitleConstraints
+    );
+    set((s) => ({
+      reels: updateReelInList(s.reels, reelId, (r) => ({
+        ...r,
+        subtitleSegments: fresh,
+      })),
+      dirty: true,
+    }));
   },
 
   selectReel: (id) => set({ activeReelId: id, currentTimeMs: 0, isPlaying: false, selectedClipIds: [], selectedSubtitleIds: [], phase: 'setup' }),

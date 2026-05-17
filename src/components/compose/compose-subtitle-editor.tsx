@@ -122,7 +122,13 @@ export function ComposeSubtitleEditor() {
               }}
             >
               <div className="flex flex-col gap-0.5 flex-shrink-0 self-start pt-0.5">
+                {/* `key` incorporates the value so the uncontrolled input remounts
+                    whenever the underlying time changes externally (e.g. after
+                    rippleDelete shifts subtitles to close a gap). Without this
+                    the displayed timestamp would be frozen at the value when
+                    the row first rendered. */}
                 <input
+                  key={`start-${seg.startMs}`}
                   className="text-[10px] text-muted-foreground tabular-nums w-20 bg-transparent outline-none border-b border-transparent hover:border-border focus:border-primary"
                   defaultValue={formatTimestamp(seg.startMs)}
                   onBlur={(e) => handleTimeChange(seg.id, 'startMs', e.target.value)}
@@ -130,6 +136,7 @@ export function ComposeSubtitleEditor() {
                   onFocus={() => { userInteracting.current = true; }}
                 />
                 <input
+                  key={`end-${seg.endMs}`}
                   className="text-[10px] text-muted-foreground tabular-nums w-20 bg-transparent outline-none border-b border-transparent hover:border-border focus:border-primary"
                   defaultValue={formatTimestamp(seg.endMs)}
                   onBlur={(e) => handleTimeChange(seg.id, 'endMs', e.target.value)}

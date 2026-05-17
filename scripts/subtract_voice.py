@@ -102,7 +102,7 @@ def align_signals(mic: np.ndarray, camera: np.ndarray, sample_rate: int) -> tupl
             env[i] = np.sqrt(np.mean(frame ** 2))
         return env
 
-    log_progress(8, "Fase 1: Alineación gruesa por envolventes de energía...")
+    log_progress(8, "Fase 1: Alineación gruesa GCC-PHAT sobre envolventes...")
     mic_env = energy_envelope(mic)
     cam_env = energy_envelope(camera)
 
@@ -111,16 +111,42 @@ def align_signals(mic: np.ndarray, camera: np.ndarray, sample_rate: int) -> tupl
     log_progress(9, f"Envolventes: mic={len(mic_env)} frames ({mic_dur:.0f}s), "
                      f"cam={len(cam_env)} frames ({cam_dur:.0f}s)")
 
+    # Normalize: zero-mean, unit-variance. Removes DC bias from constantly-loud
+    # regions (compressed mic) that otherwise dominate the cross-correlation.
+    mic_env_n = (mic_env - mic_env.mean()) / (mic_env.std() + 1e-10)
+    cam_env_n = (cam_env - cam_env.mean()) / (cam_env.std() + 1e-10)
+
     n = len(mic_env) + len(cam_env) - 1
     fft_size = 1
     while fft_size < n:
         fft_size *= 2
 
-    mic_fft = np.fft.rfft(mic_env, fft_size)
-    cam_fft = np.fft.rfft(cam_env, fft_size)
-    corr = np.fft.irfft(cam_fft * np.conj(mic_fft), fft_size)
+    mic_fft = np.fft.rfft(mic_env_n, fft_size)
+    cam_fft = np.fft.rfft(cam_env_n, fft_size)
 
-    peak_idx = np.argmax(np.abs(corr))
+    # GCC-PHAT: phase-only transform. Whitens the cross-spectrum so all
+    # frequency components contribute equally — much sharper, more reliable
+    # peaks than plain cross-correlation, especially when one signal has very
+    # different dynamics from the other (compressed mic vs. ambient mic).
+    cross_spec = cam_fft * np.conj(mic_fft)
+    cross_spec_phat = cross_spec / (np.abs(cross_spec) + 1e-10)
+    corr = np.fft.irfft(cross_spec_phat, fft_size)
+    abs_corr = np.abs(corr)
+
+    # Plausibility filter: a real offset must keep at least 30% of the shorter
+    # signal overlapping with the longer one. Without this, a noise peak can
+    # land at an absurd offset where the signals barely intersect.
+    indices = np.arange(fft_size)
+    offset_envs = np.where(indices > fft_size // 2, indices - fft_size, indices)
+    candidate_offsets = -offset_envs * hop_len  # samples
+    pos_overlap = np.minimum(len(mic) - candidate_offsets, len(camera))
+    neg_overlap = np.minimum(len(mic), len(camera) + candidate_offsets)
+    overlaps = np.where(candidate_offsets > 0, pos_overlap, neg_overlap)
+    min_overlap = int(0.3 * min(len(mic), len(camera)))
+    plausible = overlaps >= min_overlap
+
+    masked_corr = np.where(plausible, abs_corr, 0)
+    peak_idx = int(np.argmax(masked_corr))
     if peak_idx > fft_size // 2:
         offset_env = peak_idx - fft_size
     else:
@@ -128,7 +154,15 @@ def align_signals(mic: np.ndarray, camera: np.ndarray, sample_rate: int) -> tupl
 
     coarse_offset = -offset_env * hop_len
     coarse_ms = round(coarse_offset / sample_rate * 1000, 1)
-    log_progress(11, f"Offset grueso: {coarse_ms}ms ({coarse_ms/1000:.1f}s)")
+
+    # Diagnostic: peak sharpness. With PHAT, a real alignment shows a peak
+    # several × the median noise floor; a failed alignment is ~1×.
+    peak_value = float(masked_corr[peak_idx])
+    pos_vals = masked_corr[masked_corr > 0]
+    median_noise = float(np.median(pos_vals)) if pos_vals.size > 0 else 0.0
+    peak_to_noise = peak_value / (median_noise + 1e-10)
+    log_progress(11, f"Offset grueso: {coarse_ms}ms ({coarse_ms/1000:.1f}s), "
+                     f"peak/noise={peak_to_noise:.1f}")
 
     # === Stage 2: Fine alignment via waveform cross-correlation ===
     # Use a ±100ms search window around the coarse offset
@@ -215,7 +249,7 @@ def align_signals(mic: np.ndarray, camera: np.ndarray, sample_rate: int) -> tupl
     corr_coeff = np.abs(np.dot(a, b)) / (norm + 1e-10) if norm > 0 else 0
 
     log_progress(15, f"Alineado: offset={offset_sec}s, overlap={min_len/sample_rate:.1f}s, "
-                     f"correlación={corr_coeff:.3f}")
+                     f"correlación={corr_coeff:.3f}, peak/noise={peak_to_noise:.1f}")
 
     # Visualization data
     alignment_data = {
@@ -230,6 +264,10 @@ def align_signals(mic: np.ndarray, camera: np.ndarray, sample_rate: int) -> tupl
         "camera_duration_s": round(len(camera) / sample_rate, 1),
         "overlap_s": round(min_len / sample_rate, 1),
         "correlation": round(float(corr_coeff), 4),
+        # GCC-PHAT peak vs. noise floor — better confidence indicator than the
+        # waveform correlation, since it measures how distinctive the chosen
+        # offset is among all possible shifts. >5 = trustworthy, <2 = noise.
+        "peak_to_noise": round(float(peak_to_noise), 2),
     }
 
     return aligned_mic, aligned_camera, offset_samples, offset_ms, alignment_data

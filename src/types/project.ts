@@ -221,6 +221,7 @@ export interface SyncState {
   alignTrackId?: string;     // camera audio (to align)
   mixedAudioPath?: string;
   muxedVideoPath?: string;   // video with replaced audio track
+  muxedDurationMs?: number;  // actual duration of the muxed file (probed after mux completes)
   selectedAudioPath?: string; // audio file chosen for mux (used as transcription source)
   // Mix volumes: board = clean voice from desk, ambient = room sound from camera
   boardVolume: number;
@@ -342,6 +343,14 @@ export interface CompositionClip {
     shadowBlur?: number;
     shadowX?: number;
     shadowY?: number;
+    /**
+     * Horizontal alignment of the text inside its bounding box.
+     * The box is centered on overlayPosition (x, y); textAlign controls how
+     * the glyphs sit inside that box. Mirrors CSS text-align semantics and
+     * libass alignment (4/5/6 for middle-left/center/right).
+     * @default 'center'
+     */
+    textAlign?: 'left' | 'center' | 'right';
   };
   // Overlay position for image/gif/text
   overlayPosition?: {

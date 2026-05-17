@@ -1,9 +1,36 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { spawn, execFileSync } from 'child_process';
+import { spawn, execFileSync, execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs/promises';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
 import { jobManager } from '@/server/job-manager';
+
+/** Return available bytes on the filesystem containing `dir`. 0 on failure. */
+function getFreeBytes(dir: string): number {
+  try {
+    // -P forces POSIX output; -k gives 1024-byte blocks (Linux default; macOS
+    // df also accepts -k and -P).
+    const out = execSync(`df -Pk "${dir}"`, { encoding: 'utf-8', timeout: 5000 });
+    const lines = out.trim().split('\n');
+    if (lines.length < 2) return 0;
+    const cols = lines[lines.length - 1].split(/\s+/);
+    // Columns: Filesystem 1024-blocks Used Available Capacity Mounted-on
+    const availKb = parseInt(cols[3], 10);
+    return Number.isFinite(availKb) ? availKb * 1024 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Best-effort file size in bytes. 0 on failure. */
+async function fileSize(p: string): Promise<number> {
+  try {
+    const s = await fs.stat(p);
+    return s.size;
+  } catch {
+    return 0;
+  }
+}
 
 function getFFmpegPath(): string {
   try {
@@ -59,12 +86,14 @@ export async function POST(
   const { id } = await params;
   const project = await getProject(id);
   if (!project) {
+    console.error(`[mux] 404: project not found id=${id}`);
     return NextResponse.json({ error: 'Project not found' }, { status: 404 });
   }
 
   const body = await request.json();
   const { audioFileName } = body;
   if (!audioFileName) {
+    console.error(`[mux] 400: missing audioFileName for project ${id}`);
     return NextResponse.json({ error: 'Missing audioFileName' }, { status: 400 });
   }
 
@@ -73,6 +102,7 @@ export async function POST(
     (s) => s.role === 'camera' && s.type === 'video'
   );
   if (!cameraSource) {
+    console.error(`[mux] 400: no camera source in project ${id}. sources=${project.sources.map(s => `${s.role}/${s.type}`).join(',')}`);
     return NextResponse.json({ error: 'No hay video de cámara en el proyecto' }, { status: 400 });
   }
 
@@ -89,24 +119,58 @@ export async function POST(
   try {
     await fs.access(audioPath);
   } catch {
-    return NextResponse.json({ error: `Audio file not found: ${safeName}` }, { status: 404 });
+    console.error(`[mux] 404: audio file missing at ${audioPath}`);
+    return NextResponse.json({
+      error: `Audio no encontrado en disco: ${safeName}. Se esperaba en ${audioPath}.`,
+    }, { status: 404 });
   }
 
   // Verify video file exists
   try {
     await fs.access(videoPath);
   } catch {
-    return NextResponse.json({ error: `Video file not found: ${cameraSource.storedName}` }, { status: 404 });
+    console.error(`[mux] 404: video file missing at ${videoPath}`);
+    return NextResponse.json({
+      error: `Video de cámara no encontrado en disco: ${cameraSource.storedName}. ` +
+        `Se esperaba en ${videoPath}. ` +
+        `Si restauraste el proyecto, importa el zip de media o copia el archivo a esa ruta.`,
+    }, { status: 404 });
   }
 
   // Ensure export dir exists
   await fs.mkdir(exportDir, { recursive: true });
 
-  // Clean up old muxed files to save disk space
-  if (project.sync.muxedVideoPath) {
-    const oldName = path.basename(project.sync.muxedVideoPath);
-    const oldPath = path.join(exportDir, oldName);
-    try { await fs.unlink(oldPath); } catch { /* ignore */ }
+  // Clean up ALL muxed files in export/, not just the one tracked in
+  // project.sync.muxedVideoPath. Previous mux failures (e.g. disk full mid-
+  // write) leave orphaned partial files that aren't referenced anywhere —
+  // they pile up at multi-GB each and silently fill the disk. Since only one
+  // muxed file should ever exist per project, blast them all.
+  try {
+    const entries = await fs.readdir(exportDir);
+    for (const entry of entries) {
+      if (entry.startsWith('muxed_') && entry.endsWith('.mp4')) {
+        await fs.unlink(path.join(exportDir, entry)).catch(() => { /* ignore */ });
+      }
+    }
+  } catch { /* export dir might not have anything to clean */ }
+
+  // Pre-flight disk space check. With -c:v copy the output is roughly
+  // (video bytes) + (encoded audio bytes ≈ audio duration × 24 KB/s for AAC
+  // at 192 kbps). We require 1.2× that to leave a safety margin for FFmpeg's
+  // intermediate moov atom and OS file caches.
+  const videoBytes = await fileSize(videoPath);
+  const audioBytes = await fileSize(audioPath);
+  const estimatedOutputBytes = Math.round((videoBytes + audioBytes) * 1.2);
+  const freeBytes = getFreeBytes(exportDir);
+  if (freeBytes > 0 && estimatedOutputBytes > 0 && freeBytes < estimatedOutputBytes) {
+    const gb = (b: number) => (b / 1024 / 1024 / 1024).toFixed(1);
+    console.error(`[mux] 507: insufficient disk space. free=${gb(freeBytes)}GB, ` +
+      `estimated=${gb(estimatedOutputBytes)}GB at ${exportDir}`);
+    return NextResponse.json({
+      error: `Espacio insuficiente en disco. Libres: ${gb(freeBytes)} GB, ` +
+        `se estiman ${gb(estimatedOutputBytes)} GB para el muxed. ` +
+        `Borra videos/renders antiguos antes de continuar.`,
+    }, { status: 507 });
   }
 
   // Determine alignment offset
@@ -219,24 +283,41 @@ export async function POST(
 
   proc.on('close', async (code) => {
     if (code === 0) {
+      // Probe the actual muxed output duration. Used by the transcription
+      // page to size the timeline; without this the page falls back to the
+      // board audio's duration (98 min) and shows a frozen-frame tail past
+      // where the video stream actually ends.
+      const muxedDurationSec = probeAudioDuration(outputPath);
       const currentProject = await getProject(id);
       if (currentProject) {
         await updateProject(id, {
           sync: {
             ...currentProject.sync,
             muxedVideoPath: outputPath,
+            muxedDurationMs: muxedDurationSec > 0
+              ? Math.round(muxedDurationSec * 1000)
+              : undefined,
             selectedAudioPath: audioPath,
           },
         });
       }
-      jobManager.completeJob(job.id, { outputPath });
+      jobManager.completeJob(job.id, { outputPath, durationMs: muxedDurationSec * 1000 });
     } else {
+      // Delete the partial output. FFmpeg writes the bulk of the file before
+      // writing the moov atom in the trailer — on disk-full or any other
+      // mid-write failure, what's left is a multi-GB unplayable file. If we
+      // don't remove it, repeated retries fill the disk further (this is
+      // exactly what produced the 3×muxed_*.mp4 garbage we just cleaned up).
+      await fs.unlink(outputPath).catch(() => { /* ignore */ });
+
       const lastLines = stderrLog.trim().split('\n').slice(-5).join('\n');
+      console.error(`[mux] ffmpeg failed code=${code}, removed partial output. tail:\n${lastLines}`);
       jobManager.failJob(job.id, `FFmpeg mux falló (code ${code}):\n${lastLines}`);
     }
   });
 
-  proc.on('error', (err) => {
+  proc.on('error', async (err) => {
+    await fs.unlink(outputPath).catch(() => { /* ignore */ });
     jobManager.failJob(job.id, `No se pudo iniciar FFmpeg: ${err.message}`);
   });
 

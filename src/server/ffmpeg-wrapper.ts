@@ -1,5 +1,8 @@
-import { execFile, ChildProcess } from 'child_process';
+import { execFile, execFileSync, ChildProcess } from 'child_process';
 import { promisify } from 'util';
+import path from 'path';
+import os from 'os';
+import fs from 'fs';
 
 const execFileAsync = promisify(execFile);
 
@@ -627,16 +630,60 @@ export function renderReelVideo(options: RenderReelOptions): {
     }
   }
 
-  // Add image overlay inputs (after all clip inputs)
+  // Add image overlay inputs (after all clip inputs).
+  //
+  // We have to be format-aware here because each container/codec combination
+  // needs different input options for FFmpeg to (a) decode the bytes and
+  // (b) accept `-loop` as an input option:
+  //
+  //  - GIF: use ignore_loop + stream_loop so the animation plays for the
+  //    overlay's full duration.
+  //  - JPEG: force `-f image2`. Without it FFmpeg sometimes picks the
+  //    `mjpeg` demuxer (Motion JPEG video) for small JPEGs and rejects
+  //    `-loop` with "Option loop not found", killing the render.
+  //  - AVIF/HEIC: ISO-Media container. The `image2` demuxer can't parse
+  //    these and `-loop 1` makes FFmpeg blow up with "codec none" because
+  //    the AV1-in-HEIF bitstream needs the right demuxer chain. Cheapest
+  //    robust fix is to decode the AVIF to a temp PNG up front and feed
+  //    the PNG into the render pipeline (FFmpeg-static does decode AVIF —
+  //    we just can't use it as a looped overlay input directly).
+  //  - PNG / BMP / WebP-still: image2 is auto-picked and `-loop 1` works,
+  //    no need to force the demuxer.
   const imageOverlays = options.imageOverlays ?? [];
   const firstImageInputIdx = clips.length * (hasAudio ? 2 : 1);
+  // Temp PNG files created from AVIF/HEIC inputs — deleted after render.
+  const tempImageFiles: string[] = [];
   for (const img of imageOverlays) {
     const ext = img.filePath.toLowerCase().split('.').pop() ?? '';
     if (ext === 'gif') {
-      // GIF: use ignore_loop to keep looping, stream_loop for duration coverage
       args.push('-ignore_loop', '0', '-stream_loop', '-1', '-i', img.filePath);
+    } else if (ext === 'avif' || ext === 'heic' || ext === 'heif') {
+      // Convert to PNG synchronously so the overlay pipeline only ever sees
+      // formats it knows how to loop. Single frame, no audio, very fast
+      // (~tens of ms even for 4K images).
+      const tempPng = path.join(
+        os.tmpdir(),
+        `overlay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`
+      );
+      try {
+        execFileSync(ffmpeg, [
+          '-y', '-v', 'error',
+          '-i', img.filePath,
+          '-frames:v', '1',
+          tempPng,
+        ], { timeout: 15_000 });
+        tempImageFiles.push(tempPng);
+        args.push('-f', 'image2', '-loop', '1', '-i', tempPng);
+      } catch (err) {
+        console.error(`[ffmpeg-render-reel] failed to pre-convert ${img.filePath} to PNG:`, err);
+        // Fall back to direct input; render may fail later but at least we
+        // tried, and the user gets a clear stderr from the main process.
+        args.push('-i', img.filePath);
+      }
+    } else if (ext === 'jpg' || ext === 'jpeg') {
+      args.push('-f', 'image2', '-loop', '1', '-i', img.filePath);
     } else {
-      // Still image: loop to create a video stream
+      // png, bmp, webp-still, and unknown — let FFmpeg auto-detect.
       args.push('-loop', '1', '-i', img.filePath);
     }
   }
@@ -927,8 +974,15 @@ export function renderReelVideo(options: RenderReelOptions): {
       }
     }, 10_000);
 
+    const cleanupTempImages = () => {
+      for (const f of tempImageFiles) {
+        try { fs.unlinkSync(f); } catch { /* ignore */ }
+      }
+    };
+
     proc.on('close', (code) => {
       clearInterval(watchdog);
+      cleanupTempImages();
       // Flush any remaining buffered stderr
       if (stderrLineBuf.trim()) console.log(`[ffmpeg-render-reel] ${stderrLineBuf.trimEnd()}`);
       if (code === 0) resolve();
@@ -941,6 +995,7 @@ export function renderReelVideo(options: RenderReelOptions): {
 
     proc.on('error', (err) => {
       clearInterval(watchdog);
+      cleanupTempImages();
       reject(err);
     });
   });

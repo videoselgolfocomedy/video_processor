@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import type { CustomStylePreset } from '@/types/project';
 
 const SETTINGS_PATH = path.join(process.cwd(), 'data', 'settings.json');
 
@@ -15,6 +16,13 @@ export interface AppSettings {
   openrouter: {
     model: string;
   };
+  /**
+   * Subtitle / text-overlay style presets the user saved as reusable across
+   * the whole system. The UI promises "save and reuse in other reels and
+   * projects", so these have to live OUTSIDE any individual project.json —
+   * here in settings.json they survive project deletion, re-import, etc.
+   */
+  customStylePresets?: CustomStylePreset[];
 }
 
 const defaults: AppSettings = {
@@ -22,6 +30,7 @@ const defaults: AppSettings = {
   openrouter: {
     model: 'anthropic/claude-haiku-4-5',
   },
+  customStylePresets: [],
 };
 
 async function ensureDir() {
@@ -38,6 +47,7 @@ export async function getSettings(): Promise<AppSettings> {
       ...stored,
       keys: { ...defaults.keys, ...stored.keys },
       openrouter: { ...defaults.openrouter, ...stored.openrouter },
+      customStylePresets: stored.customStylePresets ?? [],
     };
   } catch {
     return { ...defaults };

@@ -12,6 +12,7 @@ export default function ReelsPage() {
   const projectId = params.id as string;
   const { currentProject, fetchProject } = useProjectStore();
   const loadReels = useReelStore((s) => s.loadReels);
+  const refreshBaseSegments = useReelStore((s) => s.refreshBaseSegments);
   const [loaded, setLoaded] = useState(false);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -20,13 +21,13 @@ export default function ReelsPage() {
   }, [projectId, fetchProject]);
 
   useEffect(() => {
-    if (!currentProject || loaded) return;
+    if (!currentProject) return;
 
     const videoSource = currentProject.sources.find((s) => s.type === 'video');
     const sourceRes = videoSource?.resolution ?? null;
 
     // Transcription segments are already in compose timeline time
-    // (compose saves them back to transcription.segments when editing)
+    // (compose saves them back to transcription.segments when editing).
     const baseSegs = currentProject.transcription.segments;
 
     // Use compose duration if compose clips exist, otherwise source video duration
@@ -42,14 +43,20 @@ export default function ReelsPage() {
         : 60000;
     const durationMs = composeDurationMs > 0 ? composeDurationMs : sourceDurationMs;
 
-    loadReels(
-      currentProject.reels,
-      baseSegs,
-      durationMs,
-      sourceRes
-    );
-    setLoaded(true);
-  }, [currentProject, loaded, loadReels]);
+    if (!loaded) {
+      // First mount: install reels + baseSegments from disk.
+      loadReels(currentProject.reels, baseSegs, durationMs, sourceRes);
+      setLoaded(true);
+    } else {
+      // Subsequent project refreshes (e.g. transcription was re-run while
+      // the user was on this page): keep `baseSegments` live so the NEXT
+      // createReel snapshots against the latest transcription. We
+      // deliberately do NOT touch any existing reel's subtitleSegments —
+      // those belong to the user and getting silently overwritten on
+      // navigation was a real regression.
+      refreshBaseSegments(baseSegs, durationMs);
+    }
+  }, [currentProject, loaded, loadReels, refreshBaseSegments]);
 
   const handleSave = useCallback(async () => {
     const reels = useReelStore.getState().reels;

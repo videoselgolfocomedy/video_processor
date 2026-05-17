@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
-import { useReelStore } from '@/stores/reel-store';
+import { useReelStore, getReelEffectiveDurationMs } from '@/stores/reel-store';
 
 /* ── Editable timecode ──────────────────────────────────────────────── */
 
@@ -208,7 +208,11 @@ export function ReelTimelineControls({ reelId }: ReelTimelineControlsProps) {
   const [addTrackOpen, setAddTrackOpen] = useState(false);
   const addTrackRef = useRef<HTMLDivElement>(null);
 
-  const reelDurationMs = reel ? reel.endMs - reel.startMs : 0;
+  // Effective playable duration after timeline edits — shrinks when the user
+  // cuts content from the tail. Was `reel.endMs - reel.startMs` (source
+  // window) which never updated after edits, so the timecode display read
+  // 42.3 s for a reel whose actual content ends at 37.5 s.
+  const reelDurationMs = getReelEffectiveDurationMs(reel);
 
   const canSplit = reel
     ? reel.composition.clips.some((c) => currentTimeMs > c.timelineStartMs && currentTimeMs < c.timelineEndMs)
