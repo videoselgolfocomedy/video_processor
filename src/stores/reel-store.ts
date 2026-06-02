@@ -176,6 +176,78 @@ interface ReelStore {
   getActiveReel: () => ReelDefinition | undefined;
 }
 
+/**
+ * Build the reel's main rv1 (+ optional ra1) clips for a compose range,
+ * inheriting compose cuts. Returns one segment per compose v1 clip that
+ * overlaps [reelStartMs, reelEndMs], laid out back-to-back on the reel's
+ * local timeline (cuts removed). Falls back to a single clip spanning
+ * [srcStart, srcEnd] when there are 0 or 1 overlapping compose clips.
+ *
+ * Returns null when there's nothing meaningful to build (no filenames).
+ */
+function buildReelMainClips(params: {
+  composeClips: CompositionClip[] | undefined;
+  reelStartMs: number;
+  reelEndMs: number;
+  reelDur: number;
+  srcStart: number;
+  srcEnd: number;
+  videoFileName?: string;
+  audioFileName?: string;
+}): CompositionClip[] | null {
+  const { composeClips, reelStartMs, reelEndMs, reelDur, srcStart, srcEnd, videoFileName, audioFileName } = params;
+  if (!videoFileName && !audioFileName) return null;
+
+  const inRange = (composeClips ?? [])
+    .filter((c) => c.trackId === 'v1' && c.timelineEndMs > reelStartMs && c.timelineStartMs < reelEndMs)
+    .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+
+  const clips: CompositionClip[] = [];
+
+  if (inRange.length > 1) {
+    // Multiple compose clips → segment with cuts.
+    const emit = (trackId: 'rv1' | 'ra1', type: 'video' | 'audio', fileName: string) => {
+      let off = 0;
+      for (const cc of inRange) {
+        const composeStart = Math.max(cc.timelineStartMs, reelStartMs);
+        const composeEnd = Math.min(cc.timelineEndMs, reelEndMs);
+        const dur = composeEnd - composeStart;
+        if (dur <= 0) continue;
+        const sourceIn = cc.sourceInMs + (composeStart - cc.timelineStartMs);
+        clips.push({
+          id: uuidv4(),
+          type,
+          fileName,
+          originalName: fileName,
+          trackId,
+          timelineStartMs: off,
+          timelineEndMs: off + dur,
+          sourceInMs: sourceIn,
+          sourceOutMs: sourceIn + dur,
+        });
+        off += dur;
+      }
+    };
+    if (videoFileName) emit('rv1', 'video', videoFileName);
+    if (audioFileName) emit('ra1', 'audio', audioFileName);
+  } else {
+    // 0 or 1 overlapping compose clip → single continuous segment.
+    if (videoFileName) {
+      clips.push({
+        id: uuidv4(), type: 'video', fileName: videoFileName, originalName: videoFileName,
+        trackId: 'rv1', timelineStartMs: 0, timelineEndMs: reelDur, sourceInMs: srcStart, sourceOutMs: srcEnd,
+      });
+    }
+    if (audioFileName) {
+      clips.push({
+        id: uuidv4(), type: 'audio', fileName: audioFileName, originalName: audioFileName,
+        trackId: 'ra1', timelineStartMs: 0, timelineEndMs: reelDur, sourceInMs: srcStart, sourceOutMs: srcEnd,
+      });
+    }
+  }
+  return clips;
+}
+
 function filterSegmentsToRange(
   segments: SubtitleSegment[],
   startMs: number,
@@ -942,119 +1014,45 @@ export const useReelStore = create<ReelStore>((set, get) => ({
     // Only recreate clips if none exist at all (first time entering timeline)
     const needsRecreate = existingClips.length === 0;
 
-    if (needsRecreate && (videoFileName || audioFileName)) {
-      const clips: CompositionClip[] = [];
+    // Count how many compose cuts fall inside this reel's window. Used both to
+    // build segmented clips on first entry AND to detect a reel that was
+    // created before compose-cut inheritance existed (a single rv1 clip when
+    // compose actually has multiple clips in range → it's playing through the
+    // cuts). Such reels get auto-resegmented on re-entry, but ONLY when their
+    // main clips look auto-generated (haven't been hand-edited).
+    const composeCutCount = (composeClips ?? []).filter(
+      (c) => c.trackId === 'v1' && c.timelineEndMs > reel.startMs && c.timelineStartMs < reel.endMs
+    ).length;
 
-      // Inherit cuts from compose: if composeClips were supplied (v1 clips
-      // from the compose timeline that overlap the reel's compose range),
-      // emit one rv1 clip per compose segment so the reel honors the same
-      // cuts. The reel's local timeline is the compose range with cuts
-      // removed — `outputOffset` tracks how much we've already written.
-      // Without this, a reel created from a bit that contains a compose-
-      // level cut plays the un-cut muxed range, ignoring the edit.
-      const composeV1ClipsInRange = (composeClips ?? [])
-        .filter((c) =>
-          c.trackId === 'v1' &&
-          c.timelineEndMs > reel.startMs &&
-          c.timelineStartMs < reel.endMs
-        )
-        .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+    const rv1Clips = existingClips.filter((c) => c.trackId === 'rv1');
+    // "Looks auto-generated" = a single rv1 clip starting at reel-timeline 0
+    // (i.e. the old single-span fallback). If the user split/moved clips
+    // themselves there'd be >1 or a non-zero start, and we leave them alone.
+    const looksUnsegmented = rv1Clips.length === 1 && rv1Clips[0].timelineStartMs === 0;
+    const shouldResegment = !needsRecreate && looksUnsegmented && composeCutCount > 1 && !!composeClips;
 
-      if (videoFileName && composeV1ClipsInRange.length > 1) {
-        let outputOffset = 0;
-        for (const cc of composeV1ClipsInRange) {
-          // Clamp the compose clip's compose-time range to the reel's window.
-          const composeStart = Math.max(cc.timelineStartMs, reel.startMs);
-          const composeEnd = Math.min(cc.timelineEndMs, reel.endMs);
-          const dur = composeEnd - composeStart;
-          if (dur <= 0) continue;
-          // Translate the clamp into source-time using the compose clip's
-          // own compose→source mapping (sourceInMs is the muxed seek for
-          // timelineStartMs).
-          const sourceIn = cc.sourceInMs + (composeStart - cc.timelineStartMs);
-          clips.push({
-            id: uuidv4(),
-            type: 'video',
-            fileName: videoFileName,
-            originalName: videoFileName,
-            trackId: 'rv1',
-            timelineStartMs: outputOffset,
-            timelineEndMs: outputOffset + dur,
-            sourceInMs: sourceIn,
-            sourceOutMs: sourceIn + dur,
-          });
-          outputOffset += dur;
-        }
-        if (audioFileName) {
-          // Mirror the same segmentation on ra1 so audio gaps line up with
-          // compose cuts (otherwise audio runs through the cuts).
-          let outputOffsetA = 0;
-          for (const cc of composeV1ClipsInRange) {
-            const composeStart = Math.max(cc.timelineStartMs, reel.startMs);
-            const composeEnd = Math.min(cc.timelineEndMs, reel.endMs);
-            const dur = composeEnd - composeStart;
-            if (dur <= 0) continue;
-            const sourceIn = cc.sourceInMs + (composeStart - cc.timelineStartMs);
-            clips.push({
-              id: uuidv4(),
-              type: 'audio',
-              fileName: audioFileName,
-              originalName: audioFileName,
-              trackId: 'ra1',
-              timelineStartMs: outputOffsetA,
-              timelineEndMs: outputOffsetA + dur,
-              sourceInMs: sourceIn,
-              sourceOutMs: sourceIn + dur,
-            });
-            outputOffsetA += dur;
-          }
-        }
-        console.log(`[reel-store] enterTimelinePhase: inherited ${composeV1ClipsInRange.length} compose cuts → ${clips.length} reel clips`);
-      } else if (videoFileName) {
-        // Fallback: single clip spanning the whole source range (no compose
-        // edits to inherit, or compose has just one continuous clip here).
-        clips.push({
-          id: uuidv4(),
-          type: 'video',
-          fileName: videoFileName,
-          originalName: videoFileName,
-          trackId: 'rv1',
-          timelineStartMs: 0,
-          timelineEndMs: reelDur,
-          sourceInMs: srcStart,
-          sourceOutMs: srcEnd,
-        });
-        if (audioFileName) {
-          clips.push({
-            id: uuidv4(),
-            type: 'audio',
-            fileName: audioFileName,
-            originalName: audioFileName,
-            trackId: 'ra1',
-            timelineStartMs: 0,
-            timelineEndMs: reelDur,
-            sourceInMs: srcStart,
-            sourceOutMs: srcEnd,
-          });
-        }
-      } else if (audioFileName) {
-        clips.push({
-          id: uuidv4(),
-          type: 'audio',
-          fileName: audioFileName,
-          originalName: audioFileName,
-          trackId: 'ra1',
-          timelineStartMs: 0,
-          timelineEndMs: reelDur,
-          sourceInMs: srcStart,
-          sourceOutMs: srcEnd,
-        });
+    if ((needsRecreate || shouldResegment) && (videoFileName || audioFileName)) {
+      const clips = buildReelMainClips({
+        composeClips,
+        reelStartMs: reel.startMs,
+        reelEndMs: reel.endMs,
+        reelDur,
+        srcStart,
+        srcEnd,
+        videoFileName,
+        audioFileName,
+      }) ?? [];
+
+      if (composeCutCount > 1) {
+        console.log(`[reel-store] enterTimelinePhase: ${needsRecreate ? 'created' : 're-segmented'} reel honoring ${composeCutCount} compose clips → ${clips.length} reel clips`);
       }
 
-      // Subtitles filtered by COMPOSE time (baseSegments are in compose time)
-      const segments = filterSegmentsToRange(
-        state.baseSegments, reel.startMs, reel.endMs, reel.subtitleConstraints
-      );
+      // Subtitles filtered by COMPOSE time (baseSegments are in compose time).
+      // Only regenerate subtitles on first creation — a re-segment must NOT
+      // wipe the user's subtitle edits.
+      const segments = needsRecreate
+        ? filterSegmentsToRange(state.baseSegments, reel.startMs, reel.endMs, reel.subtitleConstraints)
+        : undefined;
 
       set((s) => ({
         reels: updateReelInList(s.reels, reelId, (r) => ({
@@ -1069,7 +1067,7 @@ export const useReelStore = create<ReelStore>((set, get) => ({
               ...clips,
             ],
           },
-          subtitleSegments: segments,
+          ...(segments ? { subtitleSegments: segments } : {}),
         })),
         dirty: true,
       }));
