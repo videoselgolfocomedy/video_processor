@@ -1,5 +1,6 @@
 import path from 'path';
 import fs from 'fs/promises';
+import { existsSync } from 'fs';
 import { jobManager } from '@/server/job-manager';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
 import { renderVideo, renderReelVideo, type ImageOverlayInput } from '@/server/ffmpeg-wrapper';
@@ -274,13 +275,26 @@ async function runRender(options: RenderOptions): Promise<void> {
   // and the mux route for how this value is derived.
   const muxedAudioOffsetMs = muxedVideoSrc ? (project.sync?.muxedAudioOffsetMs ?? 0) : 0;
 
-  // Find audio
+  // Find audio. Resolve the first candidate that actually exists on disk.
+  // Restored-from-muxed projects have no separate audio files (selected/mixed/
+  // extracted all missing) — in that case audioSrc stays undefined and the
+  // renderer uses the muxed video's embedded audio track instead of a separate
+  // -i input. Without this existence check, a stale path (e.g. the extracted
+  // camera wav that was never copied) makes FFmpeg abort with
+  // "No such file or directory".
   const audioDir = getProjectDir(projectId, 'audio');
-  const selectedAudio = project.sync.selectedAudioPath;
-  const audioSrc = selectedAudio
-    ? (selectedAudio.includes('/') ? selectedAudio : path.join(audioDir, selectedAudio))
-    : project.sync.mixedAudioPath
-    || (project.audio.extractedTracks[0]?.path);
+  const resolveAudio = (p?: string): string | undefined => {
+    if (!p) return undefined;
+    const abs = p.includes('/') ? p : path.join(audioDir, p);
+    return existsSync(abs) ? abs : undefined;
+  };
+  const audioSrc =
+    resolveAudio(project.sync.selectedAudioPath) ??
+    resolveAudio(project.sync.mixedAudioPath) ??
+    resolveAudio(project.audio.extractedTracks[0]?.path);
+  if (!audioSrc) {
+    console.log('[render] No separate audio file found on disk — using muxed video embedded audio');
+  }
 
   const fontsDirPath = path.resolve(process.cwd(), 'fonts');
   const sourceWidth = videoSource?.resolution?.width;
