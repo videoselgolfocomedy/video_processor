@@ -41,6 +41,30 @@ export const useProjectStore = create<ProjectStore>((set) => ({
       const res = await fetch(`/api/projects/${id}`);
       if (!res.ok) throw new Error('Failed to fetch project');
       const data = await res.json();
+
+      // Auto-reconcile media: if the muxed video path is missing or points to
+      // a deleted file, this hits an endpoint that scans export/ + audio/ for
+      // a hand-copied muxed_*.mp4 and links it. Lets restored projects work
+      // from just project.json + a copied muxed file, without re-running mux
+      // or needing the original camera/board sources. Silent on success/no-op.
+      const muxedPath = data?.sync?.muxedVideoPath;
+      const needsReconcile = !muxedPath; // server also handles "set but missing on disk"
+      if (needsReconcile) {
+        try {
+          const recRes = await fetch(`/api/projects/${id}/reconcile-media`, { method: 'POST' });
+          if (recRes.ok) {
+            const recData = await recRes.json();
+            if (recData.updated && recData.sync) {
+              data.sync = recData.sync;
+              console.log('[project-store] reconcile-media:', recData.messages?.join(' | '));
+            }
+          }
+        } catch (recErr) {
+          // Non-fatal — the project will load without the auto-link
+          console.warn('[project-store] reconcile-media failed:', (recErr as Error).message);
+        }
+      }
+
       set({ currentProject: data, loading: false });
     } catch (err) {
       set({ error: (err as Error).message, loading: false });
