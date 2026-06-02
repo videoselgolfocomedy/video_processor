@@ -135,7 +135,7 @@ interface ReelStore {
 
   // Phase & timeline viewport
   setPhase: (phase: 'setup' | 'timeline') => void;
-  enterTimelinePhase: (reelId: string, videoFileName?: string, audioFileName?: string) => void;
+  enterTimelinePhase: (reelId: string, videoFileName?: string, audioFileName?: string, composeClips?: CompositionClip[]) => void;
   setZoom: (level: number) => void;
   setScrollOffset: (ms: number) => void;
   setViewportWidth: (px: number) => void;
@@ -880,7 +880,7 @@ export const useReelStore = create<ReelStore>((set, get) => ({
   // Phase & timeline viewport
   setPhase: (phase) => set({ phase }),
 
-  enterTimelinePhase: (reelId, videoFileName, audioFileName) => {
+  enterTimelinePhase: (reelId, videoFileName, audioFileName, composeClips) => {
     const state = get();
     const reel = state.reels.find((r) => r.id === reelId);
     if (!reel) return;
@@ -944,7 +944,75 @@ export const useReelStore = create<ReelStore>((set, get) => ({
 
     if (needsRecreate && (videoFileName || audioFileName)) {
       const clips: CompositionClip[] = [];
-      if (videoFileName) {
+
+      // Inherit cuts from compose: if composeClips were supplied (v1 clips
+      // from the compose timeline that overlap the reel's compose range),
+      // emit one rv1 clip per compose segment so the reel honors the same
+      // cuts. The reel's local timeline is the compose range with cuts
+      // removed — `outputOffset` tracks how much we've already written.
+      // Without this, a reel created from a bit that contains a compose-
+      // level cut plays the un-cut muxed range, ignoring the edit.
+      const composeV1ClipsInRange = (composeClips ?? [])
+        .filter((c) =>
+          c.trackId === 'v1' &&
+          c.timelineEndMs > reel.startMs &&
+          c.timelineStartMs < reel.endMs
+        )
+        .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+
+      if (videoFileName && composeV1ClipsInRange.length > 1) {
+        let outputOffset = 0;
+        for (const cc of composeV1ClipsInRange) {
+          // Clamp the compose clip's compose-time range to the reel's window.
+          const composeStart = Math.max(cc.timelineStartMs, reel.startMs);
+          const composeEnd = Math.min(cc.timelineEndMs, reel.endMs);
+          const dur = composeEnd - composeStart;
+          if (dur <= 0) continue;
+          // Translate the clamp into source-time using the compose clip's
+          // own compose→source mapping (sourceInMs is the muxed seek for
+          // timelineStartMs).
+          const sourceIn = cc.sourceInMs + (composeStart - cc.timelineStartMs);
+          clips.push({
+            id: uuidv4(),
+            type: 'video',
+            fileName: videoFileName,
+            originalName: videoFileName,
+            trackId: 'rv1',
+            timelineStartMs: outputOffset,
+            timelineEndMs: outputOffset + dur,
+            sourceInMs: sourceIn,
+            sourceOutMs: sourceIn + dur,
+          });
+          outputOffset += dur;
+        }
+        if (audioFileName) {
+          // Mirror the same segmentation on ra1 so audio gaps line up with
+          // compose cuts (otherwise audio runs through the cuts).
+          let outputOffsetA = 0;
+          for (const cc of composeV1ClipsInRange) {
+            const composeStart = Math.max(cc.timelineStartMs, reel.startMs);
+            const composeEnd = Math.min(cc.timelineEndMs, reel.endMs);
+            const dur = composeEnd - composeStart;
+            if (dur <= 0) continue;
+            const sourceIn = cc.sourceInMs + (composeStart - cc.timelineStartMs);
+            clips.push({
+              id: uuidv4(),
+              type: 'audio',
+              fileName: audioFileName,
+              originalName: audioFileName,
+              trackId: 'ra1',
+              timelineStartMs: outputOffsetA,
+              timelineEndMs: outputOffsetA + dur,
+              sourceInMs: sourceIn,
+              sourceOutMs: sourceIn + dur,
+            });
+            outputOffsetA += dur;
+          }
+        }
+        console.log(`[reel-store] enterTimelinePhase: inherited ${composeV1ClipsInRange.length} compose cuts → ${clips.length} reel clips`);
+      } else if (videoFileName) {
+        // Fallback: single clip spanning the whole source range (no compose
+        // edits to inherit, or compose has just one continuous clip here).
         clips.push({
           id: uuidv4(),
           type: 'video',
@@ -956,8 +1024,20 @@ export const useReelStore = create<ReelStore>((set, get) => ({
           sourceInMs: srcStart,
           sourceOutMs: srcEnd,
         });
-      }
-      if (audioFileName) {
+        if (audioFileName) {
+          clips.push({
+            id: uuidv4(),
+            type: 'audio',
+            fileName: audioFileName,
+            originalName: audioFileName,
+            trackId: 'ra1',
+            timelineStartMs: 0,
+            timelineEndMs: reelDur,
+            sourceInMs: srcStart,
+            sourceOutMs: srcEnd,
+          });
+        }
+      } else if (audioFileName) {
         clips.push({
           id: uuidv4(),
           type: 'audio',

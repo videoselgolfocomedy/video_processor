@@ -450,6 +450,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
               reelId={activeReelId}
               videoSrc={videoSrc}
               audioSrc={audioSrc}
+              composeClips={compositionClips}
             />
           </div>
 

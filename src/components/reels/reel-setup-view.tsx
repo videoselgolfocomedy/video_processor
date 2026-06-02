@@ -5,14 +5,18 @@ import { ReelVideoPlayer } from './reel-video-player';
 import { ReelTrimBar } from './reel-trim-bar';
 import { Button } from '@/components/ui/button';
 import { ArrowRight } from 'lucide-react';
+import type { CompositionClip } from '@/types/project';
 
 interface ReelSetupViewProps {
   reelId: string;
   videoSrc?: string;
   audioSrc?: string;
+  /** v1/a1 compose clips — passed through so the reel can inherit compose
+   *  cuts the first time the user enters its timeline phase. */
+  composeClips?: CompositionClip[];
 }
 
-export function ReelSetupView({ reelId, videoSrc, audioSrc }: ReelSetupViewProps) {
+export function ReelSetupView({ reelId, videoSrc, audioSrc, composeClips }: ReelSetupViewProps) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const baseDurationMs = useReelStore((s) => s.baseDurationMs);
   const enterTimelinePhase = useReelStore((s) => s.enterTimelinePhase);
@@ -35,7 +39,7 @@ export function ReelSetupView({ reelId, videoSrc, audioSrc }: ReelSetupViewProps
       <div className="flex justify-center pt-2">
         <Button
           size="lg"
-          onClick={() => enterTimelinePhase(reelId, videoFileName, audioFileName)}
+          onClick={() => enterTimelinePhase(reelId, videoFileName, audioFileName, composeClips)}
           className="gap-2"
         >
           Edit Reel

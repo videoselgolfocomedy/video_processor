@@ -328,20 +328,33 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
         }
       }
 
-      // Mute audio during gaps in audio clips
+      // Mute audio during gaps in audio clips.
+      //
+      // Subtlety: when there are NO audio clips at all (typical for reels
+      // created from compose without an explicit ra1 track, e.g. when the
+      // selectedAudioPath was cleared by reconcile because the standalone
+      // mix file is missing), do NOT mute — fall back to the muxed video's
+      // embedded audio. Otherwise the player goes silent the whole time and
+      // there's no way to hear anything in timeline phase.
       if (isTimelinePhase) {
         const freshReel2 = useReelStore.getState().reels.find((r) => r.id === reelId);
         const audioClips = freshReel2?.composition.clips.filter(
           (c) => c.trackId === 'ra1' || c.trackId === 'ra2'
         ) ?? [];
-        const storeTime = useReelStore.getState().currentTimeMs;
-        const inAudioClip = audioClips.some(
-          (c) => storeTime >= c.timelineStartMs && storeTime < c.timelineEndMs
-        );
-        const vol = inAudioClip ? 1 : 0;
-        if (audioRef.current) audioRef.current.volume = vol;
-        // If no separate audio, mute/unmute video's embedded audio via volume
-        if (!audioRef.current) video.volume = vol;
+        if (audioClips.length === 0) {
+          // No explicit audio tracks: let the video play its embedded audio.
+          if (audioRef.current) audioRef.current.volume = 1;
+          else video.volume = 1;
+        } else {
+          const storeTime = useReelStore.getState().currentTimeMs;
+          const inAudioClip = audioClips.some(
+            (c) => storeTime >= c.timelineStartMs && storeTime < c.timelineEndMs
+          );
+          const vol = inAudioClip ? 1 : 0;
+          if (audioRef.current) audioRef.current.volume = vol;
+          // If no separate audio, mute/unmute video's embedded audio via volume
+          if (!audioRef.current) video.volume = vol;
+        }
       }
 
       syncAudio();
