@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Loader2, FolderOpen, Upload } from 'lucide-react';
+import { Loader2, FolderOpen, Upload, Film } from 'lucide-react';
 import { useProjectStore } from '@/stores/project-store';
 import { ProjectCard } from './project-card';
 import { CreateProjectDialog } from './create-project-dialog';
@@ -16,7 +16,9 @@ export function ProjectList() {
   const router = useRouter();
   const { toast } = useToast();
   const restoreInputRef = useRef<HTMLInputElement>(null);
+  const muxedInputRef = useRef<HTMLInputElement>(null);
   const [restoring, setRestoring] = useState(false);
+  const [restoringMuxed, setRestoringMuxed] = useState(false);
   const [restoreReport, setRestoreReport] = useState<{
     open: boolean;
     projectId: string;
@@ -43,6 +45,38 @@ export function ProjectList() {
     if (!confirm('Are you sure you want to delete this project?')) return;
     await deleteProject(id);
     toast({ title: 'Proyecto eliminado' });
+  }
+
+  // Restore a project from JUST a muxed video file. Creates a new project
+  // shell, copies the muxed to export/, probes for duration, and lets the
+  // user start editing right away (transcribe → compose → reels → export).
+  // No source camera/board files needed.
+  async function handleRestoreFromMuxed(file: File) {
+    setRestoringMuxed(true);
+    const sizeGb = (file.size / 1024 ** 3).toFixed(2);
+    toast({
+      title: 'Importando muxed…',
+      description: `Copiando ${file.name} (${sizeGb} GB). Para archivos grandes puede tardar varios minutos.`,
+    });
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/projects/restore-from-muxed', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+
+      await fetchProjects();
+      toast({
+        title: `Proyecto creado: ${data.projectName}`,
+        description: data.message || 'Listo para editar',
+      });
+      router.push(`/project/${data.projectId}`);
+    } catch (err) {
+      toast({ title: 'Error al importar muxed', description: (err as Error).message, variant: 'destructive' });
+    } finally {
+      setRestoringMuxed(false);
+      if (muxedInputRef.current) muxedInputRef.current.value = '';
+    }
   }
 
   async function handleRestore(file: File) {
@@ -106,8 +140,9 @@ export function ProjectList() {
           <Button
             variant="outline"
             size="sm"
-            disabled={restoring}
+            disabled={restoring || restoringMuxed}
             onClick={() => restoreInputRef.current?.click()}
+            title="Restaura un proyecto desde un .zip de backup (project.json + estilos + fonts)"
           >
             {restoring ? (
               <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
@@ -124,6 +159,30 @@ export function ProjectList() {
             onChange={(e) => {
               const file = e.target.files?.[0];
               if (file) handleRestore(file);
+            }}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={restoring || restoringMuxed}
+            onClick={() => muxedInputRef.current?.click()}
+            title="Crea un proyecto a partir de un muxed_*.mp4/.mov suelto, sin necesitar las fuentes originales. Listo para transcribir + componer + exportar."
+          >
+            {restoringMuxed ? (
+              <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+            ) : (
+              <Film className="mr-1.5 h-4 w-4" />
+            )}
+            Importar muxed
+          </Button>
+          <input
+            ref={muxedInputRef}
+            type="file"
+            accept=".mp4,.mov,video/mp4,video/quicktime"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleRestoreFromMuxed(file);
             }}
           />
           <CreateProjectDialog onCreate={handleCreate} />

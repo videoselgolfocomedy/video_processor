@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getProject } from '@/server/project-manager';
-import { PROJECTS_DIR } from '@/lib/constants';
+import { getProjectDir } from '@/server/project-manager';
 import path from 'path';
 import fs from 'fs/promises';
 
@@ -28,8 +28,10 @@ export async function POST(
   else if (mime === 'image/gif') type = 'gif';
   else if (mime.startsWith('image/')) type = 'image';
 
-  // Save file to project directory
-  const projectDir = path.join(PROJECTS_DIR, id);
+  // Save file to project directory (resolved via project-manager so the new
+  // <slug>_<id8> folder convention is honoured for projects created after that
+  // change, while legacy <UUID> folders still work).
+  const projectDir = getProjectDir(id);
   const sanitized = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const fileName = `reel_${Date.now()}_${sanitized}`;
   const filePath = path.join(projectDir, fileName);

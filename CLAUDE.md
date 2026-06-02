@@ -244,6 +244,23 @@ Any change to the color pipeline is a minefield. Lessons learned
   `scale + overlay` on a black canvas in the FFmpeg renderer (only
   when at least one clip has a non-identity transform — otherwise the
   original simple pipeline is used to preserve color characteristics).
+- **Project folder names** are `projects/<slug>_<id8>/` since `cb47dde`
+  (e.g. `projects/standup-may-2026_a1b2c3d4/`). Legacy UUID-named
+  folders still resolve via the id-cache in `project-manager.ts` —
+  `resolveProjectFolderName(id)` tries the cache, then the legacy
+  `projects/<UUID>` path, then a `readdirSync` scan. Anything that
+  needs the project directory MUST go through `getProjectDir(id)` /
+  `projectPath(id)` so the resolver is invoked. Never `path.join(
+  PROJECTS_DIR, id)` directly — it works for legacy folders but not
+  for new slug-based names.
+- **Restore-from-muxed** (POST `/api/projects/restore-from-muxed`)
+  creates a project from JUST a `muxed_*.{mp4,mov}` file, streaming
+  the upload to `export/`, probing it, synthesising a single
+  source entry, and seeding `sync.muxedVideoPath` +
+  `sync.muxedDurationMs`. The project is then immediately editable
+  (transcription / compose / reels / export). Audio pre-processing
+  (extract / subtract / amplify / mix / re-mux) is NOT possible
+  because there's no separate camera/board audio.
 
 ---
 

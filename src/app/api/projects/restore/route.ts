@@ -5,7 +5,15 @@ import { v4 as uuidv4 } from 'uuid';
 import unzipper from 'unzipper';
 import { Readable } from 'stream';
 import { PROJECTS_DIR, PROJECT_DIRS } from '@/lib/constants';
+import { slugify } from '@/lib/utils';
+import { refreshProjectIndex } from '@/server/project-manager';
 import type { ProjectState } from '@/types/project';
+
+/** Match the naming used by project-manager.createProject. */
+function newProjectFolderName(id: string, name: string): string {
+  const slug = (slugify(name) || 'project').slice(0, 60);
+  return `${slug}_${id.slice(0, 8)}`;
+}
 
 /**
  * POST /api/projects/restore → Restore project from backup zip
@@ -64,9 +72,13 @@ export async function POST(request: NextRequest) {
       manifest = JSON.parse(manifestBuffer.toString('utf-8'));
     }
 
-    // Create new project with a new ID
+    // Create new project with a new ID. The folder name uses the same
+    // <slug>_<id8> convention as createProject() so the restored project
+    // is human-readable on disk just like a freshly-created one.
     const newId = uuidv4();
-    const projectDir = path.join(PROJECTS_DIR, newId);
+    const restoredName = (restoredProject.name || 'project') + ' (restored)';
+    const folderName = newProjectFolderName(newId, restoredName);
+    const projectDir = path.join(PROJECTS_DIR, folderName);
 
     // Create all subdirectories
     await fs.mkdir(projectDir, { recursive: true });
@@ -78,7 +90,7 @@ export async function POST(request: NextRequest) {
     const newProject: ProjectState = {
       ...restoredProject,
       id: newId,
-      name: restoredProject.name + ' (restored)',
+      name: restoredName,
       updatedAt: new Date().toISOString(),
       // Clear job statuses (not transferable)
       audio: {
@@ -195,6 +207,10 @@ export async function POST(request: NextRequest) {
       originalName: f.originalName,
       role: f.role,
     }));
+
+    // Tell the project-manager cache about this new folder so subsequent
+    // getProjectDir(newId) calls resolve to the right path without scanning.
+    refreshProjectIndex();
 
     return NextResponse.json({
       projectId: newId,

@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import { readdirSync, statSync, readFileSync, existsSync } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { PROJECTS_DIR, PROJECT_DIRS } from '@/lib/constants';
@@ -73,8 +74,71 @@ async function ensureProjectsDir() {
   await fs.mkdir(PROJECTS_DIR, { recursive: true });
 }
 
+// ── id → folder-name resolver ──────────────────────────────────────
+// Historically folders were `projects/<UUID>/`. New projects use
+// `projects/<slug>_<id8>/` for human readability, where `id8` is the first 8
+// chars of the UUID (collision suffix). The `id` field inside project.json is
+// still the full UUID — that's the canonical identity. Folder name is just a
+// display convenience; nothing references it programmatically except this
+// resolver.
+//
+// `projectPath()` is sync because hundreds of call sites depend on that. The
+// resolver uses an in-memory cache plus a one-time `readdirSync` scan on miss.
+// Cache is invalidated whenever a project is created or deleted.
+const idToFolderCache = new Map<string, string>();
+
+function safeSlug(name: string): string {
+  // Slugify can return empty for emoji-only or punctuation-only names; fall
+  // back to "project" in that case so the folder name is always non-empty.
+  const s = slugify(name) || 'project';
+  // Trim very long slugs to keep paths sane (the id8 suffix guarantees uniqueness).
+  return s.length > 60 ? s.slice(0, 60) : s;
+}
+
+function newProjectFolderName(id: string, name: string): string {
+  return `${safeSlug(name)}_${id.slice(0, 8)}`;
+}
+
+function rebuildIdCache(): void {
+  idToFolderCache.clear();
+  let entries: string[] = [];
+  try { entries = readdirSync(PROJECTS_DIR); } catch { return; }
+  for (const folderName of entries) {
+    try {
+      const full = path.join(PROJECTS_DIR, folderName);
+      if (!statSync(full).isDirectory()) continue;
+      const jsonPath = path.join(full, 'project.json');
+      if (!existsSync(jsonPath)) continue;
+      const data = JSON.parse(readFileSync(jsonPath, 'utf-8'));
+      if (data?.id && typeof data.id === 'string') {
+        idToFolderCache.set(data.id, folderName);
+      }
+    } catch { /* skip bad project */ }
+  }
+}
+
+function resolveProjectFolderName(id: string): string {
+  // 1. Cache hit.
+  const cached = idToFolderCache.get(id);
+  if (cached && existsSync(path.join(PROJECTS_DIR, cached, 'project.json'))) {
+    return cached;
+  }
+  // 2. Backward compat: legacy folders are named after the UUID.
+  if (existsSync(path.join(PROJECTS_DIR, id, 'project.json'))) {
+    idToFolderCache.set(id, id);
+    return id;
+  }
+  // 3. Scan all project folders and rebuild the cache.
+  rebuildIdCache();
+  const found = idToFolderCache.get(id);
+  if (found) return found;
+  // 4. Fallback: return UUID-based path. Subsequent operations will fail with
+  //    a clear "no such file" error if the project genuinely doesn't exist.
+  return id;
+}
+
 function projectPath(id: string) {
-  return path.join(PROJECTS_DIR, id);
+  return path.join(PROJECTS_DIR, resolveProjectFolderName(id));
 }
 
 function projectJsonPath(id: string) {
@@ -126,15 +190,19 @@ export async function createProject(name: string): Promise<ProjectState> {
     reels: [],
   };
 
-  const dir = projectPath(id);
+  // Folder name: `<slug>_<id8>` for human readability. The id8 suffix prevents
+  // collisions between projects sharing a name (e.g. two "test" projects).
+  const folderName = newProjectFolderName(id, name);
+  const dir = path.join(PROJECTS_DIR, folderName);
   await fs.mkdir(dir, { recursive: true });
+  idToFolderCache.set(id, folderName);
 
   // Create subdirectories
   for (const subdir of Object.values(PROJECT_DIRS)) {
     await fs.mkdir(path.join(dir, subdir), { recursive: true });
   }
 
-  await fs.writeFile(projectJsonPath(id), JSON.stringify(project, null, 2));
+  await fs.writeFile(path.join(dir, 'project.json'), JSON.stringify(project, null, 2));
   return project;
 }
 
@@ -339,10 +407,17 @@ export async function updateProject(
 export async function deleteProject(id: string): Promise<boolean> {
   try {
     await fs.rm(projectPath(id), { recursive: true, force: true });
+    idToFolderCache.delete(id);
     return true;
   } catch {
     return false;
   }
+}
+
+/** Force a rebuild of the id → folder-name cache. Call after bulk operations
+ *  (manual file system moves, restore flows, etc) that bypass createProject. */
+export function refreshProjectIndex(): void {
+  rebuildIdCache();
 }
 
 export function getProjectDir(id: string, subdir?: keyof typeof PROJECT_DIRS): string {
