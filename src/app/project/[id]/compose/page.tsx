@@ -39,6 +39,9 @@ export default function ComposePage() {
       (currentProject.composition as any).versions,
       videoFileName,
       audioFileName,
+      // Compensate for the keyframe-snap that mux applies when camera
+      // started before audio. See SyncState.muxedAudioOffsetMs.
+      currentProject.sync.muxedAudioOffsetMs ?? 0,
     );
     setLoaded(true);
   }, [currentProject, loaded, loadComposition]);

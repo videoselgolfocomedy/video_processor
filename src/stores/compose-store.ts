@@ -234,6 +234,7 @@ interface ComposeStore {
     versions?: ComposeVersion[],
     videoFileName?: string,
     audioFileName?: string,
+    audioSourceOffsetMs?: number,
   ) => void;
   getCompositionState: () => CompositionState;
   markClean: () => void;
@@ -1000,11 +1001,20 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
     });
   },
 
-  loadComposition: (state, subtitles, durationMs, subtitleStyle, subtitleStylePreset, subtitleConstraints, versions, videoFileName, audioFileName) => {
-    // Auto-create main video/audio clips if none exist on v1/a1
+  loadComposition: (state, subtitles, durationMs, subtitleStyle, subtitleStylePreset, subtitleConstraints, versions, videoFileName, audioFileName, audioSourceOffsetMs) => {
+    // Auto-create main video/audio clips if none exist on v1/a1.
+    //
+    // audioSourceOffsetMs accounts for the keyframe-snap that the mux step
+    // applies to the video when the camera started before the audio. The
+    // muxed video's t=0 is `audioSourceOffsetMs` AFTER the standalone audio
+    // file's t=0 (in real time). To keep the Compose player synced — Video
+    // muted + standalone Audio playing alongside — we start the a1 clip at
+    // that same offset into the audio file. Without this, video and audio
+    // drift by typically 100-500 ms which is enough to notice.
     const hasMainVideo = state.clips.some((c) => c.trackId === 'v1');
     const hasMainAudio = state.clips.some((c) => c.trackId === 'a1');
     const autoClips: CompositionClip[] = [];
+    const audioOffset = audioSourceOffsetMs ?? 0;
 
     if (!hasMainVideo && videoFileName) {
       autoClips.push({
@@ -1028,8 +1038,8 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
         trackId: 'a1',
         timelineStartMs: 0,
         timelineEndMs: durationMs,
-        sourceInMs: 0,
-        sourceOutMs: durationMs,
+        sourceInMs: audioOffset,
+        sourceOutMs: audioOffset + durationMs,
       });
     }
 

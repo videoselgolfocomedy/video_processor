@@ -1,7 +1,12 @@
 import type { SubtitleStyle, SubtitleConstraints } from '@/types/project';
 
+// Defaults tuned for long-form transcription / Compose editing where the
+// reader has more time per line and is sitting in front of a regular YouTube
+// player. Reels use a stricter cap (see REEL_DEFAULT_CONSTRAINTS) because
+// vertical mobile playback gives less horizontal room and viewers scroll
+// fast — 20 chars roughly matches one tight Anton line on 1080×1920.
 export const DEFAULT_CONSTRAINTS: SubtitleConstraints = {
-  maxCharsPerBlock: 80,
+  maxCharsPerBlock: 40,
   maxDurationMs: 7000,
 };
 
@@ -179,7 +184,7 @@ export const STYLE_PRESETS: StylePreset[] = [
 ];
 
 export const REEL_DEFAULT_CONSTRAINTS: SubtitleConstraints = {
-  maxCharsPerBlock: 38,
+  maxCharsPerBlock: 20,
   maxDurationMs: 5000,
 };
 

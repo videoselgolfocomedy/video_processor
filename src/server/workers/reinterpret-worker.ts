@@ -111,6 +111,22 @@ function buildPrompt(language: string, context?: string, includeBits = false): s
     `You are a subtitle correction assistant. Fix transcription errors in these subtitles.`,
     `Language: ${language === 'auto' ? 'detect from context' : language}.`,
     `Common errors: misspelled proper nouns, slang misheard by speech-to-text, context-dependent words, numbers, punctuation.`,
+    // Keep lexical units intact inside each segment. The transcript is later
+    // split by `splitLongSegments` if blocks are too long — when YOU adjust
+    // boundaries (or merge/split segments), prefer breaks that don't split
+    // a noun phrase across two segments. Concretely:
+    //  · Never end a segment with an article (el/la/un/una/...), preposition
+    //    (de/del/a/al/en/con/para/por/...), possessive (mi/tu/su/...),
+    //    demonstrative (este/esa/...) or any other determiner that "glues"
+    //    to the next noun.
+    //  · Never end with an auxiliary attached to its verb ("he", "ha",
+    //    "voy a", "está", etc.) leaving the main verb to the next block.
+    //  · Prefer ending segments at sentence punctuation (.?!) or at a
+    //    coordinating conjunction (y, pero, porque, aunque...). Starting a
+    //    new segment WITH a conjunction is fine and natural to read.
+    //  · Article + noun + adjective should always stay together when at all
+    //    possible (e.g. "un partido nuevo" — one block). Same for adverb +
+    //    verb / verb + adverb when they form a single phrase.
     context ? `Context: ${context}` : '',
   ].filter(Boolean);
 

@@ -267,6 +267,13 @@ async function runRender(options: RenderOptions): Promise<void> {
     ? (project.sync.muxedVideoPath.includes('/') ? project.sync.muxedVideoPath : path.join(getProjectDir(projectId, 'audio'), project.sync.muxedVideoPath))
     : undefined;
 
+  // When sourcing video from the muxed file AND audio from a separate aligned
+  // audio file, the mux step's keyframe-snap shifted muxed-video t=0 forward
+  // relative to audio-file t=0 by `muxedAudioOffsetMs`. The renderer must add
+  // this to the audio seek to keep them aligned. See SyncState in project.ts
+  // and the mux route for how this value is derived.
+  const muxedAudioOffsetMs = muxedVideoSrc ? (project.sync?.muxedAudioOffsetMs ?? 0) : 0;
+
   // Find audio
   const audioDir = getProjectDir(projectId, 'audio');
   const selectedAudio = project.sync.selectedAudioPath;
@@ -492,6 +499,7 @@ async function runRender(options: RenderOptions): Promise<void> {
       const { promise: reelPromise, process: reelProc } = renderReelVideo({
         videoInputPath: muxedVideoSrc ?? videoSrc,
         audioInputPath: audioSrc,
+        audioSourceOffsetMs: muxedAudioOffsetMs,
         clips: videoClips,
         audioClipRanges,
         imageOverlays,
@@ -609,6 +617,31 @@ async function runRender(options: RenderOptions): Promise<void> {
           : path.join(composeDirPath, muxedFile);
         composeVideoSrc = muxedPath;
         console.log(`[render] Using muxed video: ${muxedPath}`);
+      } else {
+        // Clips reference the muxed-file timeline (their fileName is muxed_*.mp4
+        // and their sourceInMs values are relative to muxed t=0). Falling back
+        // to the raw camera here would seek into the wrong timeline and the
+        // output would start in the wrong place. Better to fail loudly so the
+        // user re-runs the mux step.
+        const referencesMuxed = videoClips.some((c: CompositionClip) =>
+          c.fileName?.startsWith('muxed_')
+        );
+        if (referencesMuxed) {
+          await failExport(
+            projectId,
+            exportId,
+            jobId,
+            new Error(
+              'Compose clips reference the muxed video but no muxed_*.mp4 was ' +
+                'found in export/ or compose/. The muxed file was likely deleted. ' +
+                'Re-run Sync & Mix (the "Mux" button on /sync) to regenerate it — ' +
+                'your cuts, subtitles and timings will be preserved.'
+            ),
+            'Muxed video missing (clips reference muxed timeline)'
+          );
+          return;
+        }
+        console.log(`[render] No muxed file found, using raw video source: ${videoSrc}`);
       }
 
       const mixFile = composeDirFiles.find((f) => f.startsWith('mix_'))
@@ -773,9 +806,16 @@ async function runRender(options: RenderOptions): Promise<void> {
 
       jobManager.updateProgress(jobId, 2, 'Starting FFmpeg compose render...');
 
+      // Compose path: when we resolved composeVideoSrc to the muxed file,
+      // apply the same keyframe-snap audio offset that the mux step baked in.
+      const composeAudioOffsetMs = composeVideoSrc === muxedVideoSrc
+        ? muxedAudioOffsetMs
+        : 0;
+
       const { promise: composePromise, process: composeProc } = renderReelVideo({
         videoInputPath: composeVideoSrc,
         audioInputPath: composeAudioSrc,
+        audioSourceOffsetMs: composeAudioOffsetMs,
         clips: videoClips,
         audioClipRanges,
         imageOverlays,

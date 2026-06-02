@@ -79,6 +79,60 @@ export function splitLongSegments(
   return result;
 }
 
+/**
+ * Spanish words that "glue" to the next word and should never sit at the end
+ * of a subtitle block. Splitting "un | partido" or "de | izquierda" reads
+ * awkwardly and hurts comprehension in fast-moving reels. The list is
+ * deliberately conservative (only the high-frequency cases) so the rule
+ * doesn't bend split points so hard that it produces tiny orphan blocks.
+ */
+const SPANISH_GLUE_WORDS = new Set<string>([
+  // articles + contractions
+  'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'lo', 'del', 'al',
+  // prepositions
+  'a', 'de', 'en', 'con', 'por', 'para', 'sin', 'hacia', 'hasta',
+  'sobre', 'bajo', 'ante', 'entre', 'durante', 'tras', 'según', 'mediante', 'contra',
+  // possessives
+  'mi', 'tu', 'su', 'mis', 'tus', 'sus',
+  'nuestro', 'nuestra', 'nuestros', 'nuestras',
+  'vuestro', 'vuestra', 'vuestros', 'vuestras',
+  // demonstratives
+  'este', 'esta', 'estos', 'estas',
+  'ese', 'esa', 'esos', 'esas',
+  'aquel', 'aquella', 'aquellos', 'aquellas',
+  // quantifiers / determiners
+  'todo', 'toda', 'todos', 'todas',
+  'mucho', 'mucha', 'muchos', 'muchas',
+  'poco', 'poca', 'pocos', 'pocas',
+  'cada', 'otro', 'otra', 'otros', 'otras',
+  'algún', 'alguna', 'algunos', 'algunas',
+  'ningún', 'ninguna', 'mismo', 'misma',
+  // relatives / interrogatives that head a phrase
+  'que', 'qué', 'cual', 'cuál', 'cuyo', 'cuya',
+  // negation that always glues to the next verb
+  'no',
+  // common auxiliary verbs (they attach to the participle/infinitive after)
+  'he', 'has', 'ha', 'hemos', 'habéis', 'han',
+  'voy', 'vas', 'va', 'vamos', 'vais', 'van',
+  'estoy', 'estás', 'está', 'estamos', 'estáis', 'están',
+  'soy', 'eres', 'es', 'somos', 'sois', 'son',
+  // common conjunctions that introduce a clause AFTER them
+  'y', 'o', 'u', 'e', 'ni',
+]);
+
+/**
+ * Normalise a token for the glue-word lookup: lowercase, strip surrounding
+ * punctuation. We keep accents and ñ — Spanish glue words depend on them
+ * ("según", "más", "qué" — though only the first is in the glue set).
+ */
+function normaliseWord(raw: string): string {
+  return raw.toLowerCase().replace(/^[^\wáéíóúüñ]+|[^\wáéíóúüñ]+$/gi, '');
+}
+
+function isGlueWord(raw: string): boolean {
+  return SPANISH_GLUE_WORDS.has(normaliseWord(raw));
+}
+
 function splitByWords(
   seg: SubtitleSegment,
   maxChars: number,
@@ -98,6 +152,11 @@ function splitByWords(
     return splitByText(seg, maxChars, maxDurationMs);
   }
 
+  // How much over the char budget we're willing to go to avoid breaking a
+  // noun phrase. 25% is the sweet spot: enough to absorb "un partido nuevo"
+  // patterns, small enough that the resulting block still reads cleanly.
+  const overflowBudget = Math.max(8, Math.round(maxChars * 0.25));
+
   while (start < words.length) {
     let end = start + 1;
     let currentText = words[start].text;
@@ -116,6 +175,26 @@ function splitByWords(
     // Ensure we take at least one word
     if (end === start) end = start + 1;
 
+    // Lexical-cohesion pass: if the last word in this chunk "glues" to the
+    // next word (article, preposition, auxiliary, etc.), extend the chunk
+    // forward as long as the head keeps being glue and we stay within the
+    // overflow budget + the duration limit. Without this we get awkward
+    // breaks like "un | partido nuevo" or "estoy | haciendo" that hurt
+    // reading on fast-scrolling vertical reels.
+    while (
+      end < words.length &&
+      end - start > 0 &&
+      isGlueWord(words[end - 1].text)
+    ) {
+      const tentativeText = words.slice(start, end + 1).map((w) => w.text).join(' ');
+      const tentativeDur = words[end].endMs - words[start].startMs;
+      if (
+        tentativeText.length > maxChars + overflowBudget ||
+        tentativeDur > maxDurationMs
+      ) break;
+      end++;
+    }
+
     const chunkWords = words.slice(start, end);
     // Clamp the chunk's reported start/end to the segment bounds. This is a safety
     // net even when wordsAreWithinBounds passed — protects against off-by-one cases.
@@ -130,6 +209,34 @@ function splitByWords(
     });
 
     start = end;
+  }
+
+  // Tail-merge pass: if the final chunk is just an orphan word or two (very
+  // short) AND merging it into the previous chunk stays within ~1.5× the
+  // budget, do it. This stops cases like "…la tienda" + "nueva" — the
+  // trailing adjective is much more readable attached than dangling.
+  if (results.length >= 2) {
+    const last = results[results.length - 1];
+    const prev = results[results.length - 2];
+    const shortThreshold = Math.max(6, Math.round(maxChars * 0.33));
+    const mergedText = `${prev.text} ${last.text}`;
+    const mergedDur = last.endMs - prev.startMs;
+    if (
+      last.text.length <= shortThreshold &&
+      mergedText.length <= Math.round(maxChars * 1.5) &&
+      mergedDur <= maxDurationMs
+    ) {
+      results.pop();
+      results.pop();
+      const mergedWords = [...(prev.words ?? []), ...(last.words ?? [])];
+      results.push({
+        id: uuidv4(),
+        startMs: prev.startMs,
+        endMs: last.endMs,
+        text: mergedText,
+        words: mergedWords.length > 0 ? mergedWords : undefined,
+      });
+    }
   }
 
   return results;
@@ -261,16 +368,41 @@ function splitByText(
   const durationParts = Math.ceil(totalDuration / maxDurationMs);
   const numParts = Math.max(charParts, durationParts, 2);
 
-  const results: SubtitleSegment[] = [];
   const wordsArr = text.split(/\s+/);
   const wordsPerPart = Math.ceil(wordsArr.length / numParts);
 
-  for (let i = 0; i < numParts; i++) {
-    const partWords = wordsArr.slice(i * wordsPerPart, (i + 1) * wordsPerPart);
+  // First, pick cut indices (start word of each part). Then nudge each cut
+  // forward if the preceding word is a "glue" word (article, preposition,
+  // auxiliary, …) so noun phrases aren't sheared across blocks. Mirrors the
+  // overflow-tolerant behaviour in splitByWords.
+  const cuts: number[] = [0];
+  for (let i = 1; i < numParts; i++) {
+    let cut = i * wordsPerPart;
+    if (cut >= wordsArr.length) break;
+    // Don't shift more than overflow budget worth of words to avoid creating
+    // a tiny final block.
+    const maxShift = Math.max(1, Math.round(maxChars * 0.25 / 4));
+    let shifts = 0;
+    while (
+      cut > cuts[cuts.length - 1] + 1 &&
+      cut < wordsArr.length &&
+      shifts < maxShift &&
+      isGlueWord(wordsArr[cut - 1])
+    ) {
+      cut++;
+      shifts++;
+    }
+    if (cut > cuts[cuts.length - 1]) cuts.push(cut);
+  }
+  cuts.push(wordsArr.length);
+
+  const results: SubtitleSegment[] = [];
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const partWords = wordsArr.slice(cuts[i], cuts[i + 1]);
     if (partWords.length === 0) continue;
 
     const partText = partWords.join(' ');
-    const ratio = text.length > 0 ? partText.length / text.length : 1 / numParts;
+    const ratio = text.length > 0 ? partText.length / text.length : 1 / (cuts.length - 1);
     const partDuration = Math.round(totalDuration * ratio);
 
     const startMs = i === 0
@@ -281,7 +413,7 @@ function splitByText(
     results.push({
       id: uuidv4(),
       startMs,
-      endMs: i === numParts - 1 ? seg.endMs : endMs,
+      endMs: i === cuts.length - 2 ? seg.endMs : endMs,
       text: partText,
     });
   }

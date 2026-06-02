@@ -336,6 +336,14 @@ export function createVideoProxy(options: CreateProxyOptions): {
 export interface RenderVideoOptions {
   videoInputPath: string;
   audioInputPath?: string;
+  /** Constant offset (ms) added to the audio seek position relative to the
+   * video seek position. Use it when the muxed video and the separate audio
+   * file share content but their t=0 differs — e.g. the mux step input-seeks
+   * the video to the keyframe AT-OR-AFTER the alignment target, so muxed
+   * video t=0 lands a few hundred ms LATER than audio file t=0 (see
+   * SyncState.muxedAudioOffsetMs). Without this, audio plays from the same
+   * source second as video and is heard delayed by `offset` ms. */
+  audioSourceOffsetMs?: number;
   assFilePath?: string;
   fontsDirPath?: string;
   outputPath: string;
@@ -370,8 +378,10 @@ export function renderVideo(options: RenderVideoOptions): {
 
   // Audio input (separate file if provided)
   if (options.audioInputPath) {
-    if (trimStartSec != null && trimStartSec > 0) {
-      args.push('-ss', String(trimStartSec));
+    const audioOffsetSec = (options.audioSourceOffsetMs ?? 0) / 1000;
+    const audioStartSec = (trimStartSec ?? 0) + audioOffsetSec;
+    if (audioStartSec > 0) {
+      args.push('-ss', String(audioStartSec));
     }
     args.push('-i', options.audioInputPath);
   }
@@ -520,16 +530,30 @@ export function renderVideo(options: RenderVideoOptions): {
       lastProgressMs = Date.now();
     });
 
-    // Watchdog: kill FFmpeg after 90s with no stderr/progress activity.
+    // Watchdog driven by output file growth. See the detailed comment in
+    // renderReelVideo — same rationale (stderr/stdout buffering during
+    // libx264 lookahead flush and +faststart moov rewrite both look like
+    // "hung" to a text-only heuristic, but the file IS being written).
+    const HANG_THRESHOLD_MS = 5 * 60 * 1000;
+    let lastOutputSize = 0;
+    let lastOutputGrowthMs = Date.now();
     const watchdog = setInterval(() => {
-      const idleMs = Date.now() - lastProgressMs;
-      if (idleMs > 90_000) {
-        console.error(`[ffmpeg-render] watchdog: no progress for ${Math.round(idleMs / 1000)}s, killing FFmpeg`);
+      let currentSize = 0;
+      try { currentSize = fs.statSync(options.outputPath).size; } catch { /* */ }
+      if (currentSize > lastOutputSize) {
+        lastOutputSize = currentSize;
+        lastOutputGrowthMs = Date.now();
+        return;
+      }
+      const idleSignalMs = currentSize === 0 ? lastProgressMs : lastOutputGrowthMs;
+      const idleMs = Date.now() - idleSignalMs;
+      if (idleMs > HANG_THRESHOLD_MS) {
+        console.error(`[ffmpeg-render] watchdog: no output growth for ${Math.round(idleMs / 1000)}s (size=${currentSize}), killing FFmpeg`);
         clearInterval(watchdog);
         proc.kill('SIGTERM');
         setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } }, 5000);
       }
-    }, 10_000);
+    }, 15_000);
 
     proc.on('close', (code) => {
       clearInterval(watchdog);
@@ -572,6 +596,11 @@ export interface ClipTransform {
 export interface RenderReelOptions {
   videoInputPath: string;
   audioInputPath?: string;
+  /** Constant offset (ms) added to each clip's audio seek relative to the
+   * video seek. Use it when video and audio inputs share content but their
+   * t=0 differs. See SyncState.muxedAudioOffsetMs and the longer note on
+   * RenderVideoOptions.audioSourceOffsetMs. */
+  audioSourceOffsetMs?: number;
   clips: { sourceInMs: number; sourceOutMs: number; transform?: ClipTransform }[];
   /** Audio clips mapped to the video concat timeline — specifies silent gaps */
   audioClipRanges?: { startMs: number; endMs: number }[];
@@ -616,6 +645,7 @@ export function renderReelVideo(options: RenderReelOptions): {
   // Each clip gets its own input pair (video + audio) with -ss fast-seek.
   // This avoids the slow sequential decode that trim= causes.
   // Input layout: [v0, a0, v1, a1, v2, a2, ...] or [v0, v1, ...] if no separate audio
+  const audioOffsetSec = (options.audioSourceOffsetMs ?? 0) / 1000;
   for (let i = 0; i < clips.length; i++) {
     const clip = clips[i];
     const seekSec = clip.sourceInMs / 1000;
@@ -624,9 +654,10 @@ export function renderReelVideo(options: RenderReelOptions): {
     // Video input with seek
     args.push('-ss', String(seekSec), '-t', String(durSec), '-i', options.videoInputPath);
 
-    // Audio input with seek (same time range)
+    // Audio input with seek. Offset by audioSourceOffsetMs so muxed-video and
+    // separate-audio sources line up — see comment on RenderReelOptions.
     if (hasAudio) {
-      args.push('-ss', String(seekSec), '-t', String(durSec), '-i', options.audioInputPath!);
+      args.push('-ss', String(seekSec + audioOffsetSec), '-t', String(durSec), '-i', options.audioInputPath!);
     }
   }
 
@@ -961,18 +992,41 @@ export function renderReelVideo(options: RenderReelOptions): {
       lastProgressMs = Date.now();
     });
 
-    // Watchdog: if no progress and no stderr for 90s, assume FFmpeg is hung
-    // and kill it so the user sees a real error instead of waiting forever.
+    // Watchdog. The PRIMARY hang signal is the output file no longer
+    // growing — that's reliable regardless of whether stderr/stdout are
+    // buffering. The stderr/stdout-idle heuristic is only a fallback when
+    // the file doesn't exist yet (init phase) or is empty.
+    //
+    // Previous design used "no stderr/stdout for 90 s" which killed
+    // perfectly-fine renders during three different phases:
+    //   1. libx264 lookahead-buffer flush at the END of encoding (silent)
+    //   2. The +faststart moov-atom rewrite (silent for many minutes)
+    //   3. Slow disk flushes anywhere mid-encode
+    // All three are visible as file-size growth, so monitoring bytes
+    // written is the correct cure.
+    const HANG_THRESHOLD_MS = 5 * 60 * 1000; // 5 min with NO bytes written
+    let lastOutputSize = 0;
+    let lastOutputGrowthMs = Date.now();
     const watchdog = setInterval(() => {
-      const idleMs = Date.now() - lastProgressMs;
-      if (idleMs > 90_000) {
-        console.error(`[ffmpeg-render-reel] watchdog: no progress for ${Math.round(idleMs / 1000)}s, killing FFmpeg`);
+      let currentSize = 0;
+      try { currentSize = fs.statSync(options.outputPath).size; } catch { /* file not yet created */ }
+      if (currentSize > lastOutputSize) {
+        lastOutputSize = currentSize;
+        lastOutputGrowthMs = Date.now();
+        return;
+      }
+      // If output file doesn't exist yet, fall back to stderr/stdout idle —
+      // FFmpeg is in the "opening inputs / scanning fonts" phase.
+      const idleSignalMs = currentSize === 0 ? lastProgressMs : lastOutputGrowthMs;
+      const idleMs = Date.now() - idleSignalMs;
+      if (idleMs > HANG_THRESHOLD_MS) {
+        console.error(`[ffmpeg-render-reel] watchdog: no output growth for ${Math.round(idleMs / 1000)}s (size=${currentSize}), killing FFmpeg`);
         clearInterval(watchdog);
         proc.kill('SIGTERM');
         // Give it a moment to exit cleanly, then SIGKILL
         setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } }, 5000);
       }
-    }, 10_000);
+    }, 15_000);
 
     const cleanupTempImages = () => {
       for (const f of tempImageFiles) {

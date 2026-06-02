@@ -50,6 +50,48 @@ function getFFprobePath(): string {
   }
 }
 
+/**
+ * Find the nearest video keyframe at OR AFTER `targetSec`.
+ *
+ * Why "at or after": when we have a negative alignment offset (camera
+ * started before audio) we want to seek video forward to where audio
+ * begins. Input `-ss` snaps to a keyframe, and a keyframe BEFORE the
+ * target would leave video content that has no matching audio. Picking
+ * the keyframe AT OR AFTER lets us atrim the small leading slice off the
+ * audio to match (typically <5 s).
+ *
+ * Returns the keyframe pts time in seconds. Falls back to targetSec if
+ * probing fails or no keyframe is found in the window.
+ */
+function findKeyframeAtOrAfter(videoPath: string, targetSec: number): number {
+  try {
+    const ffprobe = getFFprobePath();
+    // Scan a 30 s window starting at the target; iPhone HEVC keyframes are
+    // typically 1–3 s apart so 30 s is way more than enough.
+    const out = execFileSync(ffprobe, [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'packet=pts_time,flags',
+      '-of', 'csv=p=0',
+      '-read_intervals', `${targetSec}%+30`,
+      videoPath,
+    ], { encoding: 'utf-8', timeout: 30_000 });
+
+    for (const line of out.split('\n')) {
+      const parts = line.split(',');
+      if (parts.length < 2) continue;
+      const pts = parseFloat(parts[0]);
+      const flags = parts[1] || '';
+      if (Number.isFinite(pts) && pts >= targetSec && flags.includes('K')) {
+        return pts;
+      }
+    }
+    return targetSec;
+  } catch {
+    return targetSec;
+  }
+}
+
 /** Get audio file duration in seconds using ffprobe */
 function probeAudioDuration(filePath: string): number {
   try {
@@ -173,36 +215,66 @@ export async function POST(
     }, { status: 507 });
   }
 
-  // Determine alignment offset
-  // Negative = camera starts before board by |offset| ms
-  // Positive = board starts before camera by offset ms
+  // Alignment offset convention:
+  //   Positive = board started before camera by offset ms (audio is "ahead",
+  //              the first offset ms of audio happened before the camera
+  //              started recording)
+  //   Negative = camera started before board by |offset| ms (camera is ahead,
+  //              the first |offset| ms of video has no matching audio)
   const alignmentOffsetMs = project.audio.alignmentOffsetMs ?? 0;
-  const offsetSec = Math.max(0, alignmentOffsetMs / 1000);
-
-  // Detect if the audio file is already aligned (mix files had offset baked in during mixing)
   const isAlreadyAligned = safeName === 'mixed.wav' || safeName.startsWith('mix_');
 
-  // For mix files with negative alignment (camera started first):
-  // The mix covers the overlap region starting at camera time |offset|,
-  // so we must seek the video forward to match.
-  const videoSeekSec = isAlreadyAligned && alignmentOffsetMs < 0
-    ? Math.abs(alignmentOffsetMs / 1000)
+  // Three cases we need to handle precisely:
+  //
+  // A) alignmentOffsetMs > 0  (board first)
+  //    Raw audio: atrim the leading offsetSec of audio so it lines up with
+  //               video t=0. Existing behaviour — works.
+  //    Mix audio: the offset was already baked into the mix at mix-preview
+  //               time, so no atrim needed. Existing behaviour — works.
+  //
+  // B) alignmentOffsetMs < 0  (camera first by |offset|)
+  //    For BOTH raw and mix the audio's t=0 corresponds to camera time
+  //    |offset|, so the video stream needs to start playing from t=|offset|.
+  //    The previous implementation used `-ss <|offset|>` AFTER the inputs
+  //    (an output seek) which sliced BOTH the video AND the audio by the
+  //    same amount — exactly the desync the user is reporting: audio plays
+  //    from its own t=|offset| (i.e. ~53 s in) instead of its t=0.
+  //
+  //    Fix: input-seek the video to the nearest keyframe AT-OR-AFTER
+  //    |offset|, then atrim the small leading delta off the audio. Input
+  //    -ss is fast and exact within the keyframe grid; using a keyframe
+  //    AT-OR-AFTER (rather than at-or-before) means the residual delta is
+  //    a positive number we can atrim cleanly — the alternative would have
+  //    needed `adelay` and would have left an audible mute at the start.
+  //
+  // C) alignmentOffsetMs === 0
+  //    Straight mux. No filter, no seek.
+  const offsetSecPositive = Math.max(0, alignmentOffsetMs / 1000);
+  const negTargetSec = alignmentOffsetMs < 0 ? Math.abs(alignmentOffsetMs / 1000) : 0;
+  const videoInputSeekSec = negTargetSec > 0
+    ? findKeyframeAtOrAfter(videoPath, negTargetSec)
     : 0;
+  const audioTrimSec = (!isAlreadyAligned && offsetSecPositive > 0 ? offsetSecPositive : 0)
+                     + (negTargetSec > 0 ? videoInputSeekSec - negTargetSec : 0);
 
   // Probe audio duration to use -t for reliable trimming
   // (-shortest is unreliable with -c:v copy)
   let audioDurationSec = probeAudioDuration(audioPath);
-  if (!isAlreadyAligned && offsetSec > 0) {
-    // Raw audio: we'll trim by offset, so effective duration is shorter
-    audioDurationSec = Math.max(0, audioDurationSec - offsetSec);
+  if (audioTrimSec > 0) {
+    audioDurationSec = Math.max(0, audioDurationSec - audioTrimSec);
   }
 
   // Create job
   const job = jobManager.createJob(id, 'mux');
   jobManager.startJob(job.id);
   jobManager.updateProgress(job.id, 5,
-    `Muxando: video + audio (${Math.round(audioDurationSec)}s)${videoSeekSec > 0 ? ` seek=${videoSeekSec.toFixed(1)}s` : ''}...`
+    `Muxando: video + audio (${Math.round(audioDurationSec)}s)` +
+    `${videoInputSeekSec > 0 ? ` videoSeek=${videoInputSeekSec.toFixed(2)}s` : ''}` +
+    `${audioTrimSec > 0 ? ` audioTrim=${audioTrimSec.toFixed(2)}s` : ''}...`
   );
+  console.log(`[mux] alignmentOffsetMs=${alignmentOffsetMs} isAlreadyAligned=${isAlreadyAligned} ` +
+    `videoInputSeek=${videoInputSeekSec.toFixed(3)}s audioTrim=${audioTrimSec.toFixed(3)}s ` +
+    `audioDur=${audioDurationSec.toFixed(2)}s`);
 
   const ffmpeg = getFFmpegPath();
 
@@ -213,44 +285,34 @@ export async function POST(
   // tone mapping that the user reviews against — and tagging the output as
   // BT.709 SDR explicitly suppressed QuickTime's HLG handling, making things
   // worse.
-  let args: string[];
+  const args: string[] = [];
 
-  if (!isAlreadyAligned && offsetSec > 0) {
-    // Raw board/amplified audio: trim audio by offset, limit output to trimmed audio duration
-    args = [
-      '-i', videoPath,
-      '-i', audioPath,
-      '-filter_complex', `[1:a]atrim=start=${offsetSec},asetpts=PTS-STARTPTS[aligned]`,
+  // Video input — input-seek if we need to skip the silent leader.
+  if (videoInputSeekSec > 0) {
+    args.push('-ss', String(videoInputSeekSec));
+  }
+  args.push('-i', videoPath);
+  args.push('-i', audioPath);
+
+  if (audioTrimSec > 0) {
+    args.push(
+      '-filter_complex', `[1:a]atrim=start=${audioTrimSec.toFixed(6)},asetpts=PTS-STARTPTS[aligned]`,
       '-map', '0:v:0',
       '-map', '[aligned]',
-      '-c:v', 'copy',
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      ...(audioDurationSec > 0 ? ['-t', String(audioDurationSec)] : ['-shortest']),
-      '-y',
-      '-progress', 'pipe:1',
-      outputPath,
-    ];
+    );
   } else {
-    // Mix/aligned file: seek video to the overlap start point, then mux with audio.
-    // -ss goes AFTER -i (output seeking) to avoid keyframe-misalignment that
-    // occurs with input seeking + -c:v copy. Input seeking snaps to the nearest
-    // keyframe BEFORE the target, causing video to lead audio by up to 30+ seconds.
-    args = [
-      '-i', videoPath,
-      '-i', audioPath,
-      '-map', '0:v:0',
-      '-map', '1:a:0',
-      '-c:v', 'copy',
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      ...(videoSeekSec > 0 ? ['-ss', String(videoSeekSec)] : []),
-      ...(audioDurationSec > 0 ? ['-t', String(audioDurationSec)] : ['-shortest']),
-      '-y',
-      '-progress', 'pipe:1',
-      outputPath,
-    ];
+    args.push('-map', '0:v:0', '-map', '1:a:0');
   }
+
+  args.push(
+    '-c:v', 'copy',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    ...(audioDurationSec > 0 ? ['-t', String(audioDurationSec)] : ['-shortest']),
+    '-y',
+    '-progress', 'pipe:1',
+    outputPath,
+  );
 
   const proc = spawn(ffmpeg, args, { stdio: ['ignore', 'pipe', 'pipe'] });
   jobManager.setProcess(job.id, proc);
@@ -290,6 +352,10 @@ export async function POST(
       const muxedDurationSec = probeAudioDuration(outputPath);
       const currentProject = await getProject(id);
       if (currentProject) {
+        // audioTrimSec is how much we sliced off the start of the standalone
+        // audio file to align with the keyframe-snapped video seek. The same
+        // amount must be applied to Compose's a1 sourceInMs so the player
+        // doesn't drift by this fraction-of-a-second.
         await updateProject(id, {
           sync: {
             ...currentProject.sync,
@@ -297,6 +363,9 @@ export async function POST(
             muxedDurationMs: muxedDurationSec > 0
               ? Math.round(muxedDurationSec * 1000)
               : undefined,
+            muxedAudioOffsetMs: audioTrimSec > 0
+              ? Math.round(audioTrimSec * 1000)
+              : 0,
             selectedAudioPath: audioPath,
           },
         });

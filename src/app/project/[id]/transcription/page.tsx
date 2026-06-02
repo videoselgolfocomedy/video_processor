@@ -840,7 +840,7 @@ export default function TranscriptionPage() {
                 <Input
                   type="number" min={20} max={200}
                   value={constraints.maxCharsPerBlock}
-                  onChange={(e) => handleConstraintsChange({ ...constraints, maxCharsPerBlock: parseInt(e.target.value) || 80 })}
+                  onChange={(e) => handleConstraintsChange({ ...constraints, maxCharsPerBlock: parseInt(e.target.value) || 40 })}
                 />
               </div>
               <div className="flex-1 min-w-[140px]">

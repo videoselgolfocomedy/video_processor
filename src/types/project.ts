@@ -222,6 +222,18 @@ export interface SyncState {
   mixedAudioPath?: string;
   muxedVideoPath?: string;   // video with replaced audio track
   muxedDurationMs?: number;  // actual duration of the muxed file (probed after mux completes)
+  /**
+   * How many ms the muxed video's t=0 is AHEAD of the standalone audio
+   * (selectedAudioPath) t=0. Non-zero when the mux pipeline had to shift the
+   * video forward to align with the audio: for a negative alignmentOffsetMs
+   * the mux input-seeks the video to the nearest keyframe at-or-after
+   * |alignmentOffsetMs|, which usually overshoots the target by a fraction
+   * of a second. The same offset must be applied to the standalone audio
+   * clip's sourceInMs in the Compose timeline, otherwise the Compose player
+   * (which uses the muxed video silent + standalone audio) plays them
+   * desynced by this amount.
+   */
+  muxedAudioOffsetMs?: number;
   selectedAudioPath?: string; // audio file chosen for mux (used as transcription source)
   // Mix volumes: board = clean voice from desk, ambient = room sound from camera
   boardVolume: number;
