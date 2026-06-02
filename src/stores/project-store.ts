@@ -42,13 +42,17 @@ export const useProjectStore = create<ProjectStore>((set) => ({
       if (!res.ok) throw new Error('Failed to fetch project');
       const data = await res.json();
 
-      // Auto-reconcile media: if the muxed video path is missing or points to
-      // a deleted file, this hits an endpoint that scans export/ + audio/ for
-      // a hand-copied muxed_*.mp4 and links it. Lets restored projects work
-      // from just project.json + a copied muxed file, without re-running mux
-      // or needing the original camera/board sources. Silent on success/no-op.
+      // Auto-reconcile media: hits an endpoint that scans export/ + audio/
+      // for hand-copied muxed_*.mp4 files (when muxedVideoPath is empty), and
+      // also clears mixedAudioPath / selectedAudioPath references whose files
+      // are missing on disk (so the player falls back to the muxed video's
+      // embedded audio instead of muting it for a 404 <audio> tag). Silent on
+      // success/no-op. Runs whenever we have either no muxed path OR a
+      // standalone audio path that might be stale — both cases need a check.
       const muxedPath = data?.sync?.muxedVideoPath;
-      const needsReconcile = !muxedPath; // server also handles "set but missing on disk"
+      const mixedAudioPath = data?.sync?.mixedAudioPath;
+      const selectedAudioPath = data?.sync?.selectedAudioPath;
+      const needsReconcile = !muxedPath || !!mixedAudioPath || !!selectedAudioPath;
       if (needsReconcile) {
         try {
           const recRes = await fetch(`/api/projects/${id}/reconcile-media`, { method: 'POST' });
