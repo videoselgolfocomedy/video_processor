@@ -483,6 +483,33 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
 
   const needsSeparateAudio = audioSrc && videoSrc !== audioSrc;
 
+  // Per-clip motion transform (zoom/position/rotation) inherited from compose.
+  // In timeline phase, find the rv1 clip covering the current time and apply
+  // its transform to the video element so the preview matches the export.
+  const activeTransform = (() => {
+    if (!isTimelinePhase) return undefined;
+    const rv1 = reel.composition.clips
+      .filter((c) => c.trackId === 'rv1')
+      .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+    const active = rv1.find((c) => currentTimeMs >= c.timelineStartMs && currentTimeMs < c.timelineEndMs)
+      ?? rv1[0];
+    return active?.transform;
+  })();
+  const videoTransformCss = (() => {
+    const t = activeTransform;
+    if (!t) return undefined;
+    const scale = t.scale ?? 1;
+    const x = t.x ?? 0;
+    const y = t.y ?? 0;
+    const rot = t.rotation ?? 0;
+    if (Math.abs(scale - 1) < 0.001 && Math.abs(x) < 0.001 && Math.abs(y) < 0.001 && Math.abs(rot) < 0.001) return undefined;
+    const parts: string[] = [];
+    if (Math.abs(x) > 0.001 || Math.abs(y) > 0.001) parts.push(`translate(${x * 100}%, ${y * 100}%)`);
+    if (Math.abs(rot) > 0.001) parts.push(`rotate(${rot}deg)`);
+    if (Math.abs(scale - 1) > 0.001) parts.push(`scale(${scale})`);
+    return parts.join(' ');
+  })();
+
   return (
     <div className="space-y-2">
       {/* Video with crop overlay */}
@@ -496,6 +523,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
             ref={videoRef}
             src={videoSrc}
             className="w-full h-full object-contain"
+            style={videoTransformCss ? { transform: videoTransformCss, transformOrigin: 'center center' } : undefined}
             muted={!!needsSeparateAudio}
             playsInline
             preload="auto"

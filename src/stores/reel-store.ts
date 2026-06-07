@@ -206,6 +206,8 @@ function buildReelMainClips(params: {
 
   if (inRange.length > 1) {
     // Multiple compose clips → segment with cuts.
+    // `emit` runs per track; only the video track (rv1) carries the visual
+    // transform (zoom/position/rotation) — audio has none.
     const emit = (trackId: 'rv1' | 'ra1', type: 'video' | 'audio', fileName: string) => {
       let off = 0;
       for (const cc of inRange) {
@@ -224,6 +226,9 @@ function buildReelMainClips(params: {
           timelineEndMs: off + dur,
           sourceInMs: sourceIn,
           sourceOutMs: sourceIn + dur,
+          // Inherit the compose clip's motion transform (zoom/position/angle)
+          // so a camera straighten / zoom set in compose carries into the reel.
+          ...(type === 'video' && cc.transform ? { transform: { ...cc.transform } } : {}),
         });
         off += dur;
       }
@@ -232,10 +237,13 @@ function buildReelMainClips(params: {
     if (audioFileName) emit('ra1', 'audio', audioFileName);
   } else {
     // 0 or 1 overlapping compose clip → single continuous segment.
+    // Inherit the transform from the single overlapping compose clip if present.
+    const inheritedTransform = inRange.length === 1 ? inRange[0].transform : undefined;
     if (videoFileName) {
       clips.push({
         id: uuidv4(), type: 'video', fileName: videoFileName, originalName: videoFileName,
         trackId: 'rv1', timelineStartMs: 0, timelineEndMs: reelDur, sourceInMs: srcStart, sourceOutMs: srcEnd,
+        ...(inheritedTransform ? { transform: { ...inheritedTransform } } : {}),
       });
     }
     if (audioFileName) {
@@ -1029,7 +1037,25 @@ export const useReelStore = create<ReelStore>((set, get) => ({
     // (i.e. the old single-span fallback). If the user split/moved clips
     // themselves there'd be >1 or a non-zero start, and we leave them alone.
     const looksUnsegmented = rv1Clips.length === 1 && rv1Clips[0].timelineStartMs === 0;
-    const shouldResegment = !needsRecreate && looksUnsegmented && composeCutCount > 1 && !!composeClips;
+
+    // Does the reel's current single clip's transform match what compose would
+    // give it now? Detects reels created before transform inheritance — e.g.
+    // the user set a rotation/zoom in compose AFTER the reel was made, and the
+    // reel's clip has no (or stale) transform. Compared loosely on the fields.
+    const composeClipForReel = (composeClips ?? [])
+      .filter((c) => c.trackId === 'v1' && c.timelineEndMs > reel.startMs && c.timelineStartMs < reel.endMs)
+      .sort((a, b) => a.timelineStartMs - b.timelineStartMs)[0];
+    const txEq = (a?: { scale?: number; x?: number; y?: number; rotation?: number }, b?: typeof a) => {
+      const aS = a?.scale ?? 1, bS = b?.scale ?? 1;
+      const aX = a?.x ?? 0, bX = b?.x ?? 0;
+      const aY = a?.y ?? 0, bY = b?.y ?? 0;
+      const aR = a?.rotation ?? 0, bR = b?.rotation ?? 0;
+      return Math.abs(aS - bS) < 0.001 && Math.abs(aX - bX) < 0.001 && Math.abs(aY - bY) < 0.001 && Math.abs(aR - bR) < 0.001;
+    };
+    const transformDrifted = looksUnsegmented && !txEq(rv1Clips[0]?.transform, composeClipForReel?.transform);
+
+    const shouldResegment = !needsRecreate && looksUnsegmented && !!composeClips &&
+      (composeCutCount > 1 || transformDrifted);
 
     if ((needsRecreate || shouldResegment) && (videoFileName || audioFileName)) {
       const clips = buildReelMainClips({
