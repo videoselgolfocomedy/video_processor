@@ -10,13 +10,18 @@ import type { SubtitleSegment, SubtitleStyle, CompositionClip } from '@/types/pr
 const FPS = 30;
 
 // Build a CSS transform string from a clip transform (matches compose-preview).
-function transformToCss(t?: { scale: number; x: number; y: number }): string | undefined {
+function transformToCss(t?: { scale: number; x: number; y: number; rotation?: number }): string | undefined {
   if (!t) return undefined;
   const scale = t.scale ?? 1;
   const x = t.x ?? 0;
   const y = t.y ?? 0;
-  if (Math.abs(scale - 1) < 0.001 && Math.abs(x) < 0.001 && Math.abs(y) < 0.001) return undefined;
-  return `translate(${x * 100}%, ${y * 100}%) scale(${scale})`;
+  const rot = t.rotation ?? 0;
+  if (Math.abs(scale - 1) < 0.001 && Math.abs(x) < 0.001 && Math.abs(y) < 0.001 && Math.abs(rot) < 0.001) return undefined;
+  const parts: string[] = [];
+  if (Math.abs(x) > 0.001 || Math.abs(y) > 0.001) parts.push(`translate(${x * 100}%, ${y * 100}%)`);
+  if (Math.abs(rot) > 0.001) parts.push(`rotate(${rot}deg)`);
+  if (Math.abs(scale - 1) > 0.001) parts.push(`scale(${scale})`);
+  return parts.join(' ');
 }
 
 interface SubtitlePreviewProps {

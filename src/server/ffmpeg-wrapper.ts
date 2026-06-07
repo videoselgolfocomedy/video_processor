@@ -588,9 +588,10 @@ export interface ImageOverlayInput {
 }
 
 export interface ClipTransform {
-  scale: number;  // 1 = original; >1 zoom in; <1 zoom out
-  x: number;      // -1..1 fraction of output width (positive = shift right)
-  y: number;      // -1..1 fraction of output height (positive = shift down)
+  scale: number;     // 1 = original; >1 zoom in; <1 zoom out
+  x: number;         // -1..1 fraction of output width (positive = shift right)
+  y: number;         // -1..1 fraction of output height (positive = shift down)
+  rotation?: number; // degrees, clockwise positive (default 0)
 }
 
 export interface RenderReelOptions {
@@ -747,7 +748,7 @@ export function renderReelVideo(options: RenderReelOptions): {
   // Helper: detect non-identity transform
   const isIdentityTransform = (t?: ClipTransform): boolean => {
     if (!t) return true;
-    return Math.abs((t.scale ?? 1) - 1) < 0.001 && Math.abs(t.x ?? 0) < 0.001 && Math.abs(t.y ?? 0) < 0.001;
+    return Math.abs((t.scale ?? 1) - 1) < 0.001 && Math.abs(t.x ?? 0) < 0.001 && Math.abs(t.y ?? 0) < 0.001 && Math.abs(t.rotation ?? 0) < 0.001;
   };
 
   const Wout = options.width;
@@ -806,18 +807,43 @@ export function renderReelVideo(options: RenderReelOptions): {
         const s = t.scale ?? 1;
         const x = t.x ?? 0;
         const y = t.y ?? 0;
+        const rotDeg = t.rotation ?? 0;
         const durSec = ((clip.sourceOutMs - clip.sourceInMs) / 1000).toFixed(3);
 
-        const scaledW = `trunc(iw*${s.toFixed(4)}/2)*2`;
-        const scaledH = `trunc(ih*${s.toFixed(4)}/2)*2`;
+        // [v_pre] is exactly Wout×Hout, so scaled dims are known in absolute px
+        // (even, for libx264). Compute everything against the known canvas so
+        // rotation's expanded bounding box and the overlay offset stay exact.
+        const sw = Math.max(2, Math.round((Wout * s) / 2) * 2);
+        const sh = Math.max(2, Math.round((Hout * s) / 2) * 2);
 
-        const offsetX = Math.round(Wout * (1 - s) / 2 + x * Wout);
-        const offsetY = Math.round(Hout * (1 - s) / 2 + y * Hout);
+        let frameLabel = `v${i}_zoom`;
+        filterParts.push(`[v${i}_pre]scale=${sw}:${sh}[v${i}_zoom]`);
 
-        filterParts.push(`[v${i}_pre]scale=${scaledW}:${scaledH}[v${i}_zoom]`);
+        // Bounding box after rotation (so corners aren't clipped by the rotate
+        // filter itself — the canvas overlay + the user's zoom handle the rest).
+        let bw = sw;
+        let bh = sh;
+        if (Math.abs(rotDeg) > 0.001) {
+          const rad = (rotDeg * Math.PI) / 180;
+          const absCos = Math.abs(Math.cos(rad));
+          const absSin = Math.abs(Math.sin(rad));
+          bw = Math.max(2, Math.ceil((sw * absCos + sh * absSin) / 2) * 2);
+          bh = Math.max(2, Math.ceil((sw * absSin + sh * absCos) / 2) * 2);
+          // FFmpeg rotate: positive angle = clockwise (matches the CSS preview).
+          // ow/oh expand the output so the whole rotated frame is kept; fill the
+          // exposed corners with black (they land on the black canvas anyway).
+          filterParts.push(`[v${i}_zoom]rotate=a=${rad.toFixed(6)}:ow=${bw}:oh=${bh}:c=black[v${i}_rot]`);
+          frameLabel = `v${i}_rot`;
+        }
+
+        // Center the (possibly rotated) frame on the canvas, then apply the
+        // translate. With no rotation bw=sw so this reduces to the old formula.
+        const offsetX = Math.round((Wout - bw) / 2 + x * Wout);
+        const offsetY = Math.round((Hout - bh) / 2 + y * Hout);
+
         // Black canvas. format=yuv420p chained (not as option — that throws on FFmpeg 6.x).
         filterParts.push(`color=c=black:s=${Wout}x${Hout}:r=${options.fps}:d=${durSec},format=yuv420p[v${i}_bg]`);
-        filterParts.push(`[v${i}_bg][v${i}_zoom]overlay=x=${offsetX}:y=${offsetY}:eof_action=endall,format=yuv420p,setsar=1[v${i}]`);
+        filterParts.push(`[v${i}_bg][${frameLabel}]overlay=x=${offsetX}:y=${offsetY}:eof_action=endall,format=yuv420p,setsar=1[v${i}]`);
       }
 
       filterParts.push(`[${audIdx}:a]asetpts=PTS-STARTPTS[a${i}]`);

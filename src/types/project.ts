@@ -370,14 +370,18 @@ export interface CompositionClip {
     y: number;
     width: number;  // 0-1 fraction
   };
-  // Per-clip motion transform (Premiere-style zoom/position).
+  // Per-clip motion transform (Premiere-style zoom/position/rotation).
   // Applied to the rendered clip on top of mode (cutaway/overlay) framing.
   // scale: 1.0 = original size, >1 = zoom in, <1 = zoom out
   // x/y: in fractions of composition width/height, 0 = no offset
+  // rotation: degrees, clockwise positive. Useful for straightening a
+  //   slightly-crooked camera. Combine with a small zoom so the rotated
+  //   frame still fills the canvas (no black triangles in the corners).
   transform?: {
-    scale: number;  // 0.1 - 5.0
-    x: number;      // -1 to 1
-    y: number;      // -1 to 1
+    scale: number;     // 0.1 - 5.0
+    x: number;         // -1 to 1
+    y: number;         // -1 to 1
+    rotation?: number; // degrees, default 0
   };
 }
 

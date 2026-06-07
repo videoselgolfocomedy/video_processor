@@ -19,13 +19,15 @@ const CONTIGUOUS_THRESHOLD_MS = 50; // clips within 50ms are considered contiguo
 // same contiguous range. If we keyed by id, React would unmount and remount
 // the <Sequence>/<Audio> during active playback, which leaves Remotion's
 // audio element in a permanently-silent state until page reload.
+type ClipTransform = { scale: number; x: number; y: number; rotation?: number };
+
 interface MergedRange {
   /** Stable across split-and-remerge — based on bounds, not clip ids. */
   key: string;
   timelineStartMs: number;
   timelineEndMs: number;
   sourceInMs: number;
-  transform?: { scale: number; x: number; y: number };
+  transform?: ClipTransform;
 }
 
 interface MergeableClip {
@@ -34,22 +36,20 @@ interface MergeableClip {
   timelineEndMs: number;
   sourceInMs: number;
   sourceOutMs: number;
-  transform?: { scale: number; x: number; y: number };
+  transform?: ClipTransform;
 }
 
-function transformsEqual(
-  a?: { scale: number; x: number; y: number },
-  b?: { scale: number; x: number; y: number }
-): boolean {
+function transformsEqual(a?: ClipTransform, b?: ClipTransform): boolean {
   const aScale = a?.scale ?? 1; const bScale = b?.scale ?? 1;
   const aX = a?.x ?? 0; const bX = b?.x ?? 0;
   const aY = a?.y ?? 0; const bY = b?.y ?? 0;
-  return Math.abs(aScale - bScale) < 0.001 && Math.abs(aX - bX) < 0.001 && Math.abs(aY - bY) < 0.001;
+  const aR = a?.rotation ?? 0; const bR = b?.rotation ?? 0;
+  return Math.abs(aScale - bScale) < 0.001 && Math.abs(aX - bX) < 0.001 && Math.abs(aY - bY) < 0.001 && Math.abs(aR - bR) < 0.001;
 }
 
 function rangeKey(prefix: string, r: Pick<MergedRange, 'timelineStartMs' | 'timelineEndMs' | 'sourceInMs' | 'transform'>): string {
   const t = r.transform;
-  const tStr = t ? `${t.scale.toFixed(3)}_${t.x.toFixed(3)}_${t.y.toFixed(3)}` : '0';
+  const tStr = t ? `${t.scale.toFixed(3)}_${t.x.toFixed(3)}_${t.y.toFixed(3)}_${(t.rotation ?? 0).toFixed(2)}` : '0';
   return `${prefix}:${r.timelineStartMs}-${r.timelineEndMs}@${r.sourceInMs}#${tStr}`;
 }
 
@@ -102,14 +102,20 @@ function mergeContiguousClips(trackClips: MergeableClip[], keyPrefix: string): M
 
 // Build a CSS transform string from a clip transform.
 // scale: 1=original, >1=zoom in. x/y: -1..1 fraction of composition size (positive = right/down).
-function transformToCss(t?: { scale: number; x: number; y: number }): string | undefined {
+// rotation: degrees clockwise.
+function transformToCss(t?: ClipTransform): string | undefined {
   if (!t) return undefined;
   const scale = t.scale ?? 1;
   const x = t.x ?? 0;
   const y = t.y ?? 0;
-  if (Math.abs(scale - 1) < 0.001 && Math.abs(x) < 0.001 && Math.abs(y) < 0.001) return undefined;
-  // translate as percentage of element (which fills 100% of composition), then scale around center
-  return `translate(${x * 100}%, ${y * 100}%) scale(${scale})`;
+  const rot = t.rotation ?? 0;
+  if (Math.abs(scale - 1) < 0.001 && Math.abs(x) < 0.001 && Math.abs(y) < 0.001 && Math.abs(rot) < 0.001) return undefined;
+  // translate (% of element, which fills the composition), then rotate, then scale around center
+  const parts: string[] = [];
+  if (Math.abs(x) > 0.001 || Math.abs(y) > 0.001) parts.push(`translate(${x * 100}%, ${y * 100}%)`);
+  if (Math.abs(rot) > 0.001) parts.push(`rotate(${rot}deg)`);
+  if (Math.abs(scale - 1) > 0.001) parts.push(`scale(${scale})`);
+  return parts.join(' ');
 }
 
 // --- Remotion Composition ---
