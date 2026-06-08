@@ -3,6 +3,7 @@
 import { useCallback, useRef, useEffect, useState } from 'react';
 import { useReelStore } from '@/stores/reel-store';
 import { getReelVideoElement } from './reel-video-ref';
+import { getActiveReelTransform, applyCanvasTransform } from '@/lib/reel-transform';
 import { ReelSubtitleBox } from './reel-subtitle-box';
 import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
 import { useCustomPresets } from '@/hooks/use-custom-presets';
@@ -69,11 +70,20 @@ function CropPreviewCanvas({ reelId }: { reelId: string }) {
       const sy = crop.centerY * srcH - cropPixH / 2;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // Black backdrop so a rotated/zoomed-out frame shows black in the gaps
+      // (matches the export, which overlays the clip on a black canvas).
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // Apply per-clip motion transform (zoom/position/rotation) inherited from
+      // compose, so the 9:16 preview matches the export.
+      const activeT = getActiveReelTransform(reelId);
+      const applied = applyCanvasTransform(ctx, canvas.width, canvas.height, activeT);
       ctx.drawImage(
         video,
         Math.max(0, sx), Math.max(0, sy), cropPixW, cropPixH,
         0, 0, canvas.width, canvas.height
       );
+      if (applied) ctx.setTransform(1, 0, 0, 1, 0, 0);
 
       // Subtitle text is now rendered by ReelSubtitleBox overlay, no need to draw on canvas
 

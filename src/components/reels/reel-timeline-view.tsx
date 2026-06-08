@@ -15,6 +15,7 @@ import { RefreshCw, Scissors, Trash2, Bold, Frame } from 'lucide-react';
 import { splitLongSegments } from '@/lib/subtitle-utils';
 import { formatTimestamp } from '@/lib/utils';
 import { getReelVideoElement } from './reel-video-ref';
+import { getActiveReelTransform, applyCanvasTransform } from '@/lib/reel-transform';
 import type { SubtitleStyle, SubtitleWord } from '@/types/project';
 
 interface ReelTimelineViewProps {
@@ -446,11 +447,16 @@ function TimelineCanvasPreview({ reelId }: { reelId: string }) {
       const sy = crop.centerY * srcH - cropPixH / 2;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const activeT = getActiveReelTransform(reelId);
+      const applied = applyCanvasTransform(ctx, canvas.width, canvas.height, activeT);
       ctx.drawImage(
         video,
         Math.max(0, sx), Math.max(0, sy), cropPixW, cropPixH,
         0, 0, canvas.width, canvas.height
       );
+      if (applied) ctx.setTransform(1, 0, 0, 1, 0, 0);
 
       if (isPlaying) {
         animRef.current = requestAnimationFrame(draw);
