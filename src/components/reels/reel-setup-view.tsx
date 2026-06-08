@@ -11,12 +11,13 @@ interface ReelSetupViewProps {
   reelId: string;
   videoSrc?: string;
   audioSrc?: string;
+  audioOffsetMs?: number;
   /** v1/a1 compose clips — passed through so the reel can inherit compose
    *  cuts the first time the user enters its timeline phase. */
   composeClips?: CompositionClip[];
 }
 
-export function ReelSetupView({ reelId, videoSrc, audioSrc, composeClips }: ReelSetupViewProps) {
+export function ReelSetupView({ reelId, videoSrc, audioSrc, audioOffsetMs, composeClips }: ReelSetupViewProps) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const baseDurationMs = useReelStore((s) => s.baseDurationMs);
   const enterTimelinePhase = useReelStore((s) => s.enterTimelinePhase);
@@ -30,7 +31,7 @@ export function ReelSetupView({ reelId, videoSrc, audioSrc, composeClips }: Reel
   return (
     <div className="space-y-4 p-4">
       {/* Video Player with crop overlay */}
-      <ReelVideoPlayer reelId={reelId} videoSrc={videoSrc} audioSrc={audioSrc} />
+      <ReelVideoPlayer reelId={reelId} videoSrc={videoSrc} audioSrc={audioSrc} audioOffsetMs={audioOffsetMs} />
 
       {/* Trim Bar */}
       <ReelTrimBar reelId={reelId} baseDurationMs={baseDurationMs} />

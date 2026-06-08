@@ -1,8 +1,20 @@
 import fs from 'fs/promises';
 import path from 'path';
-import type { CustomStylePreset } from '@/types/project';
+import type { CustomStylePreset, OverlayTemplate } from '@/types/project';
 
 const SETTINGS_PATH = path.join(process.cwd(), 'data', 'settings.json');
+
+/**
+ * Directory holding the binary assets (PNG/GIF) referenced by image overlay
+ * templates. Lives next to settings.json under data/ so it's global (shared
+ * across projects) and survives project deletion.
+ */
+export const OVERLAY_ASSETS_DIR = path.join(process.cwd(), 'data', 'overlay-templates', 'assets');
+
+export async function ensureOverlayAssetsDir(): Promise<string> {
+  await fs.mkdir(OVERLAY_ASSETS_DIR, { recursive: true });
+  return OVERLAY_ASSETS_DIR;
+}
 
 export interface AppSettings {
   keys: {
@@ -23,6 +35,12 @@ export interface AppSettings {
    * here in settings.json they survive project deletion, re-import, etc.
    */
   customStylePresets?: CustomStylePreset[];
+  /**
+   * Reusable overlay templates (text + image lines) saved from one reel and
+   * applicable to any other reel/project. Global for the same reason as
+   * customStylePresets — the UI promises cross-project reuse.
+   */
+  overlayTemplates?: OverlayTemplate[];
 }
 
 const defaults: AppSettings = {
@@ -31,6 +49,7 @@ const defaults: AppSettings = {
     model: 'anthropic/claude-haiku-4-5',
   },
   customStylePresets: [],
+  overlayTemplates: [],
 };
 
 async function ensureDir() {
@@ -48,6 +67,7 @@ export async function getSettings(): Promise<AppSettings> {
       keys: { ...defaults.keys, ...stored.keys },
       openrouter: { ...defaults.openrouter, ...stored.openrouter },
       customStylePresets: stored.customStylePresets ?? [],
+      overlayTemplates: stored.overlayTemplates ?? [],
     };
   } catch {
     return { ...defaults };

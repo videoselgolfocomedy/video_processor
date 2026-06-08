@@ -60,6 +60,49 @@ export interface CustomStylePreset {
   style: SubtitleStyle;
 }
 
+/**
+ * One overlay (text or image) inside a saved overlay template. Times are
+ * stored RELATIVE to the template's own start (the earliest overlay in the
+ * saved set), so a template can be dropped onto any reel at any playhead
+ * position and the lines keep their relative timing.
+ *
+ * Image overlays don't reference a project file directly — the PNG/GIF bytes
+ * are copied into a GLOBAL asset store (data/overlay-templates/assets/) keyed
+ * by `imageAssetId`, so the template stays valid even if the source project is
+ * deleted. On apply, the asset is copied back into the target project.
+ */
+export interface OverlayTemplateItem {
+  type: 'text' | 'image' | 'gif';
+  /** ms from the template start (min timelineStartMs across the saved set). */
+  startOffsetMs: number;
+  durationMs: number;
+  /** Which kind of overlay track to place this on when applying. */
+  trackKind: 'text' | 'image';
+  overlayPosition?: { x: number; y: number; width: number };
+  opacity?: number;
+  // text-overlay fields
+  textContent?: string;
+  textStyle?: NonNullable<CompositionClip['textStyle']>;
+  // image/gif fields — `imageAssetId` is the filename in the global asset
+  // store (e.g. "<uuid>.png"); `originalName` is the user-facing name.
+  imageAssetId?: string;
+  originalName?: string;
+}
+
+/**
+ * A reusable overlay template saved to the global library (settings.json),
+ * shared across all reels and projects and surviving project deletion.
+ * `kind: 'single'` holds one overlay; `kind: 'set'` holds every overlay line
+ * captured from a reel at once.
+ */
+export interface OverlayTemplate {
+  id: string;
+  name: string;
+  createdAt: string;
+  kind: 'single' | 'set';
+  items: OverlayTemplateItem[];
+}
+
 export interface ReelVersion {
   id: string;
   label: string;

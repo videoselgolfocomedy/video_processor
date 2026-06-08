@@ -17,10 +17,11 @@ interface ReelLayoutProps {
   projectId: string;
   videoSrc?: string;
   audioSrc?: string;
+  audioOffsetMs?: number;
   onSave: () => Promise<void>;
 }
 
-export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayoutProps) {
+export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSave }: ReelLayoutProps) {
   const router = useRouter();
   const reels = useReelStore((s) => s.reels);
   const activeReelId = useReelStore((s) => s.activeReelId);
@@ -441,6 +442,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
           reelId={activeReelId}
           videoSrc={videoSrc}
           audioSrc={audioSrc}
+          audioOffsetMs={audioOffsetMs}
         />
       ) : (
         <div className="flex flex-1 min-h-0">
@@ -450,6 +452,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, onSave }: ReelLayout
               reelId={activeReelId}
               videoSrc={videoSrc}
               audioSrc={audioSrc}
+              audioOffsetMs={audioOffsetMs}
               composeClips={compositionClips}
             />
           </div>

@@ -3,7 +3,7 @@
 import { useCallback, useRef, useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import { useReelStore } from '@/stores/reel-store';
-import { addToLibrary, removeFromLibrary, useTextOverlayLibrary, type TextOverlayPreset } from '@/lib/text-overlay-library';
+import { OverlayTemplatesBar, SaveOverlayAsTemplateButton } from './overlay-template-controls';
 import { ReelVideoPlayer } from './reel-video-player';
 import { ReelSubtitleBox } from './reel-subtitle-box';
 import { ReelTimeline } from './reel-timeline';
@@ -11,7 +11,7 @@ import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-edito
 import { useCustomPresets } from '@/hooks/use-custom-presets';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { RefreshCw, Scissors, Trash2, Bold, Frame, BookmarkPlus, Library, Trash } from 'lucide-react';
+import { RefreshCw, Scissors, Trash2, Bold, Frame } from 'lucide-react';
 import { splitLongSegments } from '@/lib/subtitle-utils';
 import { formatTimestamp } from '@/lib/utils';
 import { getReelVideoElement } from './reel-video-ref';
@@ -21,6 +21,7 @@ interface ReelTimelineViewProps {
   reelId: string;
   videoSrc?: string;
   audioSrc?: string;
+  audioOffsetMs?: number;
 }
 
 /* ── Text overlay rendering on canvas ──────────────────────────────── */
@@ -1058,8 +1059,6 @@ function TextClipConfigPanel({ reelId }: { reelId: string }) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const firstSelectedId = useReelStore((s) => s.selectedClipIds[0] ?? null);
   const updateClip = useReelStore((s) => s.updateClip);
-  const library = useTextOverlayLibrary();
-  const [showLibrary, setShowLibrary] = useState(false);
 
   const clip = reel?.composition.clips.find((c) => c.id === firstSelectedId);
   if (!clip || clip.type !== 'text') return null;
@@ -1091,109 +1090,12 @@ function TextClipConfigPanel({ reelId }: { reelId: string }) {
     });
   };
 
-  // Save current clip's style + content + position as a reusable preset in the
-  // browser-wide library (persists across projects and reels).
-  const handleSaveAsPreset = () => {
-    const defaultName = (clip.textContent ?? '').slice(0, 32).trim() || 'Untitled preset';
-    const name = window.prompt('Nombre del preset:', defaultName);
-    if (!name?.trim()) return;
-    addToLibrary({
-      name: name.trim(),
-      textContent: clip.textContent ?? '',
-      textStyle: ts,
-      overlayPosition: pos,
-    });
-  };
-
-  // Apply a saved preset to the currently selected clip — keeps the clip's
-  // timeline position and ID, only replaces style/content/overlayPosition.
-  const applyPreset = (preset: TextOverlayPreset) => {
-    updateClip(reelId, clip.id, {
-      textContent: preset.textContent,
-      textStyle: { ...preset.textStyle },
-      overlayPosition: { ...preset.overlayPosition },
-    });
-    setShowLibrary(false);
-  };
-
   return (
     <div className="overflow-y-auto p-3 space-y-3">
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-medium text-orange-400">Text Overlay</h3>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={handleSaveAsPreset}
-            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground border border-border rounded"
-            title="Guardar este overlay como preset (compartido entre proyectos)"
-          >
-            <BookmarkPlus className="h-2.5 w-2.5" />
-            Save preset
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowLibrary((v) => !v)}
-            className={`flex items-center gap-1 px-1.5 py-0.5 text-[10px] border rounded ${
-              showLibrary
-                ? 'border-orange-400/60 text-orange-300 bg-orange-500/10'
-                : 'border-border text-muted-foreground hover:text-foreground'
-            }`}
-            title="Aplicar un preset guardado"
-          >
-            <Library className="h-2.5 w-2.5" />
-            Library {library.length > 0 && <span className="opacity-70">({library.length})</span>}
-          </button>
-        </div>
+        <SaveOverlayAsTemplateButton clip={clip} />
       </div>
-
-      {/* Library picker */}
-      {showLibrary && (
-        <div className="rounded border border-border bg-muted/20 p-2 space-y-1.5">
-          {library.length === 0 ? (
-            <p className="text-[10px] text-muted-foreground text-center py-2">
-              Sin presets guardados. Pulsa &ldquo;Save preset&rdquo; para guardar este overlay y reutilizarlo en otros reels/proyectos.
-            </p>
-          ) : (
-            library.map((preset) => (
-              <div
-                key={preset.id}
-                className="group flex items-center gap-2 px-1.5 py-1 rounded hover:bg-muted/40"
-              >
-                <button
-                  type="button"
-                  onClick={() => applyPreset(preset)}
-                  className="flex-1 min-w-0 text-left"
-                  title="Aplicar este preset al clip actual"
-                >
-                  <div className="text-[11px] truncate font-medium">{preset.name}</div>
-                  <div
-                    className="text-[9px] truncate text-muted-foreground"
-                    style={{
-                      fontFamily: `${preset.textStyle.fontFamily}, sans-serif`,
-                      fontWeight: preset.textStyle.fontWeight,
-                      color: preset.textStyle.color,
-                    }}
-                  >
-                    {preset.textContent || '(sin texto)'}
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (window.confirm(`¿Borrar preset "${preset.name}"?`)) {
-                      removeFromLibrary(preset.id);
-                    }
-                  }}
-                  className="p-1 text-muted-foreground hover:text-red-400 opacity-0 group-hover:opacity-100"
-                  title="Borrar preset"
-                >
-                  <Trash className="h-2.5 w-2.5" />
-                </button>
-              </div>
-            ))
-          )}
-        </div>
-      )}
 
       {/* Text content */}
       <div>
@@ -1495,7 +1397,10 @@ function ImageClipConfigPanel({ reelId }: { reelId: string }) {
 
   return (
     <div className="overflow-y-auto p-3 space-y-3">
-      <h3 className="text-xs font-medium text-purple-400">Image Overlay</h3>
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-medium text-purple-400">Image Overlay</h3>
+        <SaveOverlayAsTemplateButton clip={clip} />
+      </div>
 
       {/* Thumbnail preview with position indicator */}
       <div>
@@ -1596,7 +1501,7 @@ function ImageClipConfigPanel({ reelId }: { reelId: string }) {
   └──────────────────────┴──────────────────────────────────────┘
 */
 
-export function ReelTimelineView({ reelId, videoSrc, audioSrc }: ReelTimelineViewProps) {
+export function ReelTimelineView({ reelId, videoSrc, audioSrc, audioOffsetMs }: ReelTimelineViewProps) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const selectedClipIds = useReelStore((s) => s.selectedClipIds);
 
@@ -1613,7 +1518,12 @@ export function ReelTimelineView({ reelId, videoSrc, audioSrc }: ReelTimelineVie
     <div className="flex h-full flex-col">
       {/* Hidden video player for canvas capture */}
       <div className="w-0 h-0 overflow-hidden">
-        <ReelVideoPlayer reelId={reelId} videoSrc={videoSrc} audioSrc={audioSrc} />
+        <ReelVideoPlayer reelId={reelId} videoSrc={videoSrc} audioSrc={audioSrc} audioOffsetMs={audioOffsetMs} />
+      </div>
+
+      {/* Overlay-template library bar (save reel's overlays / apply templates) */}
+      <div className="relative">
+        <OverlayTemplatesBar reelId={reelId} />
       </div>
 
       {/* Top row: preview + timeline */}

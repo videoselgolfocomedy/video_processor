@@ -91,6 +91,15 @@ interface ReelVideoPlayerProps {
   reelId: string;
   videoSrc?: string;
   audioSrc?: string;
+  /** Constant offset (ms) between the muxed-video timeline and the separate
+   * audio file's timeline. The mux step input-seeks the video to the keyframe
+   * at-or-after the alignment target, so the muxed video's t=0 sits this many
+   * ms ahead of the standalone aligned-audio t=0 (SyncState.muxedAudioOffsetMs).
+   * When a separate <audio> element drives sound (video is muted), its
+   * currentTime must lead video.currentTime by this amount, otherwise the voice
+   * lags the mouth by ~1s. Only applied when a separate audio file is used; the
+   * muxed's own embedded audio needs no offset. */
+  audioOffsetMs?: number;
 }
 
 type DragMode = 'move' | 'nw' | 'ne' | 'sw' | 'se' | null;
@@ -176,7 +185,7 @@ function getTimelineDuration(clips: CompositionClip[]): number {
   return Math.max(...clips.map((c) => c.timelineEndMs));
 }
 
-export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerProps) {
+export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: ReelVideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -209,21 +218,28 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
   const reelDurationMs = reel ? (reel.endMs - reel.startMs) : 0;
   const isTimelinePhase = phase === 'timeline';
 
+  // When a separate audio file (not the muxed's embedded track) drives sound,
+  // its currentTime must LEAD the muxed video's currentTime by the mux
+  // keyframe-snap offset, or the voice lags the mouth by ~1s. See the prop doc.
+  const needsSeparateAudio = !!(audioSrc && videoSrc !== audioSrc);
+  const audioOffsetSec = needsSeparateAudio ? (audioOffsetMs ?? 0) / 1000 : 0;
+
   // Register video element for canvas capture by other components
   useEffect(() => {
     setReelVideoElement(videoRef.current);
     return () => setReelVideoElement(null);
   }, []);
 
-  // Sync audio element to video
+  // Sync audio element to video (audio leads video by audioOffsetSec)
   const syncAudio = useCallback(() => {
     const video = videoRef.current;
     const audio = audioRef.current;
     if (!video || !audio) return;
-    if (Math.abs(audio.currentTime - video.currentTime) > 0.1) {
-      audio.currentTime = video.currentTime;
+    const target = video.currentTime + audioOffsetSec;
+    if (Math.abs(audio.currentTime - target) > 0.1) {
+      audio.currentTime = target;
     }
-  }, []);
+  }, [audioOffsetSec]);
 
   // Play/pause sync
   useEffect(() => {
@@ -234,14 +250,14 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
     if (isPlaying) {
       video.play().catch(() => {});
       if (audio) {
-        audio.currentTime = video.currentTime;
+        audio.currentTime = video.currentTime + audioOffsetSec;
         audio.play().catch(() => {});
       }
     } else {
       video.pause();
       audio?.pause();
     }
-  }, [isPlaying]);
+  }, [isPlaying, audioOffsetSec]);
 
   // Time update loop
   useEffect(() => {
@@ -275,7 +291,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
             const firstSourceMs = timelineToSourceMs(0, freshClips, reel.sourceStartMs ?? reel.startMs);
             if (firstSourceMs !== null) {
               video.currentTime = firstSourceMs / 1000;
-              if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000;
+              if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000 + audioOffsetSec;
             }
             lastTickSetMsRef.current = 0;
             setCurrentTime(0);
@@ -298,7 +314,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
             if (Math.abs(lastGapSeekSourceMsRef.current - targetMs) > 1) {
               lastGapSeekSourceMsRef.current = targetMs;
               video.currentTime = targetMs / 1000;
-              if (audioRef.current) audioRef.current.currentTime = targetMs / 1000;
+              if (audioRef.current) audioRef.current.currentTime = targetMs / 1000 + audioOffsetSec;
             }
             lastTickSetMsRef.current = nextClip.timelineStartMs;
             setCurrentTime(nextClip.timelineStartMs);
@@ -308,7 +324,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
             if (firstSourceMs !== null) {
               lastGapSeekSourceMsRef.current = firstSourceMs;
               video.currentTime = firstSourceMs / 1000;
-              if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000;
+              if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000 + audioOffsetSec;
             }
             lastTickSetMsRef.current = 0;
             setCurrentTime(0);
@@ -318,7 +334,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
         // Setup phase: linear mapping
         if (currentSec >= endSec) {
           video.currentTime = startSec;
-          if (audioRef.current) audioRef.current.currentTime = startSec;
+          if (audioRef.current) audioRef.current.currentTime = startSec + audioOffsetSec;
           lastTickSetMsRef.current = 0;
           setCurrentTime(0);
         } else {
@@ -363,7 +379,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
 
     animFrameRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animFrameRef.current);
-  }, [isPlaying, reel, reelId, startSec, endSec, setCurrentTime, syncAudio, isTimelinePhase]);
+  }, [isPlaying, reel, reelId, startSec, endSec, setCurrentTime, syncAudio, isTimelinePhase, audioOffsetSec]);
 
   // Seek when store currentTimeMs changes externally (user scrub, button, etc.)
   // During playback, skip if the change came from the animation tick to prevent
@@ -394,7 +410,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
 
     if (Math.abs(video.currentTime - targetSec) > 0.05) {
       video.currentTime = targetSec;
-      if (audioRef.current) audioRef.current.currentTime = targetSec;
+      if (audioRef.current) audioRef.current.currentTime = targetSec + audioOffsetSec;
       // Clear gap seek tracker so the tick loop won't treat this as a duplicate
       lastGapSeekSourceMsRef.current = -Infinity;
     }
@@ -418,7 +434,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
     if (!video || !reel) return;
     if (!isTimelinePhase && (video.currentTime < startSec || video.currentTime > endSec)) {
       video.currentTime = startSec;
-      if (audioRef.current) audioRef.current.currentTime = startSec;
+      if (audioRef.current) audioRef.current.currentTime = startSec + audioOffsetSec;
       setCurrentTime(0);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -480,8 +496,6 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc }: ReelVideoPlayerP
   const cropTop = (crop.centerY - cropH / 2) * 100;
   const cropWidthPct = cropW * 100;
   const cropHeightPct = cropH * 100;
-
-  const needsSeparateAudio = audioSrc && videoSrc !== audioSrc;
 
   // Per-clip motion transform (zoom/position/rotation) inherited from compose.
   // In timeline phase, find the rv1 clip covering the current time and apply

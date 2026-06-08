@@ -112,12 +112,20 @@ export default function ReelsPage() {
   // Build video/audio source URLs
   const videoSrc = getVideoSrc(currentProject, projectId);
   const audioSrc = getAudioSrc(currentProject, projectId);
+  // The reel preview plays the muxed video (muted) + the separate aligned
+  // audio file. The mux keyframe-snap means the audio must LEAD the video by
+  // muxedAudioOffsetMs or the voice lags the mouth by ~1s. Only relevant when
+  // the video is the muxed file; with a raw-camera fallback there is no offset.
+  const audioOffsetMs = currentProject.sync.muxedVideoPath
+    ? (currentProject.sync.muxedAudioOffsetMs ?? 0)
+    : 0;
 
   return (
     <ReelLayout
       projectId={projectId}
       videoSrc={videoSrc}
       audioSrc={audioSrc}
+      audioOffsetMs={audioOffsetMs}
       onSave={handleSave}
     />
   );
