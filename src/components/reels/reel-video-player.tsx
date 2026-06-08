@@ -2,6 +2,7 @@
 
 import { useRef, useEffect, useCallback, useState } from 'react';
 import { useReelStore } from '@/stores/reel-store';
+import { useProjectStore } from '@/stores/project-store';
 import { setReelVideoElement } from './reel-video-ref';
 import { Button } from '@/components/ui/button';
 import { Play, Pause, Crosshair, RotateCcw, SkipBack, SkipForward, ChevronLeft, ChevronRight } from 'lucide-react';
@@ -201,6 +202,12 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
 
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const sourceResolution = useReelStore((s) => s.sourceResolution);
+  // Compose v1 clips — used in setup phase to inherit the per-clip transform
+  // (zoom/position/rotation) so the reel preview already reflects the straighten
+  // applied in compose, before the reel timeline clips are created.
+  const composeClips = useProjectStore((s) => s.currentProject?.composition?.clips);
+  const composeClipsRef = useRef<CompositionClip[] | undefined>(composeClips);
+  composeClipsRef.current = composeClips;
   const isPlaying = useReelStore((s) => s.isPlaying);
   const setIsPlaying = useReelStore((s) => s.setIsPlaying);
   const setCurrentTime = useReelStore((s) => s.setCurrentTime);
@@ -498,16 +505,32 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
   const cropHeightPct = cropH * 100;
 
   // Per-clip motion transform (zoom/position/rotation) inherited from compose.
-  // In timeline phase, find the rv1 clip covering the current time and apply
-  // its transform to the video element so the preview matches the export.
+  // - Timeline phase: the reel has its own rv1 clips (which inherited the
+  //   compose transform at creation); use the one covering the current time.
+  // - Setup phase: the reel has no clips yet, so read the transform straight
+  //   from the COMPOSE v1 clip that covers the current source position. This
+  //   makes the setup preview already show the straightened / zoomed image.
   const activeTransform = (() => {
-    if (!isTimelinePhase) return undefined;
-    const rv1 = reel.composition.clips
-      .filter((c) => c.trackId === 'rv1')
+    if (isTimelinePhase) {
+      const rv1 = reel.composition.clips
+        .filter((c) => c.trackId === 'rv1')
+        .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+      const active = rv1.find((c) => currentTimeMs >= c.timelineStartMs && currentTimeMs < c.timelineEndMs)
+        ?? rv1[0];
+      return active?.transform;
+    }
+    // Setup phase: map the current playhead to source time, then find the
+    // compose v1 clip whose source range contains it.
+    const composeClips = composeClipsRef.current;
+    if (!composeClips || composeClips.length === 0) return undefined;
+    const curSourceMs = srcStartMs + currentTimeMs; // setup is a linear span
+    const v1 = composeClips
+      .filter((c) => c.trackId === 'v1')
       .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
-    const active = rv1.find((c) => currentTimeMs >= c.timelineStartMs && currentTimeMs < c.timelineEndMs)
-      ?? rv1[0];
-    return active?.transform;
+    const inSource = v1.find((c) => curSourceMs >= c.sourceInMs && curSourceMs < c.sourceOutMs);
+    // Fall back to whichever compose clip overlaps the reel's compose window.
+    const overlap = v1.find((c) => c.timelineEndMs > reel.startMs && c.timelineStartMs < reel.endMs);
+    return (inSource ?? overlap)?.transform;
   })();
   const videoTransformCss = (() => {
     const t = activeTransform;
