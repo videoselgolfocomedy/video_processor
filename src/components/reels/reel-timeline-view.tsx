@@ -1376,6 +1376,66 @@ function TextClipConfigPanel({ reelId }: { reelId: string }) {
 
 /* ── Image/GIF clip config panel ────────────────────────────────────── */
 
+// Motion (zoom / position / rotation) panel for a selected video clip on the
+// reel timeline — mirrors the compose ClipProperties motion section so reels
+// can zoom/reframe/straighten per cut, applied by renderReelVideo via
+// clip.transform.
+function VideoClipMotionPanel({ reelId }: { reelId: string }) {
+  const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
+  const firstSelectedId = useReelStore((s) => s.selectedClipIds[0] ?? null);
+  const updateClip = useReelStore((s) => s.updateClip);
+
+  const clip = reel?.composition.clips.find((c) => c.id === firstSelectedId);
+  if (!clip || clip.type !== 'video') return null;
+
+  const t = clip.transform ?? { scale: 1, x: 0, y: 0, rotation: 0 };
+  const patch = (updates: Partial<{ scale: number; x: number; y: number; rotation: number }>) => {
+    updateClip(reelId, clip.id, {
+      transform: {
+        scale: t.scale ?? 1,
+        x: t.x ?? 0,
+        y: t.y ?? 0,
+        rotation: t.rotation ?? 0,
+        ...updates,
+      },
+    });
+  };
+
+  const row = (label: string, value: string, min: number, max: number, step: number, sliderVal: number, onChange: (v: number) => void) => (
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] text-muted-foreground w-12">{label}</span>
+      <input
+        type="range" min={min} max={max} step={step} value={sliderVal}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="flex-1 h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+      />
+      <span className="text-[10px] text-foreground w-12 text-right font-mono">{value}</span>
+    </div>
+  );
+
+  return (
+    <div className="overflow-y-auto p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-medium text-purple-400">Motion (zoom / posición / ángulo)</h3>
+        <button
+          className="text-[10px] text-muted-foreground hover:text-foreground"
+          onClick={() => updateClip(reelId, clip.id, { transform: { scale: 1, x: 0, y: 0, rotation: 0 } })}
+          title="Reset motion"
+        >
+          Reset
+        </button>
+      </div>
+      {row('Zoom', `${Math.round((t.scale ?? 1) * 100)}%`, 10, 400, 1, Math.round((t.scale ?? 1) * 100), (v) => patch({ scale: v / 100 }))}
+      {row('Pos X', `${Math.round((t.x ?? 0) * 100)}%`, -100, 100, 1, Math.round((t.x ?? 0) * 100), (v) => patch({ x: v / 100 }))}
+      {row('Pos Y', `${Math.round((t.y ?? 0) * 100)}%`, -100, 100, 1, Math.round((t.y ?? 0) * 100), (v) => patch({ y: v / 100 }))}
+      {row('Ángulo', `${(t.rotation ?? 0).toFixed(1)}°`, -150, 150, 1, Math.round((t.rotation ?? 0) * 10), (v) => patch({ rotation: v / 10 }))}
+      <p className="text-[9px] text-muted-foreground italic leading-tight">
+        Tip: para enderezar un plano torcido, gira el ángulo y sube un poco el zoom para que no aparezcan esquinas negras. Para valores distintos por momento, divide el clip (S).
+      </p>
+    </div>
+  );
+}
+
 function ImageClipConfigPanel({ reelId }: { reelId: string }) {
   const params = useParams();
   const projectId = params?.id as string | undefined;
@@ -1513,6 +1573,7 @@ export function ReelTimelineView({ reelId, videoSrc, audioSrc, audioOffsetMs }: 
     : null;
   const showTextPanel = selectedClip?.type === 'text';
   const showImagePanel = selectedClip?.type === 'image' || selectedClip?.type === 'gif';
+  const showVideoPanel = selectedClip?.type === 'video';
 
   return (
     <div className="flex h-full flex-col">
@@ -1551,6 +1612,8 @@ export function ReelTimelineView({ reelId, videoSrc, audioSrc, audioOffsetMs }: 
             <TextClipConfigPanel reelId={reelId} />
           ) : showImagePanel ? (
             <ImageClipConfigPanel reelId={reelId} />
+          ) : showVideoPanel ? (
+            <VideoClipMotionPanel reelId={reelId} />
           ) : (
             <>
               <div className="p-3 border-b border-border">
