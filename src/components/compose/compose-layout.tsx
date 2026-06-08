@@ -5,6 +5,7 @@ import { useComposeStore } from '@/stores/compose-store';
 import { ComposePreview } from './compose-preview';
 import { ComposeSubtitleEditor } from './compose-subtitle-editor';
 import { ClipProperties } from './clip-properties';
+import { ComposeOverlayTemplatesBar } from './compose-overlay-template-controls';
 import { MultiTrackTimeline } from './multi-track-timeline';
 import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
 import { useCustomPresets } from '@/hooks/use-custom-presets';
@@ -259,6 +260,13 @@ export function ComposeLayout({
 
         {/* Right Panel: context-sensitive (format / clip props) */}
         <div className="w-1/3 flex-shrink-0 bg-card overflow-auto flex flex-col">
+          {/* Overlay-template library bar — save/apply text overlay templates
+              (shared global library with reels). Always visible. */}
+          <div className="flex items-center justify-between gap-1 px-2 py-1 border-b border-border bg-muted/10">
+            <span className="text-[10px] text-muted-foreground">Overlays texto:</span>
+            <ComposeOverlayTemplatesBar />
+          </div>
+
           {(panelMode === 'clip-properties' || panelMode === 'text-clip' || panelMode === 'image-clip') && firstSelectedClip && (
             <div className="flex-1 overflow-auto">
               <ClipProperties />
