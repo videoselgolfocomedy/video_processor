@@ -24,6 +24,10 @@ const defaultReelTracks: CompositionTrack[] = [
   { id: 'rs1', type: 'subtitle', label: 'Subtitles', locked: false, muted: false, visible: true },
 ];
 
+// Module-level clipboard for copy/paste of reel clips (see compose-store for
+// the same pattern). Survives store resets; not serialized.
+let reelClipboard: { trackId: string; offsetMs: number; clip: CompositionClip }[] = [];
+
 const defaultReelStyle = STYLE_PRESETS.find((p) => p.id === 'reel-punchline')!.style;
 
 /**
@@ -151,6 +155,9 @@ interface ReelStore {
   rippleDeleteSelected: (reelId: string) => void;
   collapseGapAtPlayhead: (reelId: string) => void;
   clearTimeline: (reelId: string) => void;
+  copySelectedClips: (reelId: string) => void;
+  pasteClips: (reelId: string) => void;
+  canPasteClips: () => boolean;
   syncSubtitlesToClips: (reelId: string) => void;
   resetTimeline: (reelId: string) => void;
   msToPixel: (ms: number) => number;
@@ -1480,6 +1487,50 @@ export const useReelStore = create<ReelStore>((set, get) => ({
       dirty: true,
     }));
   },
+
+  copySelectedClips: (reelId) => {
+    const state = get();
+    const reel = state.reels.find((r) => r.id === reelId);
+    if (!reel) return;
+    const selected = reel.composition.clips.filter((c) => state.selectedClipIds.includes(c.id));
+    if (selected.length === 0) return;
+    const earliest = Math.min(...selected.map((c) => c.timelineStartMs));
+    reelClipboard = selected.map((c) => ({
+      trackId: c.trackId,
+      offsetMs: c.timelineStartMs - earliest,
+      clip: JSON.parse(JSON.stringify(c)) as CompositionClip,
+    }));
+  },
+
+  pasteClips: (reelId) => {
+    if (reelClipboard.length === 0) return;
+    const state = get();
+    const reel = state.reels.find((r) => r.id === reelId);
+    if (!reel) return;
+    const pasteAt = state.currentTimeMs;
+    set(pushUndo(get()));
+    const newClips: CompositionClip[] = reelClipboard.map((entry) => {
+      const dur = entry.clip.timelineEndMs - entry.clip.timelineStartMs;
+      const startMs = pasteAt + entry.offsetMs;
+      return {
+        ...JSON.parse(JSON.stringify(entry.clip)),
+        id: uuidv4(),
+        timelineStartMs: startMs,
+        timelineEndMs: startMs + dur,
+      } as CompositionClip;
+    });
+    set((s) => ({
+      reels: updateReelInList(s.reels, reelId, (r) => ({
+        ...r,
+        composition: { ...r.composition, clips: [...r.composition.clips, ...newClips] },
+      })),
+      selectedClipIds: newClips.map((c) => c.id),
+      selectedSubtitleIds: [],
+      dirty: true,
+    }));
+  },
+
+  canPasteClips: () => reelClipboard.length > 0,
 
   syncSubtitlesToClips: (reelId) => {
     set(pushUndo(get()));

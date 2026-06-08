@@ -198,6 +198,20 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
           }
         }
 
+        // Ctrl/Cmd+C = copy selected clips, Ctrl/Cmd+V = paste at playhead
+        if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+          if (store.selectedClipIds.length > 0) {
+            e.preventDefault();
+            store.copySelectedClips(rid);
+          }
+        }
+        if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+          if (store.canPasteClips()) {
+            e.preventDefault();
+            store.pasteClips(rid);
+          }
+        }
+
         // S = split selected clip, Shift+S = split all tracks
         if (e.key === 's' && !e.ctrlKey && !e.metaKey) {
           e.preventDefault();

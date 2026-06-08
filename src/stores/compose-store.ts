@@ -35,6 +35,13 @@ export interface ComposeVersion {
   subtitleStyle: SubtitleStyle;
 }
 
+// Module-level clipboard for copy/paste of compose clips. Lives outside the
+// store so it survives store resets and isn't serialized into project.json.
+// Each entry keeps its trackId and a timeline offset relative to the earliest
+// copied clip, so a multi-clip paste preserves the layout starting at the
+// playhead.
+let composeClipboard: { trackId: string; offsetMs: number; clip: CompositionClip }[] = [];
+
 interface ComposeUndoEntry {
   clips: CompositionClip[];
   subtitleSegments: SubtitleSegment[];
@@ -182,6 +189,9 @@ interface ComposeStore {
   collapseGapAtPlayhead: () => void;
   closeGapForSelected: () => void;
   clearTimeline: () => void;
+  copySelectedClips: () => void;
+  pasteClips: () => void;
+  canPasteClips: () => boolean;
 
   // Tracks
   addTrack: (type: CompositionTrack['type'], label: string) => string;
@@ -712,6 +722,43 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
     get().saveSnapshot();
     set({ clips: [], selectedClipIds: [], selectedSubtitleIds: [], dirty: true });
   },
+
+  copySelectedClips: () => {
+    const state = get();
+    const selected = state.clips.filter((c) => state.selectedClipIds.includes(c.id));
+    if (selected.length === 0) return;
+    const earliest = Math.min(...selected.map((c) => c.timelineStartMs));
+    composeClipboard = selected.map((c) => ({
+      trackId: c.trackId,
+      offsetMs: c.timelineStartMs - earliest,
+      clip: JSON.parse(JSON.stringify(c)) as CompositionClip,
+    }));
+  },
+
+  pasteClips: () => {
+    if (composeClipboard.length === 0) return;
+    const state = get();
+    const pasteAt = state.currentTimeMs;
+    get().saveSnapshot();
+    const newClips: CompositionClip[] = composeClipboard.map((entry) => {
+      const dur = entry.clip.timelineEndMs - entry.clip.timelineStartMs;
+      const startMs = pasteAt + entry.offsetMs;
+      return {
+        ...JSON.parse(JSON.stringify(entry.clip)),
+        id: uuidv4(),
+        timelineStartMs: startMs,
+        timelineEndMs: startMs + dur,
+      } as CompositionClip;
+    });
+    set((s) => ({
+      clips: [...s.clips, ...newClips],
+      selectedClipIds: newClips.map((c) => c.id),
+      selectedSubtitleIds: [],
+      dirty: true,
+    }));
+  },
+
+  canPasteClips: () => composeClipboard.length > 0,
 
   addTrack: (type, label) => {
     const state = get();
