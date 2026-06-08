@@ -3,7 +3,7 @@
 import { useCallback, useRef, useEffect, useState } from 'react';
 import { useReelStore } from '@/stores/reel-store';
 import { getReelVideoElement } from './reel-video-ref';
-import { getActiveReelTransform, applyCanvasTransform } from '@/lib/reel-transform';
+import { getActiveReelTransform, applyCanvasTransform, drawActiveOverlayVideos, hasActiveOverlayVideo } from '@/lib/reel-transform';
 import { ReelSubtitleBox } from './reel-subtitle-box';
 import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
 import { useCustomPresets } from '@/hooks/use-custom-presets';
@@ -85,9 +85,14 @@ function CropPreviewCanvas({ reelId }: { reelId: string }) {
       );
       if (applied) ctx.setTransform(1, 0, 0, 1, 0, 0);
 
+      // Draw PiP (secondary-track) video overlays on top, in output space.
+      drawActiveOverlayVideos(ctx, canvas.width, canvas.height, reelId);
+
       // Subtitle text is now rendered by ReelSubtitleBox overlay, no need to draw on canvas
 
-      if (isPlaying) {
+      // Keep redrawing while playing OR while a PiP overlay is on screen (so its
+      // frames refresh even when the main timeline is paused).
+      if (isPlaying || hasActiveOverlayVideo(reelId)) {
         animRef.current = requestAnimationFrame(draw);
       }
     };

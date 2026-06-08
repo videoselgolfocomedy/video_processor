@@ -4,6 +4,7 @@ import { useRef, useEffect, useCallback, useState } from 'react';
 import { useReelStore } from '@/stores/reel-store';
 import { useProjectStore } from '@/stores/project-store';
 import { setReelVideoElement } from './reel-video-ref';
+import { ReelOverlayVideos } from './reel-overlay-videos';
 import { Button } from '@/components/ui/button';
 import { Play, Pause, Crosshair, RotateCcw, SkipBack, SkipForward, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { CompositionClip } from '@/types/project';
@@ -549,6 +550,8 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
 
   return (
     <div className="space-y-2">
+      {/* Hidden PiP overlay video elements — frame source for canvas previews */}
+      <ReelOverlayVideos reelId={reelId} />
       {/* Video with crop overlay */}
       <div
         ref={containerRef}

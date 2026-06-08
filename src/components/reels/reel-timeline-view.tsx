@@ -15,7 +15,7 @@ import { RefreshCw, Scissors, Trash2, Bold, Frame } from 'lucide-react';
 import { splitLongSegments } from '@/lib/subtitle-utils';
 import { formatTimestamp } from '@/lib/utils';
 import { getReelVideoElement } from './reel-video-ref';
-import { getActiveReelTransform, applyCanvasTransform } from '@/lib/reel-transform';
+import { getActiveReelTransform, applyCanvasTransform, drawActiveOverlayVideos, hasActiveOverlayVideo } from '@/lib/reel-transform';
 import type { SubtitleStyle, SubtitleWord } from '@/types/project';
 
 interface ReelTimelineViewProps {
@@ -458,7 +458,10 @@ function TimelineCanvasPreview({ reelId }: { reelId: string }) {
       );
       if (applied) ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-      if (isPlaying) {
+      // Draw PiP (secondary-track) video overlays on top, in output space.
+      drawActiveOverlayVideos(ctx, canvas.width, canvas.height, reelId);
+
+      if (isPlaying || hasActiveOverlayVideo(reelId)) {
         animRef.current = requestAnimationFrame(draw);
       }
     };
