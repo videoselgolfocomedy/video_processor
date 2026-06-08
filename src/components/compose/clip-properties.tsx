@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Input } from '@/components/ui/input';
 import { useComposeStore } from '@/stores/compose-store';
-import { ComposeSaveOverlayTemplateButton } from './compose-overlay-template-controls';
+import { ComposeSaveOverlayTemplateButton, ComposeApplyOverlayTemplateButton } from './compose-overlay-template-controls';
 import { formatDuration } from '@/lib/utils';
 
 export function ClipProperties() {
@@ -81,9 +81,10 @@ export function ClipProperties() {
         <span className="text-foreground font-mono">{formatDuration(duration)}</span>
       </div>
 
-      {/* Save-as-template button for text overlays */}
+      {/* Apply / save template buttons for text overlays */}
       {isTextClip && (
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-1">
+          <ComposeApplyOverlayTemplateButton clip={clip} />
           <ComposeSaveOverlayTemplateButton clip={clip} />
         </div>
       )}

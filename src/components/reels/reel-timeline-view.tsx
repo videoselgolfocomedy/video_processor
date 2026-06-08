@@ -3,7 +3,7 @@
 import { useCallback, useRef, useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import { useReelStore } from '@/stores/reel-store';
-import { OverlayTemplatesBar, SaveOverlayAsTemplateButton } from './overlay-template-controls';
+import { OverlayTemplatesBar, SaveOverlayAsTemplateButton, ApplyOverlayTemplateButton } from './overlay-template-controls';
 import { ReelVideoPlayer } from './reel-video-player';
 import { ReelSubtitleBox } from './reel-subtitle-box';
 import { ReelTimeline } from './reel-timeline';
@@ -1100,7 +1100,10 @@ function TextClipConfigPanel({ reelId }: { reelId: string }) {
     <div className="overflow-y-auto p-3 space-y-3">
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-medium text-orange-400">Text Overlay</h3>
-        <SaveOverlayAsTemplateButton clip={clip} />
+        <div className="flex items-center gap-1">
+          <ApplyOverlayTemplateButton reelId={reelId} clip={clip} />
+          <SaveOverlayAsTemplateButton clip={clip} />
+        </div>
       </div>
 
       {/* Text content */}

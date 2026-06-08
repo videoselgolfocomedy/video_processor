@@ -183,6 +183,71 @@ function OverlayTemplateRow({
   );
 }
 
+/* ───── Per-clip "apply template to THIS overlay" dropdown ────── */
+
+/**
+ * Applies a saved text template's content + style + position to an already-
+ * selected text overlay clip (vs the bar's "apply" which inserts new clips at
+ * the playhead). Uses the first text item of the chosen template. Only shown
+ * for text clips.
+ */
+export function ApplyOverlayTemplateButton({ reelId, clip }: { reelId: string; clip: CompositionClip }) {
+  const { templates } = useOverlayTemplates();
+  const updateClip = useReelStore((s) => s.updateClip);
+  const [open, setOpen] = useState(false);
+
+  if (clip.type !== 'text') return null;
+
+  const textTemplates = templates.filter((t) => t.items.some((i) => i.trackKind === 'text'));
+
+  const apply = (tpl: OverlayTemplate) => {
+    const item = tpl.items.find((i) => i.trackKind === 'text');
+    if (!item) return;
+    updateClip(reelId, clip.id, {
+      // Keep the clip's own text content unless the template carries one; most
+      // of the time the user wants the template's STYLE, so apply style+position
+      // and only adopt the template text if the clip is currently empty.
+      textContent: (clip.textContent ?? '').trim() ? clip.textContent : (item.textContent ?? ''),
+      textStyle: item.textStyle,
+      overlayPosition: item.overlayPosition ?? clip.overlayPosition,
+    });
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground border border-border rounded"
+        title="Aplicar el estilo de una plantilla a este overlay"
+      >
+        <Library className="h-2.5 w-2.5" />
+        Aplicar
+      </button>
+      {open && (
+        <div className="absolute z-50 mt-1 top-full right-0 w-60 max-h-64 overflow-y-auto rounded border border-border bg-popover shadow-lg p-2 space-y-1">
+          {textTemplates.length === 0 ? (
+            <p className="text-[10px] text-muted-foreground text-center py-3">Sin plantillas de texto.</p>
+          ) : (
+            textTemplates.map((tpl) => (
+              <button
+                key={tpl.id}
+                type="button"
+                onClick={() => apply(tpl)}
+                className="w-full flex items-center gap-2 px-1.5 py-1 rounded hover:bg-muted/40 text-left"
+              >
+                <Type className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                <span className="text-[11px] truncate">{tpl.name}</span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ────────── Per-clip "save as single template" button ─────────── */
 
 export function SaveOverlayAsTemplateButton({ clip }: { clip: CompositionClip }) {
