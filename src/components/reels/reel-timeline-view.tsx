@@ -1397,6 +1397,13 @@ function VideoClipMotionPanel({ reelId }: { reelId: string }) {
   const clip = reel?.composition.clips.find((c) => c.id === firstSelectedId);
   if (!clip || clip.type !== 'video') return null;
 
+  // A video clip on any track other than the main rv1 is a PiP overlay.
+  const isOverlayVideo = clip.trackId !== 'rv1';
+  const ov = clip.overlayPosition ?? { x: 0.5, y: 0.5, width: 0.4 };
+  const patchOverlay = (updates: Partial<{ x: number; y: number; width: number }>) => {
+    updateClip(reelId, clip.id, { overlayPosition: { ...ov, ...updates } });
+  };
+
   const t = clip.transform ?? { scale: 1, x: 0, y: 0, rotation: 0 };
   const patch = (updates: Partial<{ scale: number; x: number; y: number; rotation: number }>) => {
     updateClip(reelId, clip.id, {
@@ -1423,7 +1430,21 @@ function VideoClipMotionPanel({ reelId }: { reelId: string }) {
   );
 
   return (
-    <div className="overflow-y-auto p-3 space-y-2">
+    <div className="overflow-y-auto p-3 space-y-3">
+      {/* PiP overlay position/size — only for secondary-track video clips */}
+      {isOverlayVideo && (
+        <div className="space-y-2">
+          <h3 className="text-xs font-medium text-cyan-400">Overlay (PiP) — recuadro sobre el vídeo principal</h3>
+          {row('Pos X', `${Math.round(ov.x * 100)}%`, 0, 100, 1, Math.round(ov.x * 100), (v) => patchOverlay({ x: v / 100 }))}
+          {row('Pos Y', `${Math.round(ov.y * 100)}%`, 0, 100, 1, Math.round(ov.y * 100), (v) => patchOverlay({ y: v / 100 }))}
+          {row('Tamaño', `${Math.round(ov.width * 100)}%`, 5, 100, 1, Math.round(ov.width * 100), (v) => patchOverlay({ width: v / 100 }))}
+          {row('Opacidad', `${Math.round((clip.opacity ?? 1) * 100)}%`, 0, 100, 1, Math.round((clip.opacity ?? 1) * 100), (v) => updateClip(reelId, clip.id, { opacity: v / 100 }))}
+          <p className="text-[9px] text-muted-foreground italic leading-tight">
+            Este vídeo se superpone en un recuadro sobre el principal durante su tramo. Pos = centro del recuadro.
+          </p>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-medium text-purple-400">Motion (zoom / posición / ángulo)</h3>
         <button

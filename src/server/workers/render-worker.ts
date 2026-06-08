@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import { existsSync } from 'fs';
 import { jobManager } from '@/server/job-manager';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
-import { renderVideo, renderReelVideo, type ImageOverlayInput } from '@/server/ffmpeg-wrapper';
+import { renderVideo, renderReelVideo, type ImageOverlayInput, type VideoOverlayInput } from '@/server/ffmpeg-wrapper';
 import { generateASS } from '@/server/ass-generator';
 import type { ASSTextOverlay } from '@/server/ass-generator';
 import type { ExportPreset, SubtitleStyle, SubtitleSegment, CropRegion, CompositionClip } from '@/types/project';
@@ -508,6 +508,44 @@ async function runRender(options: RenderOptions): Promise<void> {
         if (imageOverlays.length === 0) imageOverlays = undefined;
       }
 
+      // Extract secondary-video clips (PiP overlays) — video clips on any video
+      // track other than the main rv1. Remap to the concat output timeline.
+      const overlayVideoClips = reel.composition.clips
+        .filter((c) => c.type === 'video' && c.trackId !== 'rv1' && c.fileName)
+        .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+
+      let videoOverlays: VideoOverlayInput[] | undefined;
+      if (overlayVideoClips.length > 0) {
+        let concatOff3 = 0;
+        const vcTimeMap3 = videoClips.map((vc) => {
+          const entry = { timelineStart: vc.timelineStartMs, timelineEnd: vc.timelineEndMs, outputStart: concatOff3 };
+          concatOff3 += vc.timelineEndMs - vc.timelineStartMs;
+          return entry;
+        });
+        videoOverlays = [];
+        const projectDir = getProjectDir(projectId);
+        for (const oc of overlayVideoClips) {
+          for (const cm of vcTimeMap3) {
+            const overlapStart = Math.max(oc.timelineStartMs, cm.timelineStart);
+            const overlapEnd = Math.min(oc.timelineEndMs, cm.timelineEnd);
+            if (overlapStart < overlapEnd) {
+              videoOverlays.push({
+                filePath: path.join(projectDir, oc.fileName),
+                startMs: cm.outputStart + (overlapStart - cm.timelineStart),
+                endMs: cm.outputStart + (overlapEnd - cm.timelineStart),
+                sourceInMs: oc.sourceInMs + (overlapStart - oc.timelineStartMs),
+                x: oc.overlayPosition?.x ?? 0.5,
+                y: oc.overlayPosition?.y ?? 0.5,
+                width: oc.overlayPosition?.width ?? 0.4,
+                opacity: oc.opacity ?? 1,
+              });
+            }
+          }
+        }
+        console.log(`[render] ${videoOverlays.length} video PiP overlay(s) for FFmpeg export`);
+        if (videoOverlays.length === 0) videoOverlays = undefined;
+      }
+
       jobManager.updateProgress(jobId, 2, 'Starting FFmpeg render...');
 
       const { promise: reelPromise, process: reelProc } = renderReelVideo({
@@ -517,6 +555,7 @@ async function runRender(options: RenderOptions): Promise<void> {
         clips: videoClips,
         audioClipRanges,
         imageOverlays,
+        videoOverlays,
         assFilePath: assFilePath2,
         fontsDirPath,
         outputPath,
@@ -801,6 +840,51 @@ async function runRender(options: RenderOptions): Promise<void> {
           }
         }
         if (imageOverlays.length === 0) imageOverlays = undefined;
+      }
+
+      // Secondary-video (PiP) overlays in compose: video clips in overlay mode
+      // (mode === 'overlay') on a non-v1 track. Position comes from clip.overlay
+      // {x,y,width}. Their file is the compose media-bin upload (project-relative).
+      const overlayVideoClipsC = (project.composition?.clips ?? [])
+        .filter((c: CompositionClip) => c.type === 'video' && c.trackId !== 'v1' && c.mode === 'overlay' && c.fileName)
+        .sort((a: CompositionClip, b: CompositionClip) => a.timelineStartMs - b.timelineStartMs);
+
+      let videoOverlays: VideoOverlayInput[] | undefined;
+      if (overlayVideoClipsC.length > 0) {
+        let concatOff3 = 0;
+        const vcTimeMap3 = videoClips.map((vc: CompositionClip) => {
+          const entry = { timelineStart: vc.timelineStartMs, timelineEnd: vc.timelineEndMs, outputStart: concatOff3 };
+          concatOff3 += vc.timelineEndMs - vc.timelineStartMs;
+          return entry;
+        });
+        videoOverlays = [];
+        const projectDir = getProjectDir(projectId);
+        for (const oc of overlayVideoClipsC) {
+          for (const cm of vcTimeMap3) {
+            const overlapStart = Math.max(oc.timelineStartMs, cm.timelineStart);
+            const overlapEnd = Math.min(oc.timelineEndMs, cm.timelineEnd);
+            if (overlapStart < overlapEnd) {
+              // compose clip.overlay uses TOP-LEFT x/y + explicit width/height;
+              // VideoOverlayInput wants the CENTER, so convert.
+              const ovW = oc.overlay?.width ?? 0.35;
+              const ovH = oc.overlay?.height ?? 0.35;
+              const ovX = oc.overlay?.x ?? 0.6;
+              const ovY = oc.overlay?.y ?? 0.6;
+              videoOverlays.push({
+                filePath: path.join(projectDir, oc.fileName!),
+                startMs: cm.outputStart + (overlapStart - cm.timelineStart),
+                endMs: cm.outputStart + (overlapEnd - cm.timelineStart),
+                sourceInMs: oc.sourceInMs + (overlapStart - oc.timelineStartMs),
+                x: ovX + ovW / 2,
+                y: ovY + ovH / 2,
+                width: ovW,
+                opacity: oc.opacity ?? 1,
+              });
+            }
+          }
+        }
+        if (videoOverlays.length === 0) videoOverlays = undefined;
+        else console.log(`[render] ${videoOverlays.length} compose video PiP overlay(s)`);
       }
 
       // Generate ASS subtitle file for compose export

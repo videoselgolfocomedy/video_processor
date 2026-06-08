@@ -587,6 +587,17 @@ export interface ImageOverlayInput {
   opacity: number;   // 0-1
 }
 
+export interface VideoOverlayInput {
+  filePath: string;
+  startMs: number;     // appear at this position on the concat output timeline
+  endMs: number;       // disappear here
+  sourceInMs: number;  // seek into the overlay video file
+  x: number;           // 0-1 fraction (center X of the PiP box)
+  y: number;           // 0-1 fraction (center Y)
+  width: number;       // 0-1 fraction of output width
+  opacity: number;     // 0-1
+}
+
 export interface ClipTransform {
   scale: number;     // 1 = original; >1 zoom in; <1 zoom out
   x: number;         // -1..1 fraction of output width (positive = shift right)
@@ -607,6 +618,8 @@ export interface RenderReelOptions {
   audioClipRanges?: { startMs: number; endMs: number }[];
   /** Image overlays to burn into the video */
   imageOverlays?: ImageOverlayInput[];
+  /** Video (PiP) overlays composited over the main video for a time range */
+  videoOverlays?: VideoOverlayInput[];
   assFilePath?: string;
   fontsDirPath?: string;
   outputPath: string;
@@ -718,6 +731,16 @@ export function renderReelVideo(options: RenderReelOptions): {
       // png, bmp, webp-still, and unknown — let FFmpeg auto-detect.
       args.push('-loop', '1', '-i', img.filePath);
     }
+  }
+
+  // Video (PiP) overlay inputs — added after the image inputs. Each is seeked
+  // into its source and limited to its play duration.
+  const videoOverlays = options.videoOverlays ?? [];
+  const firstVideoOverlayInputIdx = firstImageInputIdx + imageOverlays.length;
+  for (const vo of videoOverlays) {
+    const seekSec = Math.max(0, vo.sourceInMs / 1000);
+    const durSec = Math.max(0.1, (vo.endMs - vo.startMs) / 1000);
+    args.push('-ss', String(seekSec), '-t', String(durSec), '-i', vo.filePath);
   }
 
   // Build crop filter string
@@ -875,6 +898,32 @@ export function renderReelVideo(options: RenderReelOptions): {
     // shortest=1 ensures the overlay doesn't extend beyond the main video
     filterParts.push(
       `[${videoLabel}][img${imgIdx}]overlay=x=${ox}:y=${oy}:shortest=1:enable='between(t,${startSec},${endSec})'[${nextLabel}]`
+    );
+    videoLabel = nextLabel;
+  }
+
+  // Apply video (PiP) overlays on top of image overlays.
+  for (let voIdx = 0; voIdx < videoOverlays.length; voIdx++) {
+    const vo = videoOverlays[voIdx];
+    const inIdx = firstVideoOverlayInputIdx + voIdx;
+    let boxW = Math.round(vo.width * options.width);
+    if (boxW % 2 !== 0) boxW -= 1;
+    boxW = Math.max(2, boxW);
+    const ox = Math.round(vo.x * options.width - boxW / 2);
+    const oy = `${Math.round(vo.y * options.height)}-overlay_h/2`;
+    const startSec = (vo.startMs / 1000).toFixed(3);
+    const endSec = (vo.endMs / 1000).toFixed(3);
+    const nextLabel = `vov${voIdx}`;
+
+    // Shift the (already -ss seeked, PTS-reset) overlay so it plays at startSec
+    // on the output timeline; scale to the PiP box width (height even via -2);
+    // apply opacity. enable gates visibility to [start,end]; eof_action=pass
+    // lets the main video continue after the overlay ends.
+    filterParts.push(
+      `[${inIdx}:v]setpts=PTS-STARTPTS+${startSec}/TB,scale=${boxW}:-2,format=yuva420p,colorchannelmixer=aa=${(vo.opacity ?? 1).toFixed(2)}[vo${voIdx}]`
+    );
+    filterParts.push(
+      `[${videoLabel}][vo${voIdx}]overlay=x=${ox}:y=${oy}:enable='between(t,${startSec},${endSec})':eof_action=pass[${nextLabel}]`
     );
     videoLabel = nextLabel;
   }
