@@ -261,6 +261,25 @@ Any change to the color pipeline is a minefield. Lessons learned
   (transcription / compose / reels / export). Audio pre-processing
   (extract / subtract / amplify / mix / re-mux) is NOT possible
   because there's no separate camera/board audio.
+- **`sync.muxedAudioOffsetMs`** — when the camera started BEFORE the
+  board audio, the mux input-seeks the video to the keyframe AT-OR-AFTER
+  the alignment target, so the muxed video's t=0 sits a few hundred ms
+  AHEAD of the standalone aligned-audio's t=0 (e.g. 894 ms on iPhone
+  ~1 s keyframes). Anywhere the muxed VIDEO is paired with a SEPARATE
+  audio file, the audio seek must lead by this offset or the voice lags
+  the mouth by ~1 s: renders pass it as `audioSourceOffsetMs`
+  (ffmpeg-wrapper), the reel player as the `audioOffsetMs` prop, and
+  compose bakes it into the auto-created a1 clip's `sourceInMs`. The
+  muxed file's own EMBEDDED audio needs no offset. Quick empirical
+  check: cross-correlate 10 s of render audio against the mix file at
+  `v1.sourceInMs + offset` — lag should be ~0 ms, not ~-900 ms.
+- **Overlay templates** (text/image lines for titles & closing cards)
+  are GLOBAL: metadata in `data/settings.json` (`overlayTemplates`),
+  image bytes copied into `data/overlay-templates/assets/` on save and
+  back into the target project on apply. Since `data/` is gitignored,
+  templates are per-machine — they do NOT sync between equipos via git.
+  Apply INSERTS at the playhead with lane-packing (never overwrites
+  existing overlays). Lib: `src/lib/overlay-templates.ts`.
 
 ---
 
