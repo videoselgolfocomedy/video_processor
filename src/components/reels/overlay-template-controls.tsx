@@ -8,9 +8,10 @@ import {
   buildTemplateItems,
   applyTemplate,
   isOverlayClip,
+  reelTimelineDurationMs,
 } from '@/lib/overlay-templates';
 import type { CompositionClip, OverlayTemplate } from '@/types/project';
-import { BookmarkPlus, Layers, Library, Trash, Type, Image as ImageIcon, Loader2 } from 'lucide-react';
+import { BookmarkPlus, Layers, Library, Trash, Type, Image as ImageIcon, Loader2, AlignHorizontalSpaceBetween } from 'lucide-react';
 
 /* ───────────────── Reel-level hub: save set + apply ────────────────── */
 
@@ -25,6 +26,10 @@ export function OverlayTemplatesBar({ reelId }: { reelId: string }) {
   const { templates, saveTemplate, deleteTemplate } = useOverlayTemplates();
   const [showPicker, setShowPicker] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  // Anchored mode: items from the first half of the SOURCE reel land at the
+  // start of THIS reel; items from the second half land at its end. Toggled
+  // by the checkbox in the picker; the per-row anchor button forces it on.
+  const [anchorMode, setAnchorMode] = useState(false);
 
   if (!reel || !projectId) return null;
 
@@ -48,13 +53,16 @@ export function OverlayTemplatesBar({ reelId }: { reelId: string }) {
         window.alert('No se pudo guardar (fallo copiando imágenes).');
         return;
       }
-      await saveTemplate(name.trim(), 'set', items);
+      await saveTemplate(name.trim(), 'set', items, {
+        sourceDurationMs: reelTimelineDurationMs(reel.composition.clips),
+        sourceFirstStartMs: Math.min(...overlays.map((c) => c.timelineStartMs)),
+      });
     } finally {
       setBusy(null);
     }
   };
 
-  const handleApply = async (tpl: OverlayTemplate) => {
+  const handleApply = async (tpl: OverlayTemplate, anchored: boolean) => {
     setBusy(tpl.id);
     try {
       const fresh = useReelStore.getState().reels.find((r) => r.id === reelId);
@@ -67,6 +75,8 @@ export function OverlayTemplatesBar({ reelId }: { reelId: string }) {
         reelTracks: fresh.composition.tracks,
         addTrack,
         addClip,
+        anchorEnds: anchored,
+        targetDurationMs: reelTimelineDurationMs(fresh.composition.clips),
       });
       if (n === 0) window.alert('No se insertó ningún overlay (revisa que las imágenes existan).');
       else setShowPicker(false);
@@ -104,6 +114,19 @@ export function OverlayTemplatesBar({ reelId }: { reelId: string }) {
 
       {showPicker && (
         <div className="absolute z-50 mt-1 top-full left-0 w-72 max-h-72 overflow-y-auto rounded border border-border bg-popover shadow-lg p-2 space-y-1">
+          <label
+            className="flex items-center gap-1.5 px-1.5 py-1 text-[10px] text-muted-foreground cursor-pointer select-none border-b border-border/60 mb-1"
+            title="Lo que estaba al principio del reel original se coloca al principio de este reel; lo que estaba al final, al final de este reel. Sin marcar: la plantilla entera se inserta en el playhead."
+          >
+            <input
+              type="checkbox"
+              checked={anchorMode}
+              onChange={(e) => setAnchorMode(e.target.checked)}
+              className="h-3 w-3 accent-primary"
+            />
+            <AlignHorizontalSpaceBetween className="h-2.5 w-2.5" />
+            Anclar a inicio/fin del reel
+          </label>
           {templates.length === 0 ? (
             <p className="text-[10px] text-muted-foreground text-center py-3">
               Sin plantillas. Pulsa &ldquo;Guardar reel&rdquo; para crear una con los overlays de este reel.
@@ -114,7 +137,8 @@ export function OverlayTemplatesBar({ reelId }: { reelId: string }) {
                 key={tpl.id}
                 tpl={tpl}
                 busy={busy === tpl.id}
-                onApply={() => handleApply(tpl)}
+                onApply={() => handleApply(tpl, anchorMode)}
+                onApplyAnchored={() => handleApply(tpl, true)}
                 onDelete={() => {
                   if (window.confirm(`¿Borrar plantilla "${tpl.name}"?`)) deleteTemplate(tpl.id);
                 }}
@@ -131,11 +155,13 @@ function OverlayTemplateRow({
   tpl,
   busy,
   onApply,
+  onApplyAnchored,
   onDelete,
 }: {
   tpl: OverlayTemplate;
   busy: boolean;
   onApply: () => void;
+  onApplyAnchored: () => void;
   onDelete: () => void;
 }) {
   const textCount = tpl.items.filter((i) => i.trackKind === 'text').length;
@@ -170,6 +196,15 @@ function OverlayTemplateRow({
             <span className="flex items-center gap-0.5"><ImageIcon className="h-2 w-2" />{imgCount}</span>
           )}
         </div>
+      </button>
+      <button
+        type="button"
+        onClick={onApplyAnchored}
+        disabled={busy}
+        className="p-1 text-muted-foreground hover:text-orange-300 disabled:opacity-50"
+        title="Aplicar anclado: lo del inicio del reel original va al inicio de este reel, lo del final va al final"
+      >
+        <AlignHorizontalSpaceBetween className="h-3 w-3" />
       </button>
       <button
         type="button"
@@ -272,7 +307,15 @@ export function SaveOverlayAsTemplateButton({ clip }: { clip: CompositionClip })
         window.alert('No se pudo guardar (fallo copiando la imagen).');
         return;
       }
-      await saveTemplate(name.trim(), 'single', items);
+      // Record the source reel's span so this single overlay can be applied
+      // anchored (e.g. a closing card keeps its distance from the reel end).
+      const owner = useReelStore.getState().reels.find((r) =>
+        r.composition.clips.some((c) => c.id === clip.id)
+      );
+      await saveTemplate(name.trim(), 'single', items, owner ? {
+        sourceDurationMs: reelTimelineDurationMs(owner.composition.clips),
+        sourceFirstStartMs: clip.timelineStartMs,
+      } : undefined);
     } finally {
       setBusy(false);
     }

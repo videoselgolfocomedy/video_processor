@@ -101,6 +101,16 @@ export interface OverlayTemplate {
   createdAt: string;
   kind: 'single' | 'set';
   items: OverlayTemplateItem[];
+  /** Timeline duration (ms) of the source reel when the template was saved.
+   * Enables anchored apply: items from the first half of the source reel
+   * anchor to the target reel's START (keeping their distance from t=0),
+   * items from the second half anchor to its END (keeping their distance
+   * from the end). Missing on templates saved before this field existed —
+   * anchored apply then degrades to placing everything at the start. */
+  sourceDurationMs?: number;
+  /** Where (ms) the earliest saved overlay sat in the source reel. Item
+   * startOffsetMs values are relative to this point. */
+  sourceFirstStartMs?: number;
 }
 
 export interface ReelVersion {

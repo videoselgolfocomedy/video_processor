@@ -34,6 +34,18 @@ export function isOverlayClip(c: CompositionClip): boolean {
 }
 
 /**
+ * Content duration (ms) of a reel's timeline: the end of the last main-video
+ * clip (rv1). Falls back to the max end across all clips when there are no
+ * rv1 clips yet. Used to anchor template items to the reel's start/end.
+ */
+export function reelTimelineDurationMs(clips: CompositionClip[]): number {
+  const video = clips.filter((c) => c.trackId === 'rv1');
+  const pool = video.length > 0 ? video : clips;
+  if (pool.length === 0) return 0;
+  return Math.max(...pool.map((c) => c.timelineEndMs));
+}
+
+/**
  * Convert a set of reel composition clips into template items. Image overlays
  * have their bytes copied into the global asset store (so the template is
  * project-independent); text overlays are fully self-contained. Times are
@@ -101,6 +113,16 @@ interface ApplyContext {
   reelTracks: CompositionTrack[];
   addTrack: (reelId: string, type: CompositionTrack['type'], label: string) => string;
   addClip: (reelId: string, clip: Omit<CompositionClip, 'id'>) => string;
+  /** Anchored mode: instead of inserting the whole block at playheadMs,
+   * items from the first half of the SOURCE reel keep their distance from
+   * t=0 (intro titles land at the start) and items from the second half keep
+   * their distance from the source reel's END, measured against
+   * `targetDurationMs` (closing cards land at the end of THIS reel). Needs
+   * the template's sourceDurationMs; legacy templates without it fall back
+   * to start-anchoring everything. */
+  anchorEnds?: boolean;
+  /** Content duration (ms) of the target reel — see reelTimelineDurationMs. */
+  targetDurationMs?: number;
 }
 
 /**
@@ -113,7 +135,40 @@ interface ApplyContext {
  * Returns the number of overlays inserted.
  */
 export async function applyTemplate(template: OverlayTemplate, ctx: ApplyContext): Promise<number> {
-  const { reelId, projectId, playheadMs, reelClips, reelTracks, addTrack, addClip } = ctx;
+  const { reelId, projectId, playheadMs, reelClips, reelTracks, addTrack, addClip, anchorEnds, targetDurationMs } = ctx;
+
+  /**
+   * Where does this item start on the TARGET timeline?
+   * - Default: the whole block is inserted at playheadMs, keeping relative
+   *   spacing (startOffsetMs).
+   * - Anchored: reconstruct the item's absolute position in the source reel
+   *   (sourceFirstStartMs + startOffsetMs), then anchor by which half of the
+   *   source reel its CENTER sat in. Start-half items keep their distance
+   *   from t=0; end-half items keep their distance from the source end,
+   *   re-measured against the target reel's duration.
+   */
+  const computeStartMs = (item: OverlayTemplateItem): number => {
+    if (!anchorEnds) return Math.max(0, playheadMs + item.startOffsetMs);
+    const srcDur = template.sourceDurationMs;
+    const firstStart = template.sourceFirstStartMs ?? 0;
+    const offsetFromStart = firstStart + item.startOffsetMs;
+    if (!srcDur || srcDur <= 0) {
+      // Legacy template without span metadata: best effort = everything to
+      // the start of the reel, preserving original distances from t=0.
+      return Math.max(0, offsetFromStart);
+    }
+    const center = offsetFromStart + item.durationMs / 2;
+    if (center <= srcDur / 2) {
+      return Math.max(0, offsetFromStart);
+    }
+    // Clamp to 0: if the item stuck out past the source video's end (common
+    // after trimming the video with overlays already placed), treat it as
+    // ending exactly at the end — end-anchored items must FINISH with the
+    // video, never start after it.
+    const distFromEnd = Math.max(0, srcDur - (offsetFromStart + item.durationMs));
+    const targetDur = targetDurationMs && targetDurationMs > 0 ? targetDurationMs : srcDur;
+    return Math.max(0, targetDur - distFromEnd - item.durationMs);
+  };
 
   // Pre-resolve image assets → project-local fileNames (network first).
   const resolved = await Promise.all(
@@ -164,12 +219,14 @@ export async function applyTemplate(template: OverlayTemplate, ctx: ApplyContext
     return trackId;
   };
 
-  // Insert in chronological order so lane packing is stable.
-  const ordered = [...resolved].sort((a, b) => a.item.startOffsetMs - b.item.startOffsetMs);
+  // Compute each item's target position first, then insert in chronological
+  // TARGET order so lane packing is stable (with anchoring, an end-anchored
+  // item can land before a start-anchored one saved later).
+  const placed = resolved.map((r) => ({ ...r, startMs: computeStartMs(r.item) }));
+  const ordered = placed.sort((a, b) => a.startMs - b.startMs);
 
   let inserted = 0;
-  for (const { item, fileName, originalName } of ordered) {
-    const startMs = Math.max(0, playheadMs + item.startOffsetMs);
+  for (const { item, fileName, originalName, startMs } of ordered) {
     const endMs = startMs + Math.max(100, item.durationMs);
     const kind = item.trackKind;
     const trackId = pickLane(kind, startMs);
@@ -243,13 +300,20 @@ export function useOverlayTemplates() {
   }, []);
 
   const saveTemplate = useCallback(
-    async (name: string, kind: 'single' | 'set', items: OverlayTemplateItem[]) => {
+    async (
+      name: string,
+      kind: 'single' | 'set',
+      items: OverlayTemplateItem[],
+      /** Source-reel span info enabling anchored apply (see OverlayTemplate). */
+      meta?: { sourceDurationMs?: number; sourceFirstStartMs?: number }
+    ) => {
       const tpl: OverlayTemplate = {
         id: `ovl-${Date.now()}`,
         name,
         createdAt: new Date().toISOString(),
         kind,
         items,
+        ...(meta ?? {}),
       };
       const current = await fetchTemplates();
       const updated = [tpl, ...current];
