@@ -280,6 +280,16 @@ Any change to the color pipeline is a minefield. Lessons learned
   templates are per-machine — they do NOT sync between equipos via git.
   Apply INSERTS at the playhead with lane-packing (never overwrites
   existing overlays). Lib: `src/lib/overlay-templates.ts`.
+- **Use-video-directly** (POST `/api/projects/[id]/use-video-directly`)
+  for projects where the user imported a single video that ALREADY has
+  its audio mixed in and wants to skip audio-prep/sync/mux. Points
+  `sync.muxedVideoPath` at the imported source video (no re-encode),
+  probes duration, clears selected/mixed audio paths. The
+  "Usar vídeo directamente" button on the transcription page calls it.
+  Also, `resolveTranscriptionAudio` (whisper-worker) now falls back to
+  `sync.muxedVideoPath` then any video source's embedded audio, so
+  transcription (local OR Groq) works straight from an imported video —
+  ffmpeg extracts the audio in convertForWhisper/convertForGroq.
 
 ---
 

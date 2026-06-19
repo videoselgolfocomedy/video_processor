@@ -142,6 +142,27 @@ export default function TranscriptionPage() {
     }
   }, [projectId, language, model, groqModel, engine, toast]);
 
+  const [usingVideoDirectly, setUsingVideoDirectly] = useState(false);
+  const handleUseVideoDirectly = useCallback(async () => {
+    setUsingVideoDirectly(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/use-video-directly`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Error');
+      await fetchProject(projectId);
+      // Refresh the resolved audio-source indicator.
+      fetch(`/api/projects/${projectId}/transcribe`)
+        .then((r) => r.json())
+        .then((d) => { setAudioSource(d.audioSource || null); })
+        .catch(() => {});
+      toast({ title: 'Vídeo listo', description: data.message });
+    } catch (err) {
+      toast({ title: 'Error', description: (err as Error).message, variant: 'destructive' });
+    } finally {
+      setUsingVideoDirectly(false);
+    }
+  }, [projectId, fetchProject, toast]);
+
   const handleSegmentsChange = useCallback(
     (segments: SubtitleSegment[]) => {
       if (!currentProject) return;
@@ -494,11 +515,25 @@ export default function TranscriptionPage() {
               <FileVideo className="h-4 w-4 text-yellow-500 flex-none" />
               <span className="text-xs text-yellow-500 flex-1">
                 Video original ({videoSource?.originalName ?? 'sin video'}) — sin audio procesado.
-                {muxedVideoPath ? ' El muxado anterior no se encontró.' : ''} Ve a Sync & Mix para muxar.
+                {muxedVideoPath ? ' El muxado anterior no se encontró.' : ''}
+                {videoSource ? ' Si ya trae el audio mezclado, úsalo directamente:' : ' Ve a Sync & Mix para muxar.'}
               </span>
-              <Link href={`/project/${projectId}/sync`} className="text-[10px] text-yellow-400 hover:underline flex-none">
-                Ir a Sync
-              </Link>
+              {videoSource ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-[11px] flex-none border-yellow-600/50 text-yellow-300 hover:bg-yellow-900/30"
+                  disabled={usingVideoDirectly}
+                  onClick={handleUseVideoDirectly}
+                  title="Usa este vídeo (con su audio embebido) directamente para transcribir, componer y reels, sin pasar por Sync/Mux"
+                >
+                  {usingVideoDirectly ? 'Preparando…' : 'Usar vídeo directamente'}
+                </Button>
+              ) : (
+                <Link href={`/project/${projectId}/sync`} className="text-[10px] text-yellow-400 hover:underline flex-none">
+                  Ir a Sync
+                </Link>
+              )}
             </div>
           )}
 

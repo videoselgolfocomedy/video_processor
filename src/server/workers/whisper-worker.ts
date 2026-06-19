@@ -26,13 +26,13 @@ export interface WhisperOptions {
  *  selectedAudioPath can be a filename (from UI) or a full path (from mux API).
  */
 export function resolveTranscriptionAudio(project: {
-  sync: { selectedAudioPath?: string | null; mixedAudioPath?: string | null };
+  sync: { selectedAudioPath?: string | null; mixedAudioPath?: string | null; muxedVideoPath?: string | null };
   audio: {
     stems?: { vocals?: string };
     extractedTracks: { path: string }[];
     boardAudioPath?: string;
   };
-  sources: { type: string; role: string; storedName: string }[];
+  sources: { type: string; role: string; storedName: string; originalName?: string }[];
 }, sourceDir: string, audioDir?: string): { path: string; label: string } | null {
   // Priority 1: audio selected in Sync
   if (project.sync.selectedAudioPath) {
@@ -60,6 +60,22 @@ export function resolveTranscriptionAudio(project: {
     return {
       path: path.join(sourceDir, audioSource.storedName),
       label: `Fuente de audio: ${audioSource.storedName}`,
+    };
+  }
+  // Priority 5: muxed video — the audio is embedded; ffmpeg extracts it during
+  // convertForWhisper/convertForGroq. Lets a project work straight from an
+  // already-mixed video without going through the audio-prep / sync / mux flow.
+  if (project.sync.muxedVideoPath) {
+    const name = project.sync.muxedVideoPath.split('/').pop() || 'video';
+    return { path: project.sync.muxedVideoPath, label: `Audio del vídeo: ${name}` };
+  }
+  // Priority 6: a plain video source's embedded audio (e.g. a video imported
+  // with its audio already mixed in — transcribe it directly).
+  const videoSource = project.sources.find((s) => s.type === 'video');
+  if (videoSource) {
+    return {
+      path: path.join(sourceDir, videoSource.storedName),
+      label: `Audio del vídeo: ${videoSource.originalName ?? videoSource.storedName}`,
     };
   }
   return null;
