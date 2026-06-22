@@ -16,6 +16,7 @@ import { splitLongSegments } from '@/lib/subtitle-utils';
 import { formatTimestamp } from '@/lib/utils';
 import { getReelVideoElement } from './reel-video-ref';
 import { getActiveReelTransform, applyCanvasTransform, drawActiveOverlayVideos, hasActiveOverlayVideo } from '@/lib/reel-transform';
+import { SubtitleSelectionStyleBar } from '@/components/subtitles/subtitle-selection-style-bar';
 import type { SubtitleStyle, SubtitleWord } from '@/types/project';
 
 interface ReelTimelineViewProps {
@@ -1649,6 +1650,9 @@ export function ReelTimelineView({ reelId, videoSrc, audioSrc, audioOffsetMs }: 
             <VideoClipMotionPanel reelId={reelId} />
           ) : (
             <>
+              {selectedClipIds.length === 0 && reel.subtitleSegments.length > 0 && (
+                <ReelSubtitleSelectionStyle reelId={reelId} />
+              )}
               <div className="p-3 border-b border-border">
                 <SubtitleStylePreview style={reel.subtitleStyle} />
               </div>
@@ -1657,6 +1661,22 @@ export function ReelTimelineView({ reelId, videoSrc, audioSrc, audioOffsetMs }: 
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Wires the shared selection-style bar to the reel store. Renders nothing
+ *  when no subtitles are selected. */
+function ReelSubtitleSelectionStyle({ reelId }: { reelId: string }) {
+  const selectedSubtitleIds = useReelStore((s) => s.selectedSubtitleIds);
+  const styleSelected = useReelStore((s) => s.styleSelectedReelSubtitles);
+  if (selectedSubtitleIds.length === 0) return null;
+  return (
+    <div className="p-3 border-b border-border">
+      <SubtitleSelectionStyleBar
+        count={selectedSubtitleIds.length}
+        onApply={(update) => styleSelected(reelId, update)}
+      />
     </div>
   );
 }

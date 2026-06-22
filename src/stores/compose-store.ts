@@ -2,7 +2,7 @@
 
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
-import { splitLongSegments, clampSegmentToBounds } from '@/lib/subtitle-utils';
+import { splitLongSegments, clampSegmentToBounds, styleWholeSegment, type SegmentStyleUpdate } from '@/lib/subtitle-utils';
 import { STYLE_PRESETS, DEFAULT_CONSTRAINTS } from '@/config/subtitle-styles';
 import type {
   CompositionClip,
@@ -207,6 +207,7 @@ interface ComposeStore {
   // Subtitles
   setSubtitleSegments: (segments: SubtitleSegment[]) => void;
   updateSubtitleSegment: (id: string, updates: Partial<SubtitleSegment>) => void;
+  styleSelectedSubtitles: (update: SegmentStyleUpdate) => void;
   moveSelectedSubtitles: (deltaMs: number) => void;
   deleteSubtitleSegment: (segId: string) => void;
   splitSubtitleAtPlayhead: () => void;
@@ -841,6 +842,19 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
       ),
       dirty: true,
     })),
+
+  styleSelectedSubtitles: (update) => {
+    const state = get();
+    if (state.selectedSubtitleIds.length === 0) return;
+    const sel = new Set(state.selectedSubtitleIds);
+    get().saveSnapshot();
+    set((s) => ({
+      subtitleSegments: s.subtitleSegments.map((seg) =>
+        sel.has(seg.id) ? styleWholeSegment(seg, update) : seg
+      ),
+      dirty: true,
+    }));
+  },
 
   moveSelectedSubtitles: (deltaMs) => {
     const state = get();

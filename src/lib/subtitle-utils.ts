@@ -1,5 +1,51 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { SubtitleSegment } from '@/types/project';
+import type { SubtitleSegment, SubtitleWord } from '@/types/project';
+
+/** A style change to apply to a whole subtitle segment. `null` clears a field. */
+export interface SegmentStyleUpdate {
+  color?: string | null;
+  fontSize?: number | null;
+  bold?: boolean | null;
+  /** Clear ALL per-word style on the segment(s). */
+  reset?: boolean;
+}
+
+/**
+ * Apply a color/size/bold change to EVERY word of a segment (creating the
+ * words[] array from the text if it doesn't exist yet). This is how we style a
+ * whole selected subtitle at once — same per-word mechanism the word editor
+ * uses and the ASS generator already honours, so it shows in preview + export.
+ */
+export function styleWholeSegment(seg: SubtitleSegment, update: SegmentStyleUpdate): SubtitleSegment {
+  const textWords = seg.text.split(/\s+/).filter(Boolean);
+  if (textWords.length === 0) return seg;
+  const src = seg.words ?? [];
+  const dur = seg.endMs - seg.startMs;
+  const per = textWords.length > 0 ? dur / textWords.length : dur;
+
+  const words: SubtitleWord[] = textWords.map((tw, i) => {
+    const base: SubtitleWord = i < src.length
+      ? { ...src[i], text: tw }
+      : { text: tw, startMs: seg.startMs + Math.round(i * per), endMs: seg.startMs + Math.round((i + 1) * per) };
+
+    if (update.reset) return { ...base, style: undefined };
+
+    const style: NonNullable<SubtitleWord['style']> = { ...base.style };
+    if (update.color !== undefined) {
+      if (update.color === null) delete style.color; else style.color = update.color;
+    }
+    if (update.fontSize !== undefined) {
+      if (update.fontSize === null) delete style.fontSize; else style.fontSize = update.fontSize;
+    }
+    if (update.bold !== undefined) {
+      if (update.bold) style.fontWeight = 700; else delete style.fontWeight;
+    }
+    const hasKeys = style.color !== undefined || style.fontSize !== undefined || style.fontWeight !== undefined;
+    return { ...base, style: hasKeys ? style : undefined };
+  });
+
+  return { ...seg, words };
+}
 
 /**
  * Clamp a segment's start/end to the given bounds AND keep its `words` array

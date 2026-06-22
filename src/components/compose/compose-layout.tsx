@@ -6,6 +6,7 @@ import { ComposePreview } from './compose-preview';
 import { ComposeSubtitleEditor } from './compose-subtitle-editor';
 import { ClipProperties } from './clip-properties';
 import { ComposeOverlayTemplatesBar } from './compose-overlay-template-controls';
+import { SubtitleSelectionStyleBar } from '@/components/subtitles/subtitle-selection-style-bar';
 import { MultiTrackTimeline } from './multi-track-timeline';
 import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
 import { useCustomPresets } from '@/hooks/use-custom-presets';
@@ -34,6 +35,8 @@ export function ComposeLayout({
   const subtitleSegments = useComposeStore((s) => s.subtitleSegments);
   const markClean = useComposeStore((s) => s.markClean);
   const selectedClipIds = useComposeStore((s) => s.selectedClipIds);
+  const selectedSubtitleIds = useComposeStore((s) => s.selectedSubtitleIds);
+  const styleSelectedSubtitles = useComposeStore((s) => s.styleSelectedSubtitles);
   const clips = useComposeStore((s) => s.clips);
   const storeSubtitleStyle = useComposeStore((s) => s.subtitleStyle);
   const subtitleStylePreset = useComposeStore((s) => s.subtitleStylePreset);
@@ -275,6 +278,15 @@ export function ComposeLayout({
 
           {panelMode === 'subtitles' && (
             <div className="flex-1 overflow-auto">
+              {/* Per-selection style bar — color/size/bold for selected subtitles */}
+              {selectedSubtitleIds.length > 0 && (
+                <div className="p-3 border-b border-border">
+                  <SubtitleSelectionStyleBar
+                    count={selectedSubtitleIds.length}
+                    onApply={(update) => styleSelectedSubtitles(update)}
+                  />
+                </div>
+              )}
               {/* Subtitle position quick controls */}
               <div className="p-3 border-b border-border">
                 <h3 className="text-xs font-medium mb-2">Subtitle Position</h3>

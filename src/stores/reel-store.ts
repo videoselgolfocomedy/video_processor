@@ -3,7 +3,7 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import { STYLE_PRESETS, REEL_DEFAULT_CONSTRAINTS } from '@/config/subtitle-styles';
-import { splitLongSegments, clampSegmentToBounds } from '@/lib/subtitle-utils';
+import { splitLongSegments, clampSegmentToBounds, styleWholeSegment, type SegmentStyleUpdate } from '@/lib/subtitle-utils';
 import type {
   ReelDefinition,
   ReelVersion,
@@ -133,6 +133,7 @@ interface ReelStore {
   regenerateReelSubtitles: (reelId: string) => void;
   syncReelSubtitlesFromBase: (reelId: string) => void;
   updateReelSubtitleSegment: (reelId: string, segId: string, updates: Partial<SubtitleSegment>) => void;
+  styleSelectedReelSubtitles: (reelId: string, update: SegmentStyleUpdate) => void;
   setReelSubtitleStyle: (reelId: string, style: SubtitleStyle) => void;
   setReelSubtitlePreset: (reelId: string, presetId: string, style: SubtitleStyle) => void;
   setReelSubtitleConstraints: (reelId: string, constraints: SubtitleConstraints) => void;
@@ -934,6 +935,22 @@ export const useReelStore = create<ReelStore>((set, get) => ({
       reels: updateReelInList(s.reels, reelId, (r) => ({
         ...r,
         subtitleSegments: r.subtitleSegments.map((seg) => (seg.id === segId ? { ...seg, ...updates } : seg)),
+      })),
+      dirty: true,
+    }));
+  },
+
+  styleSelectedReelSubtitles: (reelId, update) => {
+    const state = get();
+    if (state.selectedSubtitleIds.length === 0) return;
+    const sel = new Set(state.selectedSubtitleIds);
+    set(pushUndo(get()));
+    set((s) => ({
+      reels: updateReelInList(s.reels, reelId, (r) => ({
+        ...r,
+        subtitleSegments: r.subtitleSegments.map((seg) =>
+          sel.has(seg.id) ? styleWholeSegment(seg, update) : seg
+        ),
       })),
       dirty: true,
     }));
