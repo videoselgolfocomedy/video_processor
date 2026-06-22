@@ -6,7 +6,11 @@ export interface SegmentStyleUpdate {
   color?: string | null;
   fontSize?: number | null;
   bold?: boolean | null;
-  /** Clear ALL per-word style on the segment(s). */
+  /** Per-segment animation override. A string sets it, `null` clears it (back
+   *  to the global animation). Word-based animations need words[], which this
+   *  helper builds from the text. */
+  animation?: SubtitleSegment['animation'] | null;
+  /** Clear ALL per-word style on the segment(s) (keeps animation override). */
   reset?: boolean;
 }
 
@@ -44,7 +48,13 @@ export function styleWholeSegment(seg: SubtitleSegment, update: SegmentStyleUpda
     return { ...base, style: hasKeys ? style : undefined };
   });
 
-  return { ...seg, words };
+  // Per-segment animation override (build words above so word-based reveals work).
+  let animation = seg.animation;
+  if (update.animation !== undefined) {
+    animation = update.animation === null ? undefined : update.animation;
+  }
+
+  return { ...seg, words, animation };
 }
 
 /**

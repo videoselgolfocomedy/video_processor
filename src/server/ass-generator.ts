@@ -597,27 +597,42 @@ export function generateASS(
     return seg;
   }).filter((seg) => seg.endMs > seg.startMs);
 
-  // Generate dialogue lines based on animation type
+  // Generate dialogue lines per animation. Each segment may override the global
+  // animation via seg.animation (e.g. word-by-word reveal on just one line), so
+  // we group segments by their EFFECTIVE animation and run each group through
+  // its generator. ASS dialogue lines are timestamped, so concat order is fine.
+  const runGenerator = (
+    anim: SubtitleStyle['animation'],
+    segs: SubtitleSegment[],
+  ): DialogueLine[] => {
+    switch (anim) {
+      case 'fade': return generateFade(segs, style, fps);
+      case 'typewriter': return generateTypewriter(segs, style);
+      case 'word-highlight': return generateWordHighlight(segs, style);
+      case 'pop': return generatePop(segs, style, fps);
+      case 'punchline': return generatePunchline(segs, style);
+      default: return generateNone(segs, style);
+    }
+  };
+
+  const hasPerSegmentAnim = deoverlapped.some((s) => s.animation);
   let dialogueLines: DialogueLine[];
-  switch (style.animation) {
-    case 'fade':
-      dialogueLines = generateFade(deoverlapped, style, fps);
-      break;
-    case 'typewriter':
-      dialogueLines = generateTypewriter(deoverlapped, style);
-      break;
-    case 'word-highlight':
-      dialogueLines = generateWordHighlight(deoverlapped, style);
-      break;
-    case 'pop':
-      dialogueLines = generatePop(deoverlapped, style, fps);
-      break;
-    case 'punchline':
-      dialogueLines = generatePunchline(deoverlapped, style);
-      break;
-    default:
-      dialogueLines = generateNone(deoverlapped, style);
-      break;
+  if (!hasPerSegmentAnim) {
+    dialogueLines = runGenerator(style.animation, deoverlapped);
+  } else {
+    // Group consecutive-agnostic: bucket by effective animation, preserving the
+    // segment objects, then run each bucket. (Per-segment override wins.)
+    const byAnim = new Map<SubtitleStyle['animation'], SubtitleSegment[]>();
+    for (const seg of deoverlapped) {
+      const eff = seg.animation ?? style.animation;
+      const arr = byAnim.get(eff) ?? [];
+      arr.push(seg);
+      byAnim.set(eff, arr);
+    }
+    dialogueLines = [];
+    for (const [anim, segs] of Array.from(byAnim.entries())) {
+      dialogueLines.push(...runGenerator(anim, segs));
+    }
   }
 
   const events = dialogueLines.map(

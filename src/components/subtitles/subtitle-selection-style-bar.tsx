@@ -87,6 +87,37 @@ export function SubtitleSelectionStyleBar({
         </button>
       </div>
 
+      {/* Per-segment animation */}
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] text-muted-foreground w-10">Animar</span>
+        <select
+          className="flex-1 h-6 rounded border border-border bg-background px-1 text-[10px] outline-none"
+          defaultValue=""
+          onChange={(e) => {
+            const v = e.target.value;
+            onApply({ animation: v === '' ? null : (v as NonNullable<SegmentStyleUpdate['animation']>) });
+            e.currentTarget.selectedIndex = 0; // back to placeholder; it's an action, not state
+          }}
+          title="Aplicar una animación solo a los subtítulos seleccionados"
+        >
+          <option value="" disabled>Elegir animación…</option>
+          <option value="typewriter">Aparición por palabra</option>
+          <option value="word-highlight">Resaltado por palabra</option>
+          <option value="fade">Fundido</option>
+          <option value="pop">Pop</option>
+          <option value="punchline">Punchline (por línea)</option>
+          <option value="none">Sin animación (fijar)</option>
+        </select>
+        <button
+          type="button"
+          onClick={() => onApply({ animation: null })}
+          className="text-[10px] text-muted-foreground hover:text-foreground"
+          title="Usar la animación global"
+        >
+          global
+        </button>
+      </div>
+
       {/* Bold + reset */}
       <div className="flex items-center gap-2">
         <button

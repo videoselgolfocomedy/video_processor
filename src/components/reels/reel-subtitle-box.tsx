@@ -60,8 +60,9 @@ export function ReelSubtitleBox({ reelId, canvasWidth, canvasHeight }: ReelSubti
   // Check if the active segment has any per-word styles
   const hasWordStyles = activeSeg?.words?.some((w) => w.style);
 
-  // Determine current word index for animations
-  const animation = style?.animation;
+  // Determine current word index for animations. A segment may override the
+  // global animation (e.g. word-by-word reveal on just one line).
+  const animation = activeSeg?.animation ?? style?.animation;
   let words = activeSeg?.words;
 
   // Fix corrupted word timing: if words exist but their timing is outside the segment range,

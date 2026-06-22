@@ -316,6 +316,10 @@ export interface SubtitleSegment {
   endMs: number;
   text: string;
   words?: SubtitleWord[];
+  /** Per-segment animation override. When set, this segment animates with this
+   *  instead of the global SubtitleStyle.animation — e.g. word-by-word reveal
+   *  ('typewriter') on just one line. Undefined = use the global animation. */
+  animation?: SubtitleStyle['animation'];
 }
 
 export interface SubtitleWord {

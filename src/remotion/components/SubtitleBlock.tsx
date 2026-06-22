@@ -10,10 +10,15 @@ interface SubtitleBlockProps {
 
 export const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
   segment,
-  style,
+  style: baseStyle,
 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
+
+  // Per-segment animation override (e.g. word-by-word reveal on one line).
+  const style: SubtitleStyle = segment.animation
+    ? { ...baseStyle, animation: segment.animation }
+    : baseStyle;
 
   const startFrame = Math.round((segment.startMs / 1000) * fps);
   const endFrame = Math.round((segment.endMs / 1000) * fps);
