@@ -1,9 +1,16 @@
 'use client';
 
-import { useRef, useCallback, useEffect, useState } from 'react';
+import { useRef, useCallback, useEffect, useMemo, useState } from 'react';
+import { ClipWaveform } from '@/components/parts/clip-waveform';
+import { useAudioRegions } from '@/components/parts/audio-regions-context';
+import { stemKindOfTrack, stemOriginalOf } from '@/lib/audio-stems';
+import { rowDeltaForDy } from '@/lib/track-heights';
+import { clipFitsTrack } from '@/lib/track-compat';
+import { ClipGainBands } from '@/components/shared/clip-gain-bands';
 import { Film, Music, ImageIcon, Type } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useReelStore } from '@/stores/reel-store';
+import { useProjectStore } from '@/stores/project-store';
 import type { CompositionClip } from '@/types/project';
 
 interface ReelTimelineClipProps {
@@ -14,18 +21,29 @@ interface ReelTimelineClipProps {
 
 type DragMode = 'move' | 'trim-in' | 'trim-out' | null;
 
+
 export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClipProps) {
   const [dragMode, setDragMode] = useState<DragMode>(null);
   const [editingText, setEditingText] = useState(false);
   const [textValue, setTextValue] = useState(clip.textContent ?? '');
   const textInputRef = useRef<HTMLInputElement>(null);
-  const dragOrigin = useRef<{ mouseX: number; startMs: number; endMs: number; sourceInMs: number; sourceOutMs: number; _prevDelta?: number }>({ mouseX: 0, startMs: 0, endMs: 0, sourceInMs: 0, sourceOutMs: 0 });
+  const dragOrigin = useRef<{ mouseX: number; mouseY: number; startMs: number; endMs: number; sourceInMs: number; sourceOutMs: number; _prevDelta?: number }>({ mouseX: 0, mouseY: 0, startMs: 0, endMs: 0, sourceInMs: 0, sourceOutMs: 0 });
+  // Pending cross-track drop target, resolved live and committed on mouse-up.
+  const dragTrackTargetRef = useRef<string | null>(null);
 
   const zoomLevel = useReelStore((s) => s.zoomLevel);
+  const stemKind = stemKindOfTrack(clip.trackId);
+  // Original signal behind the processed stem (Sync & Mix's gray reference).
+  const project = useProjectStore((s) => s.currentProject);
+  const viewportWidthPx = useReelStore((s) => s.viewportWidthPx);
+  const behind = useMemo(() => (stemKind && project ? stemOriginalOf(project, clip.fileName) : null), [stemKind, project, clip.fileName]);
+  const regions = useAudioRegions();
+  const plan = stemKind === 'ambient' && regions ? regions.ambientPlanForFile(clip.fileName) : null;
   const scrollOffsetMs = useReelStore((s) => s.scrollOffsetMs);
   const selectedClipIds = useReelStore((s) => s.selectedClipIds);
   const selectClip = useReelStore((s) => s.selectClip);
   const moveClip = useReelStore((s) => s.moveClip);
+  const moveClipToTrack = useReelStore((s) => s.moveClipToTrack);
   const moveSelectedClips = useReelStore((s) => s.moveSelectedClips);
   const trimClip = useReelStore((s) => s.trimClip);
 
@@ -41,6 +59,9 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
       e.stopPropagation();
       useReelStore.getState().saveSnapshot();
 
+      // Selecting a clip makes its track the active paste target.
+      useReelStore.getState().setActiveTrackId(clip.trackId);
+
       const addToSelection = e.shiftKey || e.metaKey || e.ctrlKey;
       // For move mode: if this clip is already in multi-selection, keep selection
       if (mode === 'move' && isSelected && isMultiSelected) {
@@ -52,11 +73,13 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
 
       dragOrigin.current = {
         mouseX: e.clientX,
+        mouseY: e.clientY,
         startMs: clip.timelineStartMs,
         endMs: clip.timelineEndMs,
         sourceInMs: clip.sourceInMs,
         sourceOutMs: clip.sourceOutMs,
       };
+      dragTrackTargetRef.current = null;
       setDragMode(mode);
     },
     [clip, selectClip, isSelected, isMultiSelected]
@@ -106,6 +129,24 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
             : snappedEnd !== rawStart + duration ? snappedEnd - duration
               : rawStart;
           moveClip(reelId, clip.id, finalStart);
+
+          // Cross-track drag: resolve which compatible track the cursor is over.
+          // We keep the clip on its original track while dragging (the track
+          // body clips overflow) and only commit the track change on mouse-up;
+          // here we just highlight the prospective target.
+          const tracks = store.reels.find((r) => r.id === reelId)?.composition.tracks ?? [];
+          const startIdx = tracks.findIndex((t) => t.id === clip.trackId);
+          const rowDelta = rowDeltaForDy(tracks, startIdx, e.clientY - dragOrigin.current.mouseY);
+          let target: string | null = null;
+          if (startIdx >= 0 && rowDelta !== 0) {
+            const targetIdx = Math.max(0, Math.min(tracks.length - 1, startIdx + rowDelta));
+            const tt = tracks[targetIdx];
+            if (tt && tt.id !== clip.trackId && !tt.locked && clipFitsTrack(clip.type, tt.type)) {
+              target = tt.id;
+            }
+          }
+          dragTrackTargetRef.current = target;
+          if (store.dragTargetTrackId !== target) store.setDragTargetTrackId(target);
         }
       } else if (dragMode === 'trim-in') {
         const rawStart = Math.max(0, dragOrigin.current.startMs + deltaMs);
@@ -118,6 +159,19 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
 
     const handleMouseUp = () => {
       dragOrigin.current._prevDelta = undefined;
+      // Commit a pending cross-track move (resolved during the drag).
+      const target = dragTrackTargetRef.current;
+      if (target) {
+        const store = useReelStore.getState();
+        const fresh = store.reels
+          .find((r) => r.id === reelId)
+          ?.composition.clips.find((c) => c.id === clip.id);
+        if (fresh && fresh.trackId !== target) {
+          moveClipToTrack(reelId, clip.id, target, fresh.timelineStartMs);
+        }
+      }
+      dragTrackTargetRef.current = null;
+      useReelStore.getState().setDragTargetTrackId(null);
       setDragMode(null);
     };
 
@@ -127,7 +181,7 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [dragMode, clip.id, reelId, zoomLevel, moveClip, moveSelectedClips, trimClip]);
+  }, [dragMode, clip.id, clip.trackId, clip.type, reelId, zoomLevel, moveClip, moveClipToTrack, moveSelectedClips, trimClip]);
 
   const updateClip = useReelStore((s) => s.updateClip);
 
@@ -142,10 +196,15 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
   const clipColor = clip.type === 'video'
     ? 'bg-blue-600/80 border-blue-400'
     : clip.type === 'audio'
-      ? 'bg-green-600/80 border-green-400'
+      ? (stemKind === 'board'
+          ? 'bg-emerald-950/75 border-emerald-500/70'
+          : stemKind === 'ambient'
+            ? 'bg-sky-950/75 border-sky-500/70'
+            : 'bg-green-900/75 border-green-500/70')
       : clip.type === 'image' || clip.type === 'gif'
         ? 'bg-purple-600/80 border-purple-400'
         : 'bg-orange-600/80 border-orange-400';
+  const waveColor = stemKind === 'board' ? 'rgba(52,211,153,0.85)' : stemKind === 'ambient' ? 'rgba(56,189,248,0.85)' : 'rgba(134,239,172,0.8)';
 
   const isTextClip = clip.type === 'text';
   const hasSourceTrim = clip.type === 'video' || clip.type === 'audio';
@@ -183,6 +242,13 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
       onMouseDown={(e) => handleMouseDown(e, 'move')}
       onDoubleClick={handleDoubleClick}
     >
+      {/* The audio itself, drawn like the Sync & Mix rows (scaled by the clip volume) */}
+      {clip.type === 'audio' && (
+        <>
+          <ClipWaveform fileName={clip.fileName} sourceInMs={clip.sourceInMs} sourceOutMs={clip.sourceOutMs} leftPx={leftPx} widthPx={widthPx} viewportWidthPx={viewportWidthPx} color={waveColor} gain={clip.volume ?? 1} behind={behind} plan={plan} />
+          <ClipGainBands clip={clip} zoomLevel={zoomLevel} />
+        </>
+      )}
       {/* Trim-in handle (only for source-based clips) */}
       {hasSourceTrim && (
         <div
@@ -212,7 +278,7 @@ export function ReelTimelineClip({ reelId, clip, trackLocked }: ReelTimelineClip
             onMouseDown={(e) => e.stopPropagation()}
           />
         ) : (
-          <span className="text-[9px] text-white/90 truncate">{displayLabel}</span>
+          <span className={cn('text-[9px] text-white/90 truncate', clip.type === 'audio' && 'rounded bg-black/45 px-1')}>{displayLabel}</span>
         )}
       </div>
 

@@ -13,6 +13,7 @@ export default function ReelsPage() {
   const { currentProject, fetchProject } = useProjectStore();
   const loadReels = useReelStore((s) => s.loadReels);
   const refreshBaseSegments = useReelStore((s) => s.refreshBaseSegments);
+  const setComposeVersions = useReelStore((s) => s.setComposeVersions);
   const [loaded, setLoaded] = useState(false);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -33,14 +34,25 @@ export default function ReelsPage() {
     // Use compose duration if compose clips exist, otherwise source video duration
     const composeClips = (currentProject.composition?.clips ?? [])
       .filter((c: { trackId: string }) => c.trackId === 'v1');
-    const composeDurationMs = composeClips.length > 0
-      ? Math.max(...composeClips.map((c: { timelineEndMs: number }) => c.timelineEndMs))
+    // The trim bar's ceiling: the live compose timeline, or the longest NAMED
+    // version when a reel built from one reaches further (its startMs/endMs
+    // live on that version's timeline).
+    const composeVersions = currentProject.composition?.versions ?? [];
+    const versionEnds = composeVersions.flatMap((v) => v.clips.filter((c) => c.trackId === 'v1').map((c) => c.timelineEndMs));
+    const composeDurationMs = composeClips.length > 0 || versionEnds.length > 0
+      ? Math.max(...composeClips.map((c: { timelineEndMs: number }) => c.timelineEndMs), ...versionEnds)
       : 0;
-    const sourceDurationMs = videoSource?.duration
-      ? videoSource.duration * 1000
-      : currentProject.audio.extractedTracks[0]?.duration
-        ? currentProject.audio.extractedTracks[0].duration * 1000
-        : 60000;
+    setComposeVersions(composeVersions);
+    // Muxed timeline length wins over the raw video source duration — on
+    // parts-concat projects the first video SOURCE is only part 1, so its own
+    // duration understates the full joined timeline.
+    const sourceDurationMs = currentProject.sync.muxedDurationMs
+      ? currentProject.sync.muxedDurationMs
+      : videoSource?.duration
+        ? videoSource.duration * 1000
+        : currentProject.audio.extractedTracks[0]?.duration
+          ? currentProject.audio.extractedTracks[0].duration * 1000
+          : 60000;
     const durationMs = composeDurationMs > 0 ? composeDurationMs : sourceDurationMs;
 
     if (!loaded) {
@@ -56,7 +68,7 @@ export default function ReelsPage() {
       // navigation was a real regression.
       refreshBaseSegments(baseSegs, durationMs);
     }
-  }, [currentProject, loaded, loadReels, refreshBaseSegments]);
+  }, [currentProject, loaded, loadReels, refreshBaseSegments, setComposeVersions]);
 
   const handleSave = useCallback(async () => {
     const reels = useReelStore.getState().reels;
@@ -144,9 +156,19 @@ function getVideoSrc(project: { sync: { muxedVideoPath?: string }; sources: Arra
   return undefined;
 }
 
-function getAudioSrc(project: { sync: { mixedAudioPath?: string; selectedAudioPath?: string } }, projectId: string): string | undefined {
+function getAudioSrc(project: { sync: { mixedAudioPath?: string; selectedAudioPath?: string; muxedVideoPath?: string; audioRev?: number }; sources: Array<{ type?: string; storedName: string }> }, projectId: string): string | undefined {
   const audioPath = project.sync.mixedAudioPath || project.sync.selectedAudioPath;
-  if (!audioPath) return undefined;
-  const name = audioPath.split('/').pop();
-  return `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(name || '')}`;
+  if (audioPath) {
+    const name = audioPath.split('/').pop();
+    // audioRev busts the browser cache after an in-place re-mix (mesa ducking).
+    const rev = project.sync.audioRev ? `&v=${project.sync.audioRev}` : '';
+    return `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(name || '')}${rev}`;
+  }
+  // Partes / use-video-directly / restore-from-muxed projects have NO separate
+  // audio file — the audio lives INSIDE the muxed video. Fall back to the SAME
+  // URL as getVideoSrc (mirrors the compose-page fix) so (a) ReelSetupView can
+  // derive an audioFileName and enterTimelinePhase creates the ra1 main-audio
+  // clips, and (b) `needsSeparateAudio` stays false in the player (videoSrc ===
+  // audioSrc string-equal) so the video keeps playing its embedded audio.
+  return getVideoSrc(project, projectId);
 }

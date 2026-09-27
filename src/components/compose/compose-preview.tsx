@@ -5,7 +5,11 @@ import { Player } from '@remotion/player';
 import type { PlayerRef } from '@remotion/player';
 import { AbsoluteFill, Video, Audio, Sequence, Img } from 'remotion';
 import { SubtitleLayer } from '@/remotion/compositions/SubtitleLayer';
+import { fadeInGain } from '@/lib/audio-fade';
+import { maxClipGain, regionGainAt } from '@/lib/clip-gain';
+import { trackMixerGain } from '@/lib/audio-stems';
 import { useComposeStore } from '@/stores/compose-store';
+import { CanvasBackgroundPicker } from '@/components/shared/canvas-background-picker';
 import type { SubtitleStyle } from '@/types/project';
 
 const FPS = 30;
@@ -50,7 +54,13 @@ function transformsEqual(a?: ClipTransform, b?: ClipTransform): boolean {
 function rangeKey(prefix: string, r: Pick<MergedRange, 'timelineStartMs' | 'timelineEndMs' | 'sourceInMs' | 'transform'>): string {
   const t = r.transform;
   const tStr = t ? `${t.scale.toFixed(3)}_${t.x.toFixed(3)}_${t.y.toFixed(3)}_${(t.rotation ?? 0).toFixed(2)}` : '0';
-  return `${prefix}:${r.timelineStartMs}-${r.timelineEndMs}@${r.sourceInMs}#${tStr}`;
+  // Key by START + source position (+transform), NOT the end. When the tail of a
+  // range is trimmed away or a piece is moved/split off to another track, the
+  // surviving range keeps its key, so Remotion updates the same <Audio>/<Video>
+  // in place (durationInFrames changes) instead of unmounting+remounting it.
+  // A remount during playback leaves Remotion's audio element permanently silent
+  // until a page reload — that was the "compose loses all sound after an edit" bug.
+  return `${prefix}:${r.timelineStartMs}@${r.sourceInMs}#${tStr}`;
 }
 
 function mergeContiguousClips(trackClips: MergeableClip[], keyPrefix: string): MergedRange[] {
@@ -141,6 +151,7 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
   const clips = useComposeStore((s) => s.clips);
   const tracks = useComposeStore((s) => s.tracks);
   const segments = useComposeStore((s) => s.subtitleSegments);
+  const backgroundColor = useComposeStore((s) => s.backgroundColor) ?? '#000000';
 
   const mutedTrackIds = new Set(tracks.filter((t) => t.muted).map((t) => t.id));
   const hiddenTrackIds = new Set(tracks.filter((t) => !t.visible).map((t) => t.id));
@@ -148,8 +159,10 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
   const videoClips = clips.filter(
     (c) => (c.type === 'video' || c.type === 'image') && !hiddenTrackIds.has(c.trackId)
   );
+  // Extra-audio clips = every audio clip NOT on the base a1 track (a1 is rendered
+  // separately in section 4). Excluding a1 here prevents double-playback.
   const audioClips = clips.filter(
-    (c) => c.type === 'audio' && !mutedTrackIds.has(c.trackId)
+    (c) => c.type === 'audio' && c.trackId !== 'a1' && !mutedTrackIds.has(c.trackId)
   );
   const textClips = clips.filter(
     (c) => c.type === 'text' && !hiddenTrackIds.has(c.trackId)
@@ -168,7 +181,7 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
   const a1Merged = mergeContiguousClips(a1Clips, 'a1');
 
   return (
-    <AbsoluteFill style={{ backgroundColor: '#000' }}>
+    <AbsoluteFill style={{ backgroundColor }}>
       {/* 1. Base video clips (merged contiguous ranges → single <Video> per range) */}
       {/* Muted because audio is handled separately via a1 clips — the muxed video
           contains embedded audio which would play on top of the separate Audio track */}
@@ -290,8 +303,10 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
         );
       })}
 
-      {/* 4. Base audio clips (merged contiguous ranges → single <Audio> per range) */}
-      {audioSrc && a1Merged.map((range) => {
+      {/* 4. Base audio clips (merged contiguous ranges → single <Audio> per range).
+          Honors the a1 mute — that is how "mesa y ambiente como pistas
+          separadas" silences the baked mix (the export does the same). */}
+      {audioSrc && !mutedTrackIds.has('a1') && a1Merged.map((range) => {
         const from = Math.round((range.timelineStartMs / 1000) * FPS);
         const dur = Math.max(1, Math.round(((range.timelineEndMs - range.timelineStartMs) / 1000) * FPS));
         const startFrom = Math.round((range.sourceInMs / 1000) * FPS);
@@ -302,15 +317,42 @@ const ComposeComposition: React.FC<ComposeCompositionProps> = ({
         );
       })}
 
-      {/* 5. Extra audio clips */}
+      {/* 5. Extra audio clips (tracks a2, a3, …) */}
       {audioClips.map((clip) => {
-        const src = clipSources[clip.fileName];
+        // A media-bin asset if present; otherwise this clip was split/moved off
+        // the main audio (a1) and keeps that file's name, which is served via
+        // audioSrc (not clipSources). Fall back to audioSrc and seek with
+        // startFrom so the moved segment plays its correct portion.
+        const src = clipSources[clip.fileName] ?? audioSrc;
         if (!src) return null;
         const from = Math.round((clip.timelineStartMs / 1000) * FPS);
         const dur = Math.max(1, Math.round(((clip.timelineEndMs - clip.timelineStartMs) / 1000) * FPS));
+        const startFrom = Math.round((clip.sourceInMs / 1000) * FPS);
+        // Stem tracks enter the mixer at ×0.5 (see STEM_MIX_NORMALIZATION).
+        const base = (clip.volume ?? 1) * trackMixerGain(clip.trackId);
+        // A media element caps at 1.0 — above that Remotion needs its Web Audio
+        // gain path (stems: "mesa × 2.5"). Only opt in when needed — and count
+        // the clip's boost zones in, since the flag must not flip mid-play.
+        const amplify = maxClipGain(clip) * trackMixerGain(clip.trackId) > 1;
+        const fadeMs = clip.fadeInMs ?? 0;
+        const curve = clip.fadeInCurve;
+        const zones = clip.gainRegions?.length ? clip.gainRegions : null;
+        // Fade-in ramp over the first fadeMs of the clip. The volume callback's
+        // frame is relative to this Sequence (0 = clip start), so posMs maps to
+        // the clip's own position. Mirrors reels (ReelExtraAudio) + the FFmpeg
+        // afade on export.
+        const volume = fadeMs > 0 || zones
+          ? (f: number) => {
+              const posMs = (f / FPS) * 1000;
+              const fade = fadeMs > 0 && posMs < fadeMs ? fadeInGain(posMs / fadeMs, curve) : 1;
+              // The zones live in the clip's own file clock, so the playhead
+              // inside the clip maps through sourceInMs.
+              return Math.max(0, base * fade * regionGainAt(zones ?? undefined, clip.sourceInMs + posMs));
+            }
+          : base;
         return (
           <Sequence key={clip.id} from={from} durationInFrames={dur}>
-            <Audio src={src} volume={clip.volume ?? 1} />
+            <Audio src={src} startFrom={startFrom} volume={volume} useWebAudioApi={amplify} />
           </Sequence>
         );
       })}
@@ -380,6 +422,8 @@ export function ComposePreview({
   const mediaBin = useComposeStore((s) => s.mediaBin);
   const compositionAspect = useComposeStore((s) => s.aspectRatio);
   const setCompositionAspect = useComposeStore((s) => s.setAspectRatio);
+  const canvasBackgroundColor = useComposeStore((s) => s.backgroundColor);
+  const setCanvasBackgroundColor = useComposeStore((s) => s.setBackgroundColor);
 
   // Composition canvas dimensions per aspect ratio (multiples of 2 required by H.264)
   const { compositionWidth, compositionHeight } = useMemo(() => {
@@ -398,14 +442,31 @@ export function ComposePreview({
 
   const durationInFrames = Math.max(1, Math.ceil((durationMs / 1000) * FPS));
 
-  // Build source URLs for compose assets
+  // Build source URLs for compose assets. Audio clips whose file is NOT a
+  // media-bin asset (the per-part stems `part_*_board_proc.wav` /
+  // `part_*_amb_proc.wav`, or the mix wav itself) are served from audio/ —
+  // before, every unknown file silently fell back to the main mix. The `v`
+  // cache-buster is the same audioRev the main audio carries, so a re-mix
+  // refreshes the stems too.
+  const clips = useComposeStore((s) => s.clips);
+  const audioRev = useMemo(() => {
+    try { return audioSrc ? new URL(audioSrc, 'http://x').searchParams.get('v') ?? '' : ''; } catch { return ''; }
+  }, [audioSrc]);
+  const extraAudioFiles = useMemo(
+    () => Array.from(new Set(clips.filter((c) => c.type === 'audio' && c.trackId !== 'a1').map((c) => c.fileName))).sort().join('\n'),
+    [clips],
+  );
   const clipSources = useMemo(() => {
     const sources: Record<string, string> = {};
     for (const asset of mediaBin) {
       sources[asset.fileName] = `/api/projects/${projectId}/compose/file?name=${encodeURIComponent(asset.fileName)}`;
     }
+    for (const name of extraAudioFiles.split('\n')) {
+      if (!name || sources[name]) continue;
+      sources[name] = `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(name)}${audioRev ? `&v=${encodeURIComponent(audioRev)}` : ''}`;
+    }
     return sources;
-  }, [mediaBin, projectId]);
+  }, [mediaBin, projectId, extraAudioFiles, audioRev]);
 
   const inputProps = useMemo(
     () => ({
@@ -511,23 +572,26 @@ export function ComposePreview({
   const aspectRatioCss = `${compositionWidth} / ${compositionHeight}`;
 
   return (
-    <div className="flex h-full flex-col bg-black">
-      {/* Aspect ratio selector */}
-      <div className="flex items-center justify-center gap-1 px-2 py-1 border-b border-border/50 bg-background/20 flex-shrink-0">
-        <span className="text-[10px] text-muted-foreground mr-1">Formato:</span>
-        {(['16:9', '9:16', '1:1', '4:5'] as const).map((ratio) => (
-          <button
-            key={ratio}
-            onClick={() => setCompositionAspect(ratio)}
-            className={`px-2 py-0.5 rounded text-[10px] border ${
-              compositionAspect === ratio
-                ? 'bg-primary/20 border-primary text-primary'
-                : 'border-border text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            {ratio}
-          </button>
-        ))}
+    <div className="flex h-full flex-col" style={{ backgroundColor: canvasBackgroundColor || '#000000' }}>
+      {/* Aspect ratio + canvas background color selectors */}
+      <div className="flex items-center justify-center gap-3 px-2 py-1 border-b border-border/50 bg-background/20 flex-shrink-0">
+        <div className="flex items-center gap-1">
+          <span className="text-[10px] text-muted-foreground mr-1">Formato:</span>
+          {(['16:9', '9:16', '1:1', '4:5'] as const).map((ratio) => (
+            <button
+              key={ratio}
+              onClick={() => setCompositionAspect(ratio)}
+              className={`px-2 py-0.5 rounded text-[10px] border ${
+                compositionAspect === ratio
+                  ? 'bg-primary/20 border-primary text-primary'
+                  : 'border-border text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {ratio}
+            </button>
+          ))}
+        </div>
+        <CanvasBackgroundPicker value={canvasBackgroundColor} onChange={setCanvasBackgroundColor} />
       </div>
 
       {/* Player — fits container by height */}

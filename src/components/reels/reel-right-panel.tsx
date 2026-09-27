@@ -3,15 +3,18 @@
 import { useCallback, useRef, useEffect, useState } from 'react';
 import { useReelStore } from '@/stores/reel-store';
 import { getReelVideoElement } from './reel-video-ref';
-import { getActiveReelTransform, applyCanvasTransform, drawActiveOverlayVideos, hasActiveOverlayVideo } from '@/lib/reel-transform';
+import { getActiveReelTransform, drawTransformedCrop, drawActiveOverlayVideos, hasActiveOverlayVideo } from '@/lib/reel-transform';
+import { cropAtTime } from '@/lib/crop-keyframes';
 import { ReelSubtitleBox } from './reel-subtitle-box';
 import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
 import { useCustomPresets } from '@/hooks/use-custom-presets';
+import { ReelMixPanels } from './reel-mix-panels';
+import { CropKeyframesPanel } from './crop-keyframes-panel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { RefreshCw, Scissors } from 'lucide-react';
-import { splitLongSegments } from '@/lib/subtitle-utils';
-import type { SubtitleStyle } from '@/types/project';
+import { RefreshCw, Scissors, RemoveFormatting } from 'lucide-react';
+import { splitSegmentsWithConstraints, segmentViolates, REEL_DEFAULT_MAX_WORDS } from '@/lib/subtitle-utils';
+import type { SubtitleStyle, SubtitleSplitMode } from '@/types/project';
 
 interface ReelRightPanelProps {
   reelId: string;
@@ -60,30 +63,24 @@ function CropPreviewCanvas({ reelId }: { reelId: string }) {
         return;
       }
 
-      // Read fresh crop from store in case it changed
-      const currentReel = useReelStore.getState().reels.find((r) => r.id === reelId);
-      const crop = currentReel?.cropRegion ?? reel.cropRegion;
-
-      const cropPixH = srcH * crop.scale;
-      const cropPixW = cropPixH * (9 / 16);
-      const sx = crop.centerX * srcW - cropPixW / 2;
-      const sy = crop.centerY * srcH - cropPixH / 2;
+      // Read fresh crop from store — interpolated at the playhead when crop
+      // keyframes exist (animated encuadre).
+      const rs = useReelStore.getState();
+      const currentReel = rs.reels.find((r) => r.id === reelId);
+      const crop = currentReel
+        ? cropAtTime(currentReel.cropRegion, currentReel.cropKeyframes, rs.currentTimeMs)
+        : reel.cropRegion;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      // Black backdrop so a rotated/zoomed-out frame shows black in the gaps
-      // (matches the export, which overlays the clip on a black canvas).
-      ctx.fillStyle = '#000';
+      // Backdrop so a rotated/zoomed-out frame shows the chosen canvas color
+      // in the gaps (matches the export and the timeline-phase preview).
+      ctx.fillStyle = currentReel?.composition.backgroundColor ?? '#000000';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-      // Apply per-clip motion transform (zoom/position/rotation) inherited from
-      // compose, so the 9:16 preview matches the export.
+      // WYSIWYG: transform the source frame FIRST, then sample the crop window
+      // from the transformed image — same order as the setup-view selector
+      // (drawn over the CSS-transformed video) and the FFmpeg export.
       const activeT = getActiveReelTransform(reelId);
-      const applied = applyCanvasTransform(ctx, canvas.width, canvas.height, activeT);
-      ctx.drawImage(
-        video,
-        Math.max(0, sx), Math.max(0, sy), cropPixW, cropPixH,
-        0, 0, canvas.width, canvas.height
-      );
-      if (applied) ctx.setTransform(1, 0, 0, 1, 0, 0);
+      drawTransformedCrop(ctx, video, canvas.width, canvas.height, srcW, srcH, crop, activeT);
 
       // Draw PiP (secondary-track) video overlays on top, in output space.
       drawActiveOverlayVideos(ctx, canvas.width, canvas.height, reelId);
@@ -141,6 +138,7 @@ export function ReelRightPanel({ reelId, projectId }: ReelRightPanelProps) {
   const { customPresets, savePreset, deletePreset } = useCustomPresets(projectId);
   const setReelSubtitleConstraints = useReelStore((s) => s.setReelSubtitleConstraints);
   const regenerateReelSubtitles = useReelStore((s) => s.regenerateReelSubtitles);
+  const stripReelSubtitlePunctuation = useReelStore((s) => s.stripReelSubtitlePunctuation);
   const updateReel = useReelStore((s) => s.updateReel);
 
   const handleStyleChange = useCallback(
@@ -155,8 +153,7 @@ export function ReelRightPanel({ reelId, projectId }: ReelRightPanelProps) {
 
   const handleAutoSplit = useCallback(() => {
     if (!reel) return;
-    const { maxCharsPerBlock, maxDurationMs } = reel.subtitleConstraints;
-    const split = splitLongSegments(reel.subtitleSegments, maxCharsPerBlock, maxDurationMs);
+    const split = splitSegmentsWithConstraints(reel.subtitleSegments, reel.subtitleConstraints);
     updateReel(reelId, { subtitleSegments: split });
   }, [reel, reelId, updateReel]);
 
@@ -164,9 +161,7 @@ export function ReelRightPanel({ reelId, projectId }: ReelRightPanelProps) {
 
   const constraints = reel.subtitleConstraints;
   const style = reel.subtitleStyle;
-  const violations = reel.subtitleSegments.filter(
-    (s) => s.text.length > constraints.maxCharsPerBlock || (s.endMs - s.startMs) > constraints.maxDurationMs
-  ).length;
+  const violations = reel.subtitleSegments.filter((s) => segmentViolates(s, constraints)).length;
 
   return (
     <div className="flex flex-col h-full">
@@ -177,6 +172,12 @@ export function ReelRightPanel({ reelId, projectId }: ReelRightPanelProps) {
 
       {/* Controls - scrollable */}
       <div className="overflow-y-auto p-3 space-y-4">
+        {/* Animated crop (subject tracking) — shared with the timeline phase. */}
+        <CropKeyframesPanel reelId={reelId} />
+
+        {/* Mesa ducking + ambient boost — shared with the timeline phase. */}
+        <ReelMixPanels reelId={reelId} />
+
         {/* Quick subtitle position */}
         <div>
           <h3 className="text-xs font-medium mb-2">Subtitle Position</h3>
@@ -222,6 +223,38 @@ export function ReelRightPanel({ reelId, projectId }: ReelRightPanelProps) {
         {/* Constraints */}
         <div>
           <h3 className="text-xs font-medium mb-2">Constraints</h3>
+          {/* Modo de troceo: clásico por caracteres, o picado por frases (≤ N palabras) */}
+          <div className="mb-2">
+            <label className="block text-[10px] text-muted-foreground mb-0.5">Troceo</label>
+            <select
+              className="h-7 w-full rounded border border-border bg-background px-1 text-xs outline-none"
+              value={constraints.splitMode ?? 'clasico'}
+              title="Clásico: bloques por caracteres. Picado: ≤ N palabras, alineado con las frases y sin separar artículo/posesivo/preposición de lo que sigue. Remate: además, la última unidad de cada frase va sola (el golpe)."
+              onChange={(e) => setReelSubtitleConstraints(reelId, {
+                ...constraints,
+                splitMode: e.target.value as SubtitleSplitMode,
+                maxWordsPerBlock: constraints.maxWordsPerBlock ?? REEL_DEFAULT_MAX_WORDS,
+              })}
+            >
+              <option value="clasico">Clásico (por caracteres)</option>
+              <option value="picado">Picado (≤ N palabras, por frases)</option>
+              <option value="remate">Picado con remate (comedia)</option>
+            </select>
+          </div>
+          {(constraints.splitMode ?? 'clasico') !== 'clasico' && (
+            <div className="mb-2">
+              <label className="block text-[10px] text-muted-foreground mb-0.5">Máx. palabras por bloque</label>
+              <Input
+                type="number" min={1} max={8}
+                value={constraints.maxWordsPerBlock ?? REEL_DEFAULT_MAX_WORDS}
+                onChange={(e) => setReelSubtitleConstraints(reelId, {
+                  ...constraints,
+                  maxWordsPerBlock: Math.max(1, Math.min(8, parseInt(e.target.value) || REEL_DEFAULT_MAX_WORDS)),
+                })}
+                className="h-7 text-xs"
+              />
+            </div>
+          )}
           <div className="flex gap-3">
             <div className="flex-1">
               <label className="block text-[10px] text-muted-foreground mb-1">Max chars</label>
@@ -248,12 +281,19 @@ export function ReelRightPanel({ reelId, projectId }: ReelRightPanelProps) {
               />
             </div>
           </div>
-          <div className="flex gap-2 mt-2">
+          <div className="flex flex-wrap gap-2 mt-2">
             <Button
               size="sm" variant="outline" className="text-xs"
               onClick={() => regenerateReelSubtitles(reelId)}
             >
               <RefreshCw className="mr-1 h-3 w-3" /> Regenerate
+            </Button>
+            <Button
+              size="sm" variant="outline" className="text-xs"
+              onClick={() => stripReelSubtitlePunctuation(reelId)}
+              title="Eliminar la puntuación final (.,;:) de todos los bloques"
+            >
+              <RemoveFormatting className="mr-1 h-3 w-3" /> Strip .,
             </Button>
             {violations > 0 && (
               <Button size="sm" variant="outline" className="text-xs" onClick={handleAutoSplit}>

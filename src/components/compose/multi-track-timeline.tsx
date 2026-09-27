@@ -1,7 +1,11 @@
 'use client';
 
-import { useRef, useCallback, useEffect } from 'react';
+import { useRef, useCallback, useEffect, useMemo } from 'react';
+import { useParams } from 'next/navigation';
 import { useComposeStore } from '@/stores/compose-store';
+import { useProjectStore } from '@/stores/project-store';
+import { AudioRegionsLane } from '@/components/parts/audio-regions-lane';
+import { AudioRegionsProvider, RegionsApplyBar } from '@/components/parts/audio-regions-context';
 import { TimelineRuler } from './timeline-ruler';
 import { TimelinePlayhead } from './timeline-playhead';
 import { TimelineTrack } from './timeline-track';
@@ -21,6 +25,16 @@ export function MultiTrackTimeline({ onSave, saving }: MultiTrackTimelineProps) 
   const setZoom = useComposeStore((s) => s.setZoom);
   const setScrollOffset = useComposeStore((s) => s.setScrollOffset);
   const setViewportWidth = useComposeStore((s) => s.setViewportWidth);
+  const viewportWidthPx = useComposeStore((s) => s.viewportWidthPx);
+  // Audio-region lane: the mesa attenuations / ambient raises of the parts,
+  // drawn on this same time axis so they can be deleted and added here.
+  const params = useParams();
+  const projectId = params?.id as string | undefined;
+  const clips = useComposeStore((s) => s.clips);
+  const currentTimeMs = useComposeStore((s) => s.currentTimeMs);
+  const setCurrentTime = useComposeStore((s) => s.setCurrentTime);
+  const hasParts = useProjectStore((s) => (s.currentProject?.parts?.length ?? 0) > 0);
+  const v1Clips = useMemo(() => clips.filter((c) => c.trackId === 'v1'), [clips]);
 
   // Measure viewport width
   useEffect(() => {
@@ -83,7 +97,11 @@ export function MultiTrackTimeline({ onSave, saving }: MultiTrackTimelineProps) 
         const newOffset = Math.max(0, Math.min(durationMs, scrollOffsetMs + deltaMs));
         setScrollOffset(newOffset);
       } else {
-        // Normal vertical scroll → horizontal pan
+        // Normal vertical scroll → horizontal pan — unless the tracks overflow
+        // the pane: then the wheel scrolls them like any list (Shift+wheel and
+        // sideways trackpad still pan).
+        const el = containerRef.current;
+        if (el && el.scrollHeight > el.clientHeight + 1) return;
         const deltaMs = e.deltaY / zoomLevel;
         const newOffset = Math.max(0, Math.min(durationMs, scrollOffsetMs + deltaMs));
         setScrollOffset(newOffset);
@@ -92,17 +110,23 @@ export function MultiTrackTimeline({ onSave, saving }: MultiTrackTimelineProps) 
     [zoomLevel, scrollOffsetMs, durationMs, setZoom, setScrollOffset]
   );
 
-  return (
-    <div className="flex flex-col border-t border-border bg-background">
-      <TimelineControls onSave={onSave} saving={saving} />
+  const stemTracksPresent = tracks.some((t) => t.id === 'a_mesa' || t.id === 'a_amb');
+  const body = (
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="flex-shrink-0">
+        <TimelineControls onSave={onSave} saving={saving} />
+      </div>
 
+      {/* Fills the bottom half of the screen; scrolls vertically only when
+          there are more tracks than fit, with the ruler pinned on top. */}
       <div
         ref={containerRef}
-        className="relative overflow-hidden select-none"
+        className="relative flex-1 min-h-0 overflow-y-auto overflow-x-hidden select-none"
         onWheel={handleWheel}
       >
-        {/* Ruler */}
-        <TimelineRuler />
+        <div className="sticky top-0 z-40 bg-background">
+          <TimelineRuler />
+        </div>
 
         {/* Tracks */}
         <div className="relative">
@@ -110,10 +134,29 @@ export function MultiTrackTimeline({ onSave, saving }: MultiTrackTimelineProps) 
             <TimelineTrack key={track.id} track={track} />
           ))}
 
+          {/* Fallback lane for mesa/ambiente regions while the stems are not separated */}
+          <AudioRegionsLane />
+
           {/* Playhead line spanning all tracks */}
           <TimelinePlayhead />
         </div>
+        <RegionsApplyBar />
       </div>
     </div>
+  );
+  if (!hasParts || !projectId) return body;
+  return (
+    <AudioRegionsProvider
+      projectId={projectId}
+      videoClips={v1Clips}
+      scrollOffsetMs={scrollOffsetMs}
+      zoomLevel={zoomLevel}
+      playheadMs={currentTimeMs}
+      viewportWidthPx={viewportWidthPx}
+      onSeek={setCurrentTime}
+      stemTracksPresent={stemTracksPresent}
+    >
+      {body}
+    </AudioRegionsProvider>
   );
 }

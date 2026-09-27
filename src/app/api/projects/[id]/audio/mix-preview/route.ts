@@ -4,6 +4,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { getProject, getProjectDir } from '@/server/project-manager';
 import { jobManager } from '@/server/job-manager';
+import { buildDuckVolumeExpr } from '@/server/audio-duck';
 
 const execFileAsync = promisify(execFile);
 
@@ -125,15 +126,47 @@ export async function POST(
 
       const ffmpeg = getFFmpegPath();
 
+      // Board ducking envelope: attenuate the mesa in the user's marked/detected
+      // filler regions ("je-je"/"eehh"). New order is duck → amplify → mix, so the
+      // AMPLIFIED board already has the ducking baked in (see the amplify route) —
+      // only duck HERE when mixing the RAW board (no amplify). Applied before the
+      // atrim so region times are absolute in the board wav.
+      const usingAmplified = useAmplified && !!project.audio.amplifiedBoardPath;
+      const duckExpr = usingAmplified ? null : buildDuckVolumeExpr(project.audio.boardDuckRegions);
+      const duckChain = duckExpr ? `volume=eval=frame:volume='${duckExpr}',` : '';
+      if (duckExpr) {
+        const active = (project.audio.boardDuckRegions ?? []).filter((r) => r.enabled).length;
+        console.log(`[mix-preview] ducking ${active} raw board region(s)`);
+      }
+
       // FFmpeg filter_complex:
-      // 1. Trim board from total offset (auto + manual) for precise sync
+      // 1. Duck the board in filler regions (optional), then trim from total
+      //    offset (auto + manual) for precise sync
       // 2. Reset timestamps after trim
       // 3. Adjust volumes
       // 4. Mix using shortest duration (= ambient length)
+      // Ambient BOOST envelope: raise the audience/laughs in the user's marked
+      // regions (positive dB, per-region fade-in/out) while the mesa voice
+      // stays untouched — boosting the whole camera audio echoes the voice.
+      // Ambient times are absolute in the ambient wav (= mix timeline, the
+      // ambient drives the mix with no trim), so no offset math is needed.
+      const boostExpr = buildDuckVolumeExpr(project.audio.ambientBoostRegions);
+      const boostChain = boostExpr ? `volume=eval=frame:volume='${boostExpr}',` : '';
+      if (boostExpr) {
+        const active = (project.audio.ambientBoostRegions ?? []).filter((r) => r.enabled).length;
+        console.log(`[mix-preview] boosting ${active} ambient region(s)`);
+      }
+
+      // Final transparent peak limiter: with a hot amplified board (bv≥2) and/or
+      // ambient boost regions, the SUM can exceed full scale and hard-clip into
+      // the pcm16 wav — audible "saturación" exactly at the loud peaks (the
+      // boosted laughs), in preview AND export alike. The limiter only engages
+      // on would-be-clipping peaks, so normal material is untouched. Same
+      // params as the amplify chain's limiter.
       const filterComplex = [
-        `[0:a]atrim=start=${offsetSec},asetpts=PTS-STARTPTS,volume=${boardVolume}[board]`,
-        `[1:a]volume=${ambientVolume}[amb]`,
-        `[board][amb]amix=inputs=2:duration=shortest[out]`,
+        `[0:a]${duckChain}atrim=start=${offsetSec},asetpts=PTS-STARTPTS,volume=${boardVolume}[board]`,
+        `[1:a]${boostChain}volume=${ambientVolume}[amb]`,
+        `[board][amb]amix=inputs=2:duration=shortest,alimiter=limit=0.95:attack=5:release=50[out]`,
       ].join(';');
 
       const args = [

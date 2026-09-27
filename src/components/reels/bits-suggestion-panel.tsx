@@ -14,6 +14,8 @@ interface BitWithSourceTimes extends BitDefinition {
 interface BitsSuggestionPanelProps {
   bits: BitWithSourceTimes[];
   compositionClips: CompositionClip[];
+  /** Which cuts the bits were detected against ("Compose actual", "versión «x»", "vídeo completo"). */
+  sourceLabel?: string;
   onCreateReel: (label: string, startMs: number, endMs: number, sourceStartMs?: number, sourceEndMs?: number) => void;
 }
 
@@ -21,7 +23,7 @@ interface BitWithCoverage extends BitWithSourceTimes {
   coverage: number;
 }
 
-export function BitsSuggestionPanel({ bits, compositionClips, onCreateReel }: BitsSuggestionPanelProps) {
+export function BitsSuggestionPanel({ bits, compositionClips, sourceLabel, onCreateReel }: BitsSuggestionPanelProps) {
   // Filter to main video track clips only
   const mainClips = compositionClips.filter((c) => c.trackId === 'v1');
   const hasComposition = mainClips.length > 0;
@@ -68,7 +70,10 @@ export function BitsSuggestionPanel({ bits, compositionClips, onCreateReel }: Bi
       return { ...bit, coverage };
     })
     .filter((b): b is BitWithCoverage => b !== null)
-    .sort((a, b) => b.coverage - a.coverage);
+    // Chronological order: by the bit's position in the video. Prefer the
+    // source-mapped start (authoritative when bits came from compose); fall
+    // back to startMs (already source-space for source='full' bits).
+    .sort((a, b) => (a.sourceStartMs ?? a.startMs) - (b.sourceStartMs ?? b.startMs));
 
   if (bitsWithCoverage.length === 0) {
     return (
@@ -91,6 +96,11 @@ export function BitsSuggestionPanel({ bits, compositionClips, onCreateReel }: Bi
           {bitsWithCoverage.length}
         </span>
       </div>
+      {sourceLabel && (
+        <p className="-mt-2 mb-2 text-[10px] text-muted-foreground" title="Los reels creados desde esta lista usan estos mismos cortes y subtítulos">
+          Detectados sobre: {sourceLabel}
+        </p>
+      )}
 
       <div className="space-y-2 max-h-[calc(100vh-200px)] overflow-y-auto">
         {bitsWithCoverage.map((bit) => (

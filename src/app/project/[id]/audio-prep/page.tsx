@@ -12,6 +12,7 @@ import { VolumeCurvePanel } from '@/components/audio/volume-curve-panel';
 import { AudioCleanupPanel } from '@/components/audio/audio-cleanup-panel';
 import { AudioAmplifyPanel } from '@/components/audio/audio-amplify-panel';
 import { MixPreviewPanel } from '@/components/audio/mix-preview-panel';
+import { BoardDuckingPanel } from '@/components/audio/board-ducking-panel';
 import { AudioFilesPanel } from '@/components/audio/audio-files-panel';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -342,7 +343,52 @@ export default function AudioPrepPage() {
             />
           )}
 
-          {/* Step 2.5: Amplify board audio (after subtraction, before mix) */}
+          {/* Step 2: Board ducking — attenuate the mesa's "je-je"/"eehh" filler
+              sounds BEFORE amplifying, so the amplifier's compressor/loudnorm
+              don't boost them back up. The amplify step below bakes these in. */}
+          {boardSource && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium">
+                  Atenuar risas de micro / rellenos de la mesa
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <BoardDuckingPanel
+                  projectId={projectId}
+                  boardUrl={`/api/projects/${projectId}/audio/file?name=${encodeURIComponent(boardSource.storedName)}`}
+                  fillersUrl={`/api/projects/${projectId}/audio/file?name=board_fillers.json`}
+                  envelopeUrl={`/api/projects/${projectId}/audio/envelope?name=${encodeURIComponent(boardSource.storedName)}`}
+                  detectUrl={`/api/projects/${projectId}/audio/detect-fillers`}
+                  initialRegions={currentProject.audio.boardDuckRegions ?? []}
+                  boardTrimMs={Math.max(0, currentProject.audio.alignmentOffsetMs ?? 0)}
+                  applyLabel="Guardar zonas"
+                  applyHint="Se aplican al amplificar (abajo). Vuelve a amplificar si las cambias."
+                  onSave={async (regions) => {
+                    try {
+                      const res = await fetch(`/api/projects/${projectId}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          audio: { ...currentProject.audio, boardDuckRegions: regions },
+                        }),
+                      });
+                      if (!res.ok) throw new Error(`Error ${res.status}`);
+                      fetchProject(projectId);
+                      toast({ title: 'Zonas guardadas', description: 'Vuelve a amplificar para aplicarlas.' });
+                      return true;
+                    } catch (err) {
+                      toast({ title: 'No se pudo guardar', description: err instanceof Error ? err.message : undefined, variant: 'destructive' });
+                      return false;
+                    }
+                  }}
+                />
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Step 2.5: Amplify board audio — applies AFTER ducking (bakes the
+              duck regions in first), before the mix. */}
           {boardSource && (
             <AudioAmplifyPanel
               projectId={projectId}

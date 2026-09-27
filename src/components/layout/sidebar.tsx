@@ -21,6 +21,9 @@ interface SidebarProps {
   projectId: string;
 }
 
+// /parts and /sync render the SAME parts-based flow (PartsFlow) — one menu
+// entry is enough. /sync-legacy (old single-pair mixer) is reachable only from
+// the Sync & Mix page header, on purpose.
 const navItems = [
   { href: '', label: 'Overview', icon: LayoutDashboard },
   { href: '/import', label: 'Importar', icon: FolderInput },

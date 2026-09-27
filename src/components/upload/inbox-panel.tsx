@@ -15,7 +15,21 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { formatFileSize } from '@/lib/utils';
+import { Input } from '@/components/ui/input';
 import { useToast } from '@/hooks/use-toast';
+
+/** Parse "mm:ss", "h:mm:ss" or plain seconds into ms. null for empty/invalid. */
+function parseTimeToMs(str: string): number | null | 'invalid' {
+  const t = str.trim();
+  if (!t) return null;
+  const parts = t.split(':').map((p) => p.trim());
+  if (parts.some((p) => p === '' || isNaN(Number(p)))) return 'invalid';
+  const nums = parts.map(Number);
+  if (nums.some((n) => n < 0)) return 'invalid';
+  let sec = 0;
+  for (const n of nums) sec = sec * 60 + n;
+  return Math.round(sec * 1000);
+}
 
 interface InboxFile {
   name: string;
@@ -38,6 +52,9 @@ export function InboxPanel({ projectId, onImported }: InboxPanelProps) {
   const [importing, setImporting] = useState<string | null>(null);
   const [selectedRole, setSelectedRole] = useState<'camera' | 'board' | 'other'>('other');
   const [importMode, setImportMode] = useState<ImportMode>('move');
+  // Optional lossless trim range applied to the next import (mm:ss).
+  const [trimStart, setTrimStart] = useState('');
+  const [trimEnd, setTrimEnd] = useState('');
   const { toast } = useToast();
 
   const fetchFiles = useCallback(async () => {
@@ -62,6 +79,18 @@ export function InboxPanel({ projectId, onImported }: InboxPanelProps) {
 
   const handleImport = useCallback(
     async (filename: string) => {
+      // Optional lossless trim range
+      const startMs = parseTimeToMs(trimStart);
+      const endMs = parseTimeToMs(trimEnd);
+      if (startMs === 'invalid' || endMs === 'invalid') {
+        toast({ title: 'Tramo no válido', description: 'Usa mm:ss (p. ej. 12:30) o h:mm:ss.', variant: 'destructive' });
+        return;
+      }
+      if (startMs != null && endMs != null && endMs <= startMs) {
+        toast({ title: 'Tramo no válido', description: 'El fin debe ser mayor que el inicio.', variant: 'destructive' });
+        return;
+      }
+      const hasTrim = startMs != null || endMs != null;
       setImporting(filename);
       try {
         const res = await fetch(`/api/projects/${projectId}/import`, {
@@ -71,13 +100,18 @@ export function InboxPanel({ projectId, onImported }: InboxPanelProps) {
             filename,
             role: selectedRole,
             mode: importMode,
+            ...(startMs != null ? { trimStartMs: startMs } : {}),
+            ...(endMs != null ? { trimEndMs: endMs } : {}),
           }),
         });
         if (!res.ok) {
           const data = await res.json();
           throw new Error(data.error || 'Import failed');
         }
-        toast({ title: `Imported: ${filename}` });
+        toast({
+          title: `Imported: ${filename}`,
+          description: hasTrim ? 'Tramo cortado sin recomprimir (calidad idéntica). El original sigue en el inbox.' : undefined,
+        });
         onImported();
         // Refresh inbox list (file may have been moved)
         fetchFiles();
@@ -91,7 +125,7 @@ export function InboxPanel({ projectId, onImported }: InboxPanelProps) {
         setImporting(null);
       }
     },
-    [projectId, selectedRole, importMode, onImported, fetchFiles, toast]
+    [projectId, selectedRole, importMode, trimStart, trimEnd, onImported, fetchFiles, toast]
   );
 
   return (
@@ -168,6 +202,40 @@ export function InboxPanel({ projectId, onImported }: InboxPanelProps) {
             </button>
           ))}
         </div>
+
+        {/* Optional lossless trim range — cut just a piece of a huge recording
+            without re-encoding (identical quality, runs at disk speed). */}
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-muted-foreground">Tramo:</span>
+          <Input
+            value={trimStart}
+            onChange={(e) => setTrimStart(e.target.value)}
+            placeholder="inicio mm:ss"
+            className="h-7 w-24 text-xs"
+          />
+          <span className="text-muted-foreground">→</span>
+          <Input
+            value={trimEnd}
+            onChange={(e) => setTrimEnd(e.target.value)}
+            placeholder="fin mm:ss"
+            className="h-7 w-24 text-xs"
+          />
+          {(trimStart.trim() || trimEnd.trim()) && (
+            <button
+              className="text-[10px] text-muted-foreground hover:text-foreground"
+              onClick={() => { setTrimStart(''); setTrimEnd(''); }}
+            >
+              Quitar
+            </button>
+          )}
+        </div>
+        {(trimStart.trim() || trimEnd.trim()) && (
+          <p className="text-[10px] text-muted-foreground leading-tight">
+            Corte <strong>sin recomprimir</strong> (calidad idéntica, va a velocidad de disco). Empieza en el
+            keyframe anterior al inicio (~1s antes como mucho). El original se queda en el inbox.
+            Con ficheros grandes puede tardar un par de minutos — no cierres la página.
+          </p>
+        )}
 
         {/* File list */}
         {files.length === 0 ? (

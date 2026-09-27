@@ -20,8 +20,13 @@ export interface WhisperOptions {
 /** Resolve which audio file whisper will transcribe, in priority order.
  *  1. Audio selected in Sync (the one in the final video)
  *  2. Generated mix (mixed.wav)
- *  3. Extracted tracks
- *  4. Direct audio source
+ *  3. Muxed video's embedded audio — when a muxed video exists, ITS timeline
+ *     is the reference for all downstream steps (compose/subtitles/reels), so
+ *     it must win over per-source extracted tracks. This is also the path for
+ *     parts-concat and use-video-directly projects, which clear 1 and 2.
+ *  4. Extracted tracks
+ *  5. Direct audio source
+ *  6. A plain video source's embedded audio
  *
  *  selectedAudioPath can be a filename (from UI) or a full path (from mux API).
  */
@@ -48,26 +53,28 @@ export function resolveTranscriptionAudio(project: {
     const name = project.sync.mixedAudioPath.split('/').pop() || 'mixed.wav';
     return { path: project.sync.mixedAudioPath, label: `Audio mezclado: ${name}` };
   }
-  // Priority 3: extracted tracks
+  // Priority 3: muxed video — the audio is embedded; ffmpeg extracts it during
+  // convertForWhisper/convertForGroq. Must come BEFORE extracted tracks: when
+  // a muxed video exists its timeline is THE reference downstream, and after
+  // parts-concat the extracted tracks are per-part camera audios (transcribing
+  // extractedTracks[0] would cover only the first part).
+  if (project.sync.muxedVideoPath) {
+    const name = project.sync.muxedVideoPath.split('/').pop() || 'video';
+    return { path: project.sync.muxedVideoPath, label: `Audio del vídeo: ${name}` };
+  }
+  // Priority 4: extracted tracks
   if (project.audio.extractedTracks.length > 0) {
     const track = project.audio.extractedTracks[0];
     const name = track.path.split('/').pop() || 'audio';
     return { path: track.path, label: `Pista extraída: ${name}` };
   }
-  // Priority 4: direct audio source file
+  // Priority 5: direct audio source file
   const audioSource = project.sources.find((s) => s.type === 'audio');
   if (audioSource) {
     return {
       path: path.join(sourceDir, audioSource.storedName),
       label: `Fuente de audio: ${audioSource.storedName}`,
     };
-  }
-  // Priority 5: muxed video — the audio is embedded; ffmpeg extracts it during
-  // convertForWhisper/convertForGroq. Lets a project work straight from an
-  // already-mixed video without going through the audio-prep / sync / mux flow.
-  if (project.sync.muxedVideoPath) {
-    const name = project.sync.muxedVideoPath.split('/').pop() || 'video';
-    return { path: project.sync.muxedVideoPath, label: `Audio del vídeo: ${name}` };
   }
   // Priority 6: a plain video source's embedded audio (e.g. a video imported
   // with its audio already mixed in — transcribe it directly).

@@ -1,17 +1,20 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useParams } from 'next/navigation';
 import {
   Play, Pause, Scissors, ArrowLeft, ZoomIn, ZoomOut,
   Trash2, ChevronsLeftRight, XCircle, ArrowLeftToLine,
   Shrink, SkipBack, SkipForward, ChevronLeft, ChevronRight,
-  Gauge, RefreshCw, ListRestart, Undo2, Redo2, Plus, SplitSquareVertical,
+  Gauge, RefreshCw, ListRestart, ListPlus, Undo2, Redo2, Plus, SplitSquareVertical,
   Bookmark, History, RotateCcw, ChevronsLeft,
   Film, Music, ImageIcon, Type, Layers,
+  Copy, ClipboardPaste, ArrowRightToLine, BetweenHorizontalStart,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { useReelStore, getReelEffectiveDurationMs } from '@/stores/reel-store';
+import { useToast } from '@/hooks/use-toast';
 
 /* ── Editable timecode ──────────────────────────────────────────────── */
 
@@ -184,6 +187,9 @@ export function ReelTimelineControls({ reelId }: ReelTimelineControlsProps) {
   const selectedSubtitleIds = useReelStore((s) => s.selectedSubtitleIds);
   const splitClipAtPlayhead = useReelStore((s) => s.splitClipAtPlayhead);
   const splitAllAtPlayhead = useReelStore((s) => s.splitAllAtPlayhead);
+  const copySelection = useReelStore((s) => s.copySelection);
+  const pasteSelection = useReelStore((s) => s.pasteSelection);
+  const rippleInsertAtPlayhead = useReelStore((s) => s.rippleInsertAtPlayhead);
   const splitSubtitleAtPlayhead = useReelStore((s) => s.splitSubtitleAtPlayhead);
   const addSubtitleSegment = useReelStore((s) => s.addSubtitleSegment);
   const deleteSelected = useReelStore((s) => s.deleteSelected);
@@ -201,6 +207,32 @@ export function ReelTimelineControls({ reelId }: ReelTimelineControlsProps) {
   const restoreVersion = useReelStore((s) => s.restoreVersion);
   const deleteVersion = useReelStore((s) => s.deleteVersion);
   const versions = reel?.versions ?? [];
+  // "Fill subtitle gap": fetch the pristine transcription from disk and rebuild
+  // the deleted stretch under the playhead, remapped through the rv1 clips.
+  const params = useParams();
+  const projectId = params?.id as string | undefined;
+  const { toast } = useToast();
+  const [fillingGap, setFillingGap] = useState(false);
+  const fillGapFromOriginalTranscription = useCallback(async () => {
+    if (!projectId) return;
+    setFillingGap(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/transcription/original`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data as { error?: string }).error || `Error ${res.status}`);
+      const result = useReelStore.getState().fillSubtitleGapAtPlayhead(reelId, data.segments);
+      if (result.ok) {
+        toast({ title: `${result.added} subtítulo(s) regenerados`, description: 'Recuperados de la transcripción original y ajustados al timeline.' });
+      } else {
+        toast({ title: 'No se pudo rellenar el hueco', description: result.reason, variant: 'destructive' });
+      }
+    } catch (err) {
+      toast({ title: 'No se pudo rellenar el hueco', description: err instanceof Error ? err.message : undefined, variant: 'destructive' });
+    } finally {
+      setFillingGap(false);
+    }
+  }, [projectId, reelId, toast]);
+
   const [versionMenuOpen, setVersionMenuOpen] = useState(false);
   const versionBtnRef = useRef<HTMLButtonElement>(null);
 
@@ -431,6 +463,46 @@ export function ReelTimelineControls({ reelId }: ReelTimelineControlsProps) {
 
       <div className="mx-0.5 h-4 w-px bg-border" />
 
+      {/* Copy selection (clips or subtitles) — clipboard persists across reels */}
+      <Button
+        variant="ghost" size="sm" className="h-7 w-7 p-0"
+        onClick={() => copySelection(reelId)}
+        disabled={!hasSelection}
+        title="Copiar selección (Ctrl+C) — se puede pegar en otro reel"
+      >
+        <Copy className="h-3.5 w-3.5" />
+      </Button>
+
+      {/* Paste at playhead */}
+      <Button
+        variant="ghost" size="sm" className="h-7 w-7 p-0"
+        onClick={() => pasteSelection(reelId, false)}
+        title="Pegar en el playhead (Ctrl+V)"
+      >
+        <ClipboardPaste className="h-3.5 w-3.5" />
+      </Button>
+
+      {/* Paste appended after the reel's content ("detrás") */}
+      <Button
+        variant="ghost" size="sm" className="h-7 w-7 p-0"
+        onClick={() => pasteSelection(reelId, true)}
+        title="Pegar detrás — al final del contenido del reel (Shift+Ctrl+V / ⇧+⌘+V)"
+      >
+        <ArrowRightToLine className="h-3.5 w-3.5" />
+      </Button>
+
+      {/* INSERT paste (ripple): shift everything after the playhead right and
+          bring the copied span's subtitles along */}
+      <Button
+        variant="ghost" size="sm" className="h-7 w-7 p-0 text-cyan-400 hover:text-cyan-300"
+        onClick={() => rippleInsertAtPlayhead(reelId)}
+        title="INSERTAR aquí y desplazar todo lo posterior a la derecha (todas las pistas + subtítulos) — Ctrl+Alt+V / ⌘+⌥+V en Mac"
+      >
+        <BetweenHorizontalStart className="h-3.5 w-3.5" />
+      </Button>
+
+      <div className="mx-0.5 h-4 w-px bg-border" />
+
       {/* Delete selected */}
       <Button
         variant="ghost" size="sm" className="h-7 w-7 p-0 text-red-400 hover:text-red-300"
@@ -528,6 +600,15 @@ export function ReelTimelineControls({ reelId }: ReelTimelineControlsProps) {
         title="Reset timeline (clear clips + regen subtitles)"
       >
         <ListRestart className="h-3.5 w-3.5" />
+      </Button>
+
+      {/* Fill subtitle gap from the original transcription */}
+      <Button
+        variant="ghost" size="sm" className="h-7 w-7 p-0 text-yellow-400 hover:text-yellow-300"
+        onClick={fillGapFromOriginalTranscription} disabled={fillingGap}
+        title="Rellenar hueco: regenera los subtítulos borrados bajo el playhead desde la transcripción original, ajustados al timeline"
+      >
+        <ListPlus className="h-3.5 w-3.5" />
       </Button>
 
       <div className="mx-0.5 h-4 w-px bg-border" />

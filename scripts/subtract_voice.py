@@ -77,7 +77,8 @@ def write_wav(path: str, samples: np.ndarray, sample_rate: int):
         wf.writeframes(int_samples.tobytes())
 
 
-def align_signals(mic: np.ndarray, camera: np.ndarray, sample_rate: int) -> tuple:
+def align_signals(mic: np.ndarray, camera: np.ndarray, sample_rate: int,
+                  search_start_sec=None, search_end_sec=None) -> tuple:
     """
     Two-stage alignment (like Adobe Premiere):
 
@@ -136,21 +137,47 @@ def align_signals(mic: np.ndarray, camera: np.ndarray, sample_rate: int) -> tupl
     # Plausibility filter: a real offset must keep at least 30% of the shorter
     # signal overlapping with the longer one. Without this, a noise peak can
     # land at an absurd offset where the signals barely intersect.
+    #
+    # Index -> lag mapping: the LINEAR correlation lags live in two bands of
+    # the circular FFT result — idx in [0, len(cam_env)-1] are non-negative
+    # env-lags (camera leads), idx in [fft-(len(mic_env)-1), fft-1] wrap to
+    # negative env-lags (mesa leads, i.e. POSITIVE offsets). Everything in
+    # between is zero-padding garbage. The old fft//2 split misread any
+    # mesa-leads offset beyond (fft/2 - len(cam_env)) frames as its mirror,
+    # so long offsets (e.g. a short piece near the END of a 90-min mesa)
+    # became "implausible" and the true peak was erased.
     indices = np.arange(fft_size)
-    offset_envs = np.where(indices > fft_size // 2, indices - fft_size, indices)
+    offset_envs = np.where(indices <= len(cam_env) - 1, indices, indices - fft_size)
+    valid_lag = (indices <= len(cam_env) - 1) | (indices >= fft_size - (len(mic_env) - 1))
     candidate_offsets = -offset_envs * hop_len  # samples
     pos_overlap = np.minimum(len(mic) - candidate_offsets, len(camera))
     neg_overlap = np.minimum(len(mic), len(camera) + candidate_offsets)
     overlaps = np.where(candidate_offsets > 0, pos_overlap, neg_overlap)
     min_overlap = int(0.3 * min(len(mic), len(camera)))
-    plausible = overlaps >= min_overlap
+    plausible = (overlaps >= min_overlap) & valid_lag
+
+    # Optional user-provided search window (seconds, mesa-before-camera
+    # positive). Restricts the coarse peak search — essential when a SHORT
+    # camera piece produces a weak/ambiguous global peak (e.g. it locks onto
+    # a similar-sounding moment from another part of the night).
+    if search_start_sec is not None or search_end_sec is not None:
+        cand_sec = candidate_offsets / sample_rate
+        lo = -np.inf if search_start_sec is None else float(search_start_sec)
+        hi = np.inf if search_end_sec is None else float(search_end_sec)
+        window_ok = (cand_sec >= lo) & (cand_sec <= hi)
+        if np.any(plausible & window_ok):
+            plausible = plausible & window_ok
+            log_progress(10, f"Busqueda de offset acotada a [{lo:.1f}, {hi:.1f}] s")
+        else:
+            log_progress(10, "AVISO: la ventana de busqueda no deja candidatos plausibles - se ignora")
 
     masked_corr = np.where(plausible, abs_corr, 0)
     peak_idx = int(np.argmax(masked_corr))
-    if peak_idx > fft_size // 2:
-        offset_env = peak_idx - fft_size
-    else:
+    # Same corrected index -> lag mapping as candidate_offsets above.
+    if peak_idx <= len(cam_env) - 1:
         offset_env = peak_idx
+    else:
+        offset_env = peak_idx - fft_size
 
     coarse_offset = -offset_env * hop_len
     coarse_ms = round(coarse_offset / sample_rate * 1000, 1)
@@ -450,6 +477,10 @@ def main():
                         help="Step size for NLMS method (default: 0.5)")
     parser.add_argument("--alignment-out", type=str, default=None,
                         help="Path to save alignment visualization data (JSON)")
+    parser.add_argument("--search-start-sec", type=float, default=None,
+                        help="Limitar la busqueda del offset: minimo (s, mesa-antes positivo)")
+    parser.add_argument("--search-end-sec", type=float, default=None,
+                        help="Limitar la busqueda del offset: maximo (s)")
     parser.add_argument("--align-only", action="store_true",
                         help="Only align signals, skip voice subtraction. Output is aligned camera audio.")
     args = parser.parse_args()
@@ -472,7 +503,9 @@ def main():
     # Step 1: Align signals via energy-envelope cross-correlation
     # Works for arbitrary offsets (even 15+ minutes apart)
     log_progress(7, "Alineando señales por correlación cruzada de envolventes...")
-    mic, camera, offset_samples, offset_ms, alignment_data = align_signals(mic, camera, mic_sr)
+    mic, camera, offset_samples, offset_ms, alignment_data = align_signals(
+        mic, camera, mic_sr,
+        search_start_sec=args.search_start_sec, search_end_sec=args.search_end_sec)
 
     # Save alignment visualization data if requested
     if args.alignment_out:

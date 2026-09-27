@@ -36,8 +36,16 @@ function parseUpload(
       limits: { fileSize: 10 * 1024 * 1024 * 1024 },
     });
 
-    let result: UploadResult | null = null;
     let fileProcessed = false;
+    // Busboy's 'finish' event (= done parsing multipart) can fire BEFORE the
+    // writeStream finishes flushing to disk — small files (a compose image is
+    // often just a few KB) are the most likely to race, since busboy reaches
+    // 'finish' almost instantly while the disk write is still pending. Must
+    // await this explicitly instead of checking a synchronously-set variable
+    // in the 'finish' handler, or the upload intermittently fails with
+    // "No file received" even though the file writes successfully moments
+    // later. See the same fix + comment in `../../upload/route.ts`.
+    let fileWritePromise: Promise<UploadResult> | null = null;
 
     busboy.on('file', (_fieldname, stream, info) => {
       if (fileProcessed) {
@@ -56,16 +64,25 @@ function parseUpload(
       stream.on('data', (chunk: Buffer) => { size += chunk.length; });
       stream.pipe(writeStream);
 
-      writeStream.on('finish', () => {
-        result = { filePath, storedName, fileId, originalName: info.filename, size };
+      fileWritePromise = new Promise<UploadResult>((res, rej) => {
+        writeStream.on('finish', () => {
+          res({ filePath, storedName, fileId, originalName: info.filename, size });
+        });
+        writeStream.on('error', rej);
       });
-      writeStream.on('error', reject);
       stream.on('error', reject);
     });
 
-    busboy.on('finish', () => {
-      if (result) resolve(result);
-      else reject(new Error('No file received'));
+    busboy.on('finish', async () => {
+      if (fileWritePromise) {
+        try {
+          resolve(await fileWritePromise);
+        } catch (err) {
+          reject(err);
+        }
+      } else {
+        reject(new Error('No file received'));
+      }
     });
     busboy.on('error', reject);
 

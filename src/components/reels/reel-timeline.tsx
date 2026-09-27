@@ -1,7 +1,11 @@
 'use client';
 
-import { useRef, useCallback, useEffect } from 'react';
-import { useReelStore } from '@/stores/reel-store';
+import { useRef, useCallback, useEffect, useMemo } from 'react';
+import { useParams } from 'next/navigation';
+import { useReelStore, getReelEffectiveDurationMs } from '@/stores/reel-store';
+import { useProjectStore } from '@/stores/project-store';
+import { AudioRegionsLane } from '@/components/parts/audio-regions-lane';
+import { AudioRegionsProvider, RegionsApplyBar } from '@/components/parts/audio-regions-context';
 import { ReelTimelineControls } from './reel-timeline-controls';
 import { ReelTimelineTrack } from './reel-timeline-track';
 import { formatDuration } from '@/lib/utils';
@@ -22,8 +26,19 @@ export function ReelTimeline({ reelId }: ReelTimelineProps) {
   const setScrollOffset = useReelStore((s) => s.setScrollOffset);
   const setViewportWidth = useReelStore((s) => s.setViewportWidth);
   const setCurrentTime = useReelStore((s) => s.setCurrentTime);
+  const params = useParams();
+  const projectId = params?.id as string | undefined;
+  const hasParts = useProjectStore((s) => (s.currentProject?.parts?.length ?? 0) > 0);
+  const rv1Clips = useMemo(
+    () => (reel?.composition.clips ?? []).filter((c) => c.trackId === 'rv1'),
+    [reel?.composition.clips],
+  );
 
-  const reelDurationMs = reel ? reel.endMs - reel.startMs : 0;
+  // Effective duration includes content pasted BEYOND the reel's original
+  // source window (paste-behind from another reel) — otherwise the ruler
+  // clamps seeks to the original end and you can't place the playhead over
+  // the pasted zone.
+  const reelDurationMs = getReelEffectiveDurationMs(reel);
 
   // Show all tracks (including newly added empty ones)
   const visibleTracks = reel?.composition.tracks ?? [];
@@ -52,6 +67,12 @@ export function ReelTimeline({ reelId }: ReelTimelineProps) {
         const newZoom = Math.max(0.01, Math.min(1, zoomLevel * delta));
         setZoom(newZoom);
       } else {
+        // Plain vertical wheel pans horizontally — unless the tracks overflow
+        // the pane: then it scrolls them like any list (Shift+wheel and
+        // sideways trackpad still pan).
+        const sideways = e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY);
+        const el = containerRef.current;
+        if (!sideways && el && el.scrollHeight > el.clientHeight + 1) return;
         const deltaMs = (e.deltaX || e.deltaY) / zoomLevel;
         const newOffset = Math.max(0, Math.min(reelDurationMs, scrollOffsetMs + deltaMs));
         setScrollOffset(newOffset);
@@ -115,18 +136,23 @@ export function ReelTimeline({ reelId }: ReelTimelineProps) {
   // Playhead position
   const playheadPx = (currentTimeMs - scrollOffsetMs) * zoomLevel;
 
-  return (
-    <div className="flex flex-col border-t border-border bg-background">
-      <ReelTimelineControls reelId={reelId} />
+  const stemTracksPresent = !!reel?.composition.tracks.some((t) => t.id === 'ra_mesa' || t.id === 'ra_amb');
+  const body = (
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="flex-shrink-0">
+        <ReelTimelineControls reelId={reelId} />
+      </div>
 
+      {/* Fills the bottom half of the screen; scrolls vertically only when
+          there are more tracks than fit, with the ruler pinned on top. */}
       <div
         ref={containerRef}
-        className="relative overflow-hidden select-none"
+        className="relative flex-1 min-h-0 overflow-y-auto overflow-x-hidden select-none"
         onWheel={handleWheel}
       >
         {/* Ruler */}
         <div
-          className="relative h-6 cursor-pointer select-none border-b border-border bg-card"
+          className="sticky top-0 z-40 h-6 cursor-pointer select-none border-b border-border bg-card"
           style={{ marginLeft: TRACK_HEADER_WIDTH, width: `calc(100% - ${TRACK_HEADER_WIDTH}px)` }}
           onClick={handleRulerClick}
         >
@@ -156,6 +182,9 @@ export function ReelTimeline({ reelId }: ReelTimelineProps) {
             <ReelTimelineTrack key={track.id} reelId={reelId} track={track} />
           ))}
 
+          {/* Fallback lane for mesa/ambiente regions while the stems are not separated */}
+          <AudioRegionsLane />
+
           {/* Playhead line spanning all tracks */}
           <div
             className="pointer-events-none absolute inset-0"
@@ -177,7 +206,23 @@ export function ReelTimeline({ reelId }: ReelTimelineProps) {
             </div>
           </div>
         </div>
+        <RegionsApplyBar />
       </div>
     </div>
+  );
+  if (!hasParts || !projectId || rv1Clips.length === 0) return body;
+  return (
+    <AudioRegionsProvider
+      projectId={projectId}
+      videoClips={rv1Clips}
+      scrollOffsetMs={scrollOffsetMs}
+      zoomLevel={zoomLevel}
+      playheadMs={currentTimeMs}
+      viewportWidthPx={viewportWidthPx}
+      onSeek={setCurrentTime}
+      stemTracksPresent={stemTracksPresent}
+    >
+      {body}
+    </AudioRegionsProvider>
   );
 }

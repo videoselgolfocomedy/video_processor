@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { SubtitleSegment, SubtitleWord } from '@/types/project';
+import type { SubtitleConstraints, SubtitleSegment, SubtitleWord } from '@/types/project';
 
 /** A style change to apply to a whole subtitle segment. `null` clears a field. */
 export interface SegmentStyleUpdate {
@@ -475,4 +475,265 @@ function splitByText(
   }
 
   return results;
+}
+
+/**
+ * Rebuild subtitles for a TIMELINE gap from the ORIGINAL transcription.
+ *
+ * `original` segments are in SOURCE (muxed-file) time — the raw Whisper/Groq
+ * output. `videoClips` are the editor's main video clips (compose v1 or reel
+ * rv1), whose sourceInMs also references the muxed file, so each clip gives a
+ * linear source→timeline mapping: timeline = clip.timelineStartMs + (source -
+ * clip.sourceInMs). For every clip stretch overlapping [gapStartMs, gapEndMs]
+ * we pull the original segments in the matching SOURCE window, shift them onto
+ * the timeline (words included), clamp to the gap, and re-split to the
+ * constraints. Deleted subtitles are thus recoverable even after cuts moved
+ * the timeline around — used by the "fill subtitle gap" toolbar action in BOTH
+ * composition editors.
+ */
+export function fillGapFromOriginal(
+  original: SubtitleSegment[],
+  videoClips: Array<{ timelineStartMs: number; timelineEndMs: number; sourceInMs: number }>,
+  gapStartMs: number,
+  gapEndMs: number,
+  constraints: SubtitleConstraints,
+): SubtitleSegment[] {
+  if (gapEndMs - gapStartMs < 100 || original.length === 0) return [];
+
+  const clips = [...videoClips].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+  // No clips (e.g. subtitles-only project): identity mapping over the gap.
+  const effective = clips.length > 0
+    ? clips
+    : [{ timelineStartMs: gapStartMs, timelineEndMs: gapEndMs, sourceInMs: gapStartMs }];
+
+  const out: SubtitleSegment[] = [];
+  for (const clip of effective) {
+    const oS = Math.max(clip.timelineStartMs, gapStartMs);
+    const oE = Math.min(clip.timelineEndMs, gapEndMs);
+    if (oE - oS < 100) continue;
+    const off = clip.timelineStartMs - clip.sourceInMs; // source → timeline shift
+    const sS = oS - off;
+    const sE = oE - off;
+    for (const seg of original) {
+      if (seg.endMs <= sS || seg.startMs >= sE) continue;
+      const shifted: SubtitleSegment = {
+        ...seg,
+        id: uuidv4(),
+        startMs: seg.startMs + off,
+        endMs: seg.endMs + off,
+        words: seg.words?.map((w) => ({ ...w, startMs: w.startMs + off, endMs: w.endMs + off })),
+      };
+      const clamped = clampSegmentToBounds(shifted, oS, oE);
+      if (clamped.endMs - clamped.startMs > 100 && clamped.text.trim()) out.push(clamped);
+    }
+  }
+
+  out.sort((a, b) => a.startMs - b.startMs);
+  const split = splitSegmentsWithConstraints(out, constraints);
+  split.sort((a, b) => a.startMs - b.startMs);
+  return split;
+}
+
+/* ── Phrase-aligned chopping for reels ──────────────────────────────────── */
+
+export const REEL_DEFAULT_MAX_WORDS = 3;
+
+/** Extra words that glue to what FOLLOWS (beyond SPANISH_GLUE_WORDS): degree
+ *  adverbs, subordinators and the clitic pronouns that sit before a verb. A
+ *  token that carries closing punctuation ("más,") is never glue — the
+ *  punctuation says the phrase ends there. */
+const EXTRA_GLUE_WORDS = new Set<string>([
+  'muy', 'más', 'menos', 'tan', 'casi', 'como', 'cuando', 'donde', 'porque', 'pero', 'aunque', 'si', 'sino',
+  'se', 'me', 'te', 'le', 'nos', 'os', 'les',
+]);
+
+interface Tok { text: string; startMs: number; endMs: number; word?: SubtitleWord }
+
+const CLOSING_PUNCT = /[.?!…]["»)\]]*$/;
+const WEAK_PUNCT = /[,;:]["»)\]]*$/;
+const OPENING_PUNCT = /^[¿¡"«(\[—-]/;
+
+function tokenIsGlue(t: Tok): boolean {
+  if (CLOSING_PUNCT.test(t.text) || WEAK_PUNCT.test(t.text)) return false;
+  const w = normaliseWord(t.text);
+  return SPANISH_GLUE_WORDS.has(w) || EXTRA_GLUE_WORDS.has(w);
+}
+
+const isCapitalized = (t: Tok) => /^[¿¡"«(]*[A-ZÁÉÍÓÚÑ]/.test(t.text);
+
+/** No break between `a` and the token after it: a glue word, or two
+ *  capitalised words in a row (a name — "Diego Dueño", "El Golfo"). */
+function gluedTo(a: Tok, next: Tok | undefined): boolean {
+  if (!next) return false;
+  if (tokenIsGlue(a)) return true;
+  return isCapitalized(a) && isCapitalized(next) && !CLOSING_PUNCT.test(a.text) && !WEAK_PUNCT.test(a.text);
+}
+
+type Boundary = 'strong' | 'weak' | 'none';
+
+/** What separates token i from token i+1: end of sentence / long pause,
+ *  comma-level break / short pause, or nothing. */
+function boundaryAfter(toks: Tok[], i: number): Boundary {
+  const t = toks[i], nx = toks[i + 1];
+  if (!nx) return 'strong';
+  const gap = nx.startMs - t.endMs;
+  if (CLOSING_PUNCT.test(t.text) || gap >= 700) return 'strong';
+  if (WEAK_PUNCT.test(t.text) || gap >= 300 || OPENING_PUNCT.test(nx.text)) return 'weak';
+  return 'none';
+}
+
+/** Word tokens of a segment: its timed words when they are consistent with
+ *  the segment, else the text split on spaces with times spread by character
+ *  count. Pure-punctuation tokens are merged into their neighbour. */
+function tokensOf(seg: SubtitleSegment): { toks: Tok[]; timed: boolean } {
+  const raw: Tok[] = [];
+  const words = seg.words ?? [];
+  const consistent = words.length > 0 && words.every((w) => w.startMs >= seg.startMs - 1 && w.endMs <= seg.endMs + 1 && w.endMs >= w.startMs);
+  if (consistent) {
+    for (const w of words) { const text = w.text.trim(); if (text) raw.push({ text, startMs: w.startMs, endMs: w.endMs, word: w }); }
+  } else {
+    const parts = seg.text.split(/\s+/).filter(Boolean);
+    const total = parts.reduce((a, t) => a + t.length + 1, 0) || 1;
+    const dur = Math.max(1, seg.endMs - seg.startMs);
+    let acc = 0;
+    for (const text of parts) {
+      const a = seg.startMs + (acc / total) * dur;
+      acc += text.length + 1;
+      const b = seg.startMs + (acc / total) * dur;
+      raw.push({ text, startMs: Math.round(a), endMs: Math.round(b) });
+    }
+  }
+  // Merge tokens without letters/digits ("-", "…") into the previous one.
+  const toks: Tok[] = [];
+  for (const t of raw) {
+    if (!/[A-Za-z0-9\u00C0-\u024F]/.test(t.text) && toks.length > 0) {
+      const prev = toks[toks.length - 1];
+      prev.text = `${prev.text}${t.text}`;
+      prev.endMs = Math.max(prev.endMs, t.endMs);
+      if (prev.word) prev.word = { ...prev.word, text: prev.text, endMs: prev.endMs };
+    } else {
+      toks.push({ ...t });
+    }
+  }
+  return { toks, timed: consistent };
+}
+
+const joinToks = (toks: Tok[], a: number, b: number) => toks.slice(a, b).map((t) => t.text).join(' ');
+
+/**
+ * Best chunking of one sentence into blocks of 1..maxWords words: dynamic
+ * programming over the break positions. Costs: breaking right after a glue
+ * word +40 (only when nothing else fits), breaking at a comma / pause −6,
+ * fuller blocks preferred (+2 per missing word), a lone word mid-sentence
+ * that is not at a pause +6. Hard limits: a block of ≥2 words never exceeds
+ * maxChars (one line) nor maxDurationMs.
+ */
+function chunkSentence(toks: Tok[], maxWords: number, maxChars: number, maxDurationMs: number): Array<[number, number]> {
+  const n = toks.length;
+  if (n === 0) return [];
+  const INF = 1e9;
+  const best = new Array<number>(n + 1).fill(INF);
+  const prev = new Array<number>(n + 1).fill(-1);
+  best[0] = 0;
+  // One word over the limit is allowed at a price (+14): cheaper than
+  // breaking a verbal unit like "Te lo ha dicho" (+40), dearer than an
+  // orphan word — it only happens when the alternative reads worse.
+  const kMax = maxWords >= 2 ? maxWords + 1 : 1;
+  for (let e = 1; e <= n; e++) {
+    for (let k = 1; k <= kMax && e - k >= 0; k++) {
+      const st = e - k;
+      if (best[st] >= INF) continue;
+      if (k > 1) {
+        if (joinToks(toks, st, e).length > maxChars) continue;
+        if (toks[e - 1].endMs - toks[st].startMs > maxDurationMs) continue;
+      }
+      let cost = best[st] + Math.max(0, maxWords - k) * 2 + (k > maxWords ? 14 : 0);
+      if (e < n) {
+        const b = boundaryAfter(toks, e - 1);
+        if (b === 'weak') cost -= 6;
+        else if (gluedTo(toks[e - 1], toks[e])) cost += 40;
+        if (k === 1 && b === 'none') cost += 6;
+      }
+      if (cost < best[e]) { best[e] = cost; prev[e] = st; }
+    }
+  }
+  const out: Array<[number, number]> = [];
+  let e = n;
+  while (e > 0) { const st = prev[e]; if (st < 0) break; out.unshift([st, e]); e = st; }
+  return out;
+}
+
+/** The punchline unit of a sentence: its last word plus the glue words stuck
+ *  to it ("de mierda", "en la cara"), never longer than maxWords. */
+function punchUnitStart(toks: Tok[], maxWords: number): number {
+  let u = toks.length - 1;
+  while (u > 0 && gluedTo(toks[u - 1], toks[u]) && toks.length - (u - 1) <= maxWords) u--;
+  return u;
+}
+
+function chopOne(seg: SubtitleSegment, maxWords: number, maxChars: number, maxDurationMs: number, punch: boolean): SubtitleSegment[] {
+  const { toks, timed } = tokensOf(seg);
+  if (toks.length === 0) return [seg];
+  // Sentences first (end punctuation / long pause), then blocks inside each.
+  const ranges: Array<[number, number]> = [];
+  let s0 = 0;
+  for (let i = 0; i < toks.length; i++) {
+    if (i === toks.length - 1 || boundaryAfter(toks, i) === 'strong') {
+      const sent = toks.slice(s0, i + 1);
+      let head = sent, tail: Tok[] = [];
+      if (punch && sent.length >= 4) {
+        const u = punchUnitStart(sent, maxWords);
+        if (u >= 2 && sent.length - u <= maxWords) { head = sent.slice(0, u); tail = sent.slice(u); }
+      }
+      for (const [a, b] of chunkSentence(head, maxWords, maxChars, maxDurationMs)) ranges.push([s0 + a, s0 + b]);
+      if (tail.length > 0) ranges.push([s0 + head.length, s0 + sent.length]);
+      s0 = i + 1;
+    }
+  }
+  const out: SubtitleSegment[] = ranges.map(([a, b]) => {
+    const chunk = toks.slice(a, b);
+    const words = timed ? chunk.map((t) => t.word!).filter(Boolean) : undefined;
+    return {
+      id: uuidv4(),
+      startMs: Math.max(seg.startMs, chunk[0].startMs),
+      endMs: Math.min(seg.endMs, chunk[chunk.length - 1].endMs),
+      text: chunk.map((t) => t.text).join(' '),
+      ...(words && words.length > 0 ? { words } : {}),
+    };
+  });
+  // Hold each block on screen until the next one starts (no flicker inside a
+  // phrase); a real pause (≥ 500 ms) or the duration cap ends it.
+  for (let i = 0; i + 1 < out.length; i++) {
+    const gap = out[i + 1].startMs - out[i].endMs;
+    if (gap > 0 && gap < 500) out[i].endMs = Math.min(out[i + 1].startMs, out[i].startMs + maxDurationMs);
+  }
+  return out;
+}
+
+const countWords = (text: string) => text.trim().split(/\s+/).filter(Boolean).length;
+
+/** Does a segment already respect the constraints (so a re-split leaves it alone)? */
+export function segmentViolates(seg: SubtitleSegment, c: SubtitleConstraints): boolean {
+  if (seg.text.length > c.maxCharsPerBlock || (seg.endMs - seg.startMs) > c.maxDurationMs) return true;
+  const mode = c.splitMode ?? 'clasico';
+  return mode !== 'clasico' && countWords(seg.text) > (c.maxWordsPerBlock ?? REEL_DEFAULT_MAX_WORDS);
+}
+
+/**
+ * Split segments the way the constraints say: 'clasico' = splitLongSegments
+ * (by characters, the long-form behaviour); 'picado' / 'remate' = phrase-
+ * aligned blocks of at most `maxWordsPerBlock` words (see chunkSentence),
+ * 'remate' also isolating the last unit of each sentence. Segments already
+ * within the limits are returned untouched, so user edits survive a re-split.
+ */
+export function splitSegmentsWithConstraints(segments: SubtitleSegment[], c: SubtitleConstraints): SubtitleSegment[] {
+  const mode = c.splitMode ?? 'clasico';
+  if (mode === 'clasico') return splitLongSegments(segments, c.maxCharsPerBlock, c.maxDurationMs);
+  const maxWords = Math.max(1, Math.min(8, c.maxWordsPerBlock ?? REEL_DEFAULT_MAX_WORDS));
+  const out: SubtitleSegment[] = [];
+  for (const seg of segments) {
+    if (!segmentViolates(seg, c)) { out.push(seg); continue; }
+    out.push(...chopOne(seg, maxWords, c.maxCharsPerBlock, c.maxDurationMs, mode === 'remate'));
+  }
+  return out;
 }

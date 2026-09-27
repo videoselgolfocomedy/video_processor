@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { useProjectStore } from '@/stores/project-store';
 import { ExportPanel } from '@/components/export/export-panel';
@@ -17,6 +17,14 @@ export default function ExportPage() {
   const projectId = params.id as string;
   const { currentProject, fetchProject } = useProjectStore();
   const { toast } = useToast();
+
+  // Refetch on mount: reels are saved via their own store/route (PUT /reels)
+  // and do NOT update project-store's currentProject, so relying on whatever a
+  // previous page fetched shows a STALE reel list here (deleted/recreated reel
+  // ids → "Reel not found" exports stuck at Iniciando…).
+  useEffect(() => {
+    fetchProject(projectId);
+  }, [projectId, fetchProject]);
 
   const handleExport = useCallback(
     async (preset: ExportPreset, includeSubtitles: boolean, trimInMs: number, trimOutMs: number) => {

@@ -1,10 +1,19 @@
 'use client';
 
-import { useRef, useCallback, useEffect, useState } from 'react';
+import { useRef, useCallback, useEffect, useMemo, useState } from 'react';
+import { ClipWaveform } from '@/components/parts/clip-waveform';
+import { useAudioRegions } from '@/components/parts/audio-regions-context';
+import { stemKindOfTrack, stemOriginalOf } from '@/lib/audio-stems';
+import { rowDeltaForDy } from '@/lib/track-heights';
+import { clipFitsTrack } from '@/lib/track-compat';
+import { ClipGainBands } from '@/components/shared/clip-gain-bands';
 import { Film, ImageIcon, Music, Type } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useComposeStore } from '@/stores/compose-store';
+import { useProjectStore } from '@/stores/project-store';
 import type { CompositionClip } from '@/types/project';
+
+
 
 interface TimelineClipProps {
   clip: CompositionClip;
@@ -19,11 +28,21 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
   const [editingText, setEditingText] = useState(false);
   const [textValue, setTextValue] = useState(clip.textContent ?? '');
   const textInputRef = useRef<HTMLInputElement>(null);
-  const dragOrigin = useRef<{ mouseX: number; startMs: number; endMs: number; sourceInMs: number; sourceOutMs: number; _prevDelta?: number }>({
-    mouseX: 0, startMs: 0, endMs: 0, sourceInMs: 0, sourceOutMs: 0,
+  const dragOrigin = useRef<{ mouseX: number; mouseY: number; startMs: number; endMs: number; sourceInMs: number; sourceOutMs: number; _prevDelta?: number }>({
+    mouseX: 0, mouseY: 0, startMs: 0, endMs: 0, sourceInMs: 0, sourceOutMs: 0,
   });
+  // Pending cross-track drop target, resolved live during the drag and
+  // committed on mouse-up (the clip stays on its own track lane until then).
+  const dragTrackTargetRef = useRef<string | null>(null);
 
   const zoomLevel = useComposeStore((s) => s.zoomLevel);
+  const stemKind = stemKindOfTrack(clip.trackId);
+  // Original signal behind the processed stem (Sync & Mix's gray reference).
+  const project = useProjectStore((s) => s.currentProject);
+  const viewportWidthPx = useComposeStore((s) => s.viewportWidthPx);
+  const behind = useMemo(() => (stemKind && project ? stemOriginalOf(project, clip.fileName) : null), [stemKind, project, clip.fileName]);
+  const regions = useAudioRegions();
+  const plan = stemKind === 'ambient' && regions ? regions.ambientPlanForFile(clip.fileName) : null;
   const scrollOffsetMs = useComposeStore((s) => s.scrollOffsetMs);
   const selectedClipIds = useComposeStore((s) => s.selectedClipIds);
   const selectClip = useComposeStore((s) => s.selectClip);
@@ -53,11 +72,13 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
 
       dragOrigin.current = {
         mouseX: e.clientX,
+        mouseY: e.clientY,
         startMs: clip.timelineStartMs,
         endMs: clip.timelineEndMs,
         sourceInMs: clip.sourceInMs,
         sourceOutMs: clip.sourceOutMs,
       };
+      dragTrackTargetRef.current = null;
       setDragMode(mode);
     },
     [clip, selectClip, isSelected, isMultiSelected]
@@ -104,6 +125,24 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
             : snappedEnd !== rawStart + duration ? snappedEnd - duration
               : rawStart;
           moveClip(clip.id, finalStart);
+
+          // Cross-track vertical drag: resolve which compatible track the
+          // cursor is over. The clip stays on its own lane during the drag
+          // (each lane clips its overflow); we only highlight the prospective
+          // target here and commit the track change on mouse-up.
+          const tracks = store.tracks;
+          const startIdx = tracks.findIndex((t) => t.id === clip.trackId);
+          const rowDelta = rowDeltaForDy(tracks, startIdx, e.clientY - dragOrigin.current.mouseY);
+          let target: string | null = null;
+          if (startIdx >= 0 && rowDelta !== 0) {
+            const targetIdx = Math.max(0, Math.min(tracks.length - 1, startIdx + rowDelta));
+            const tt = tracks[targetIdx];
+            if (tt && tt.id !== clip.trackId && !tt.locked && clipFitsTrack(clip.type, tt.type)) {
+              target = tt.id;
+            }
+          }
+          dragTrackTargetRef.current = target;
+          if (store.dragTargetTrackId !== target) store.setDragTargetTrackId(target);
         }
       } else if (dragMode === 'trim-in') {
         const rawStart = Math.max(0, dragOrigin.current.startMs + deltaMs);
@@ -116,6 +155,16 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
 
     const handleMouseUp = () => {
       dragOrigin.current._prevDelta = undefined;
+      // Commit a pending cross-track move (resolved during the drag).
+      const target = dragTrackTargetRef.current;
+      if (target) {
+        const fresh = useComposeStore.getState().clips.find((c) => c.id === clip.id);
+        if (fresh && fresh.trackId !== target) {
+          moveClip(clip.id, fresh.timelineStartMs, target);
+        }
+      }
+      dragTrackTargetRef.current = null;
+      useComposeStore.getState().setDragTargetTrackId(null);
       setDragMode(null);
     };
 
@@ -125,7 +174,7 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [dragMode, clip.id, zoomLevel, moveClip, moveSelectedClips, trimClip]);
+  }, [dragMode, clip.id, clip.trackId, clip.type, zoomLevel, moveClip, moveSelectedClips, trimClip]);
 
   const isTextClip = clip.type === 'text';
   const hasSourceTrim = clip.type === 'video' || clip.type === 'audio';
@@ -156,10 +205,15 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
       ? 'bg-purple-600/80 border-purple-400'
       : 'bg-blue-600/80 border-blue-400'
     : clip.type === 'audio'
-      ? 'bg-green-600/80 border-green-400'
+      ? (stemKind === 'board'
+          ? 'bg-emerald-950/75 border-emerald-500/70'
+          : stemKind === 'ambient'
+            ? 'bg-sky-950/75 border-sky-500/70'
+            : 'bg-green-900/75 border-green-500/70')
       : clip.type === 'image' || clip.type === 'gif'
         ? 'bg-purple-600/80 border-purple-400'
         : 'bg-orange-600/80 border-orange-400';
+  const waveColor = stemKind === 'board' ? 'rgba(52,211,153,0.85)' : stemKind === 'ambient' ? 'rgba(56,189,248,0.85)' : 'rgba(134,239,172,0.8)';
 
   const displayLabel = isTextClip
     ? (clip.textContent || 'Text')
@@ -182,6 +236,13 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
       onMouseDown={(e) => handleMouseDown(e, 'move')}
       onDoubleClick={handleDoubleClick}
     >
+      {/* The audio itself, drawn like the Sync & Mix rows (scaled by the clip volume) */}
+      {clip.type === 'audio' && (
+        <>
+          <ClipWaveform fileName={clip.fileName} sourceInMs={clip.sourceInMs} sourceOutMs={clip.sourceOutMs} leftPx={leftPx} widthPx={widthPx} viewportWidthPx={viewportWidthPx} color={waveColor} gain={clip.volume ?? 1} behind={behind} plan={plan} />
+          <ClipGainBands clip={clip} zoomLevel={zoomLevel} />
+        </>
+      )}
       {/* Trim-in handle */}
       {hasSourceTrim && (
         <div
@@ -211,7 +272,7 @@ export function TimelineClip({ clip, trackLocked }: TimelineClipProps) {
             onMouseDown={(e) => e.stopPropagation()}
           />
         ) : (
-          <span className="text-[9px] text-white/90 truncate">{displayLabel}</span>
+          <span className={cn('text-[9px] text-white/90 truncate', clip.type === 'audio' && 'rounded bg-black/45 px-1')}>{displayLabel}</span>
         )}
       </div>
 

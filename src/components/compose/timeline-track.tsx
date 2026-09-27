@@ -1,8 +1,11 @@
 'use client';
 
 import { useCallback, useRef, useMemo } from 'react';
+import { RegionBands, RegionDrawLayer, RegionKindControls, useAudioRegions } from '@/components/parts/audio-regions-context';
+import { trackHeightOf } from '@/lib/track-heights';
+import { stemKindOfTrack } from '@/lib/audio-stems';
 import { useParams } from 'next/navigation';
-import { Lock, Unlock, Eye, EyeOff, Volume2, VolumeX, X, Plus, ChevronLeft, ChevronRight, CheckSquare } from 'lucide-react';
+import { Lock, Unlock, Eye, EyeOff, Volume2, VolumeX, X, Plus, Pencil, ChevronLeft, ChevronRight, CheckSquare } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useComposeStore } from '@/stores/compose-store';
 import { TimelineClip } from './timeline-clip';
@@ -10,7 +13,6 @@ import { TimelineSubtitleTrack } from './timeline-subtitle-track';
 import type { CompositionTrack, MediaBinAsset } from '@/types/project';
 
 const TRACK_HEADER_WIDTH = 120;
-const TRACK_HEIGHT = 48;
 
 const PROTECTED_TRACKS = new Set(['v1', 'a1', 's1']);
 
@@ -30,6 +32,8 @@ export function TimelineTrack({ track }: TimelineTrackProps) {
     [allClips, track.id]
   );
   const toggleMute = useComposeStore((s) => s.toggleTrackMute);
+  const stemKind = stemKindOfTrack(track.id);
+  const regions = useAudioRegions();
   const toggleLock = useComposeStore((s) => s.toggleTrackLock);
   const toggleVisible = useComposeStore((s) => s.toggleTrackVisible);
   const zoomLevel = useComposeStore((s) => s.zoomLevel);
@@ -42,8 +46,11 @@ export function TimelineTrack({ track }: TimelineTrackProps) {
   const selectedSubtitleIds = useComposeStore((s) => s.selectedSubtitleIds);
   const subtitleSegments = useComposeStore((s) => s.subtitleSegments);
   const addClip = useComposeStore((s) => s.addClip);
+  const addToBin = useComposeStore((s) => s.addToBin);
   const removeTrack = useComposeStore((s) => s.removeTrack);
   const currentTimeMs = useComposeStore((s) => s.currentTimeMs);
+  const isDropTarget = useComposeStore((s) => s.dragTargetTrackId === track.id);
+  const isActiveTrack = useComposeStore((s) => s.activeTrackId === track.id);
 
   const canDelete = !PROTECTED_TRACKS.has(track.id);
   const isSubtitle = track.type === 'subtitle';
@@ -51,6 +58,7 @@ export function TimelineTrack({ track }: TimelineTrackProps) {
 
   const handleTrackClick = useCallback(
     (e: React.MouseEvent) => {
+      useComposeStore.getState().setActiveTrackId(track.id);
       if (e.target === e.currentTarget) {
         if (!e.shiftKey && !e.metaKey && !e.ctrlKey) {
           selectClip(null);
@@ -58,7 +66,7 @@ export function TimelineTrack({ track }: TimelineTrackProps) {
         }
       }
     },
-    [selectClip, selectSubtitle]
+    [selectClip, selectSubtitle, track.id]
   );
 
   const handleAddClip = useCallback(async () => {
@@ -94,6 +102,13 @@ export function TimelineTrack({ track }: TimelineTrackProps) {
       if (!res.ok) return;
       const data = await res.json();
 
+      // compose-preview.tsx resolves a clip's playable src from clipSources,
+      // which is built FROM mediaBin (Record keyed by fileName) — without
+      // this, clipSources[clip.fileName] is always undefined and the clip
+      // renders as an inert bar on the timeline but is invisible in the
+      // preview no matter what mode/overlayPosition it has.
+      addToBin(data);
+
       addClip({
         type: data.type,
         fileName: data.fileName,
@@ -103,13 +118,22 @@ export function TimelineTrack({ track }: TimelineTrackProps) {
         timelineEndMs: currentTimeMs + (data.duration || 3000),
         sourceInMs: 0,
         sourceOutMs: data.duration || 3000,
+        // compose-preview.tsx only renders video/image clips on non-v1 tracks
+        // when mode is 'cutaway' or 'overlay' (or overlayPosition is set for
+        // image/gif) — an unset mode matches none of those branches and the
+        // clip silently never appears in the preview, even though it shows up
+        // as a bar on the timeline. Default to 'cutaway' so it's visible
+        // immediately; the user can switch to 'overlay' in Properties.
+        ...(data.type === 'video' || data.type === 'image' || data.type === 'gif'
+          ? { mode: 'cutaway' as const, opacity: 1 }
+          : {}),
       });
     } catch {
       // silently fail
     }
 
     if (fileInputRef.current) fileInputRef.current.value = '';
-  }, [projectId, track.id, currentTimeMs, addClip]);
+  }, [projectId, track.id, currentTimeMs, addClip, addToBin]);
 
   const handleDragOver = useCallback(
     (e: React.DragEvent) => {
@@ -182,18 +206,34 @@ export function TimelineTrack({ track }: TimelineTrackProps) {
             : 'text-yellow-400';
 
   return (
-    <div className="flex border-b border-border" style={{ height: TRACK_HEIGHT }}>
+    <div className="flex border-b border-border" style={{ height: trackHeightOf(track) }}>
       {/* Track header */}
       <div
-        className="flex flex-shrink-0 items-center gap-1 border-r border-border bg-card px-2"
+        className={cn(
+          'relative flex flex-shrink-0 gap-1 border-r bg-card px-2',
+          stemKind ? 'items-start pt-1' : 'items-center',
+          isActiveTrack ? 'border-l-2 border-l-primary border-r-border' : 'border-border'
+        )}
         style={{ width: TRACK_HEADER_WIDTH }}
+        title={isActiveTrack ? (track.locked ? 'Pista activa (bloqueada): lo que pegues vuelve a su pista original' : 'Pista activa: aquí se pegará lo que copies (si es del mismo tipo)') : 'Pulsa para pegar aquí'}
+        onClick={() => useComposeStore.getState().setActiveTrackId(track.id)}
       >
-        <span className={cn('text-[10px] font-medium truncate flex-1', labelColor)}>
-          {track.label}
-          {isSubtitle && selectedSubtitleIds.length > 0 && (
-            <span className="text-white/50 ml-0.5">({selectedSubtitleIds.length})</span>
+        <div className="min-w-0 flex-1">
+          <span className={cn('block text-[10px] font-medium truncate', labelColor)}>
+            {track.label}
+            {isSubtitle && selectedSubtitleIds.length > 0 && (
+              <span className="text-white/50 ml-0.5">({selectedSubtitleIds.length})</span>
+            )}
+          </span>
+          {stemKind && (
+            <span
+              className="block truncate text-[8px] leading-tight text-muted-foreground"
+              title="Onda gris: el audio original (mesa cruda / cámara). Onda de color: lo que suena × el volumen del clip. Línea ámbar: la ganancia aplicada en dB respecto a la raya de 0 dB (je-je, nivelado, ducking, subidas, volumen). Con el lápiz activo, arrastra sobre la pista para marcar una zona."
+            >
+              gris · color · línea = dB
+            </span>
           )}
-        </span>
+        </div>
 
         {/* Subtitle track: select before/all/after buttons */}
         {isSubtitle && (
@@ -236,11 +276,20 @@ export function TimelineTrack({ track }: TimelineTrackProps) {
           <div className="flex gap-0.5">
             {track.type !== 'subtitle' && (
               <button
-                className="p-0.5 text-muted-foreground hover:text-foreground"
+                className={track.muted ? 'p-0.5 text-red-400 hover:text-red-300' : 'p-0.5 text-muted-foreground hover:text-foreground'}
                 onClick={() => toggleMute(track.id)}
-                title={track.muted ? 'Unmute' : 'Mute'}
+                title={track.muted ? 'Pista silenciada — clic para activar' : 'Silenciar pista (también en el export)'}
               >
                 {track.muted ? <VolumeX className="h-3 w-3" /> : <Volume2 className="h-3 w-3" />}
+              </button>
+            )}
+            {stemKind && regions && (
+              <button
+                className={cn('p-0.5 flex-shrink-0 rounded', regions.drawKind === stemKind ? 'bg-amber-500/30 text-amber-300' : 'text-muted-foreground hover:text-amber-300')}
+                onClick={() => regions.setDrawKind(regions.drawKind === stemKind ? null : stemKind)}
+                title={stemKind === 'board' ? 'Lápiz: arrastra sobre la pista para marcar una zona de mesa — atenuación o «abrir» (mantener la puerta abierta), según el tipo elegido arriba (clic = 0,8 s ahí). Vuelve a pulsar para salir.' : 'Lápiz: arrastra sobre la pista para marcar una subida de ambiente o una zona sin subida, según el tipo elegido arriba (clic = 0,8 s ahí). Vuelve a pulsar para salir.'}
+              >
+                <Pencil className="h-3 w-3" />
               </button>
             )}
             {track.type === 'video' && (
@@ -287,12 +336,21 @@ export function TimelineTrack({ track }: TimelineTrackProps) {
             <X className="h-3 w-3" />
           </button>
         )}
+        {stemKind && (
+          <div className="absolute inset-x-2 bottom-1">
+            <RegionKindControls kind={stemKind} />
+          </div>
+        )}
       </div>
 
       {/* Track body */}
       <div
         ref={bodyRef}
-        className={cn('relative flex-1 overflow-hidden', bgClass)}
+        className={cn(
+          'relative flex-1 overflow-hidden',
+          bgClass,
+          isDropTarget && 'ring-2 ring-inset ring-primary/70 bg-primary/10'
+        )}
         onClick={handleTrackClick}
         onDragOver={handleDragOver}
         onDrop={handleDrop}
@@ -304,6 +362,14 @@ export function TimelineTrack({ track }: TimelineTrackProps) {
             <TimelineClip key={clip.id} clip={clip} trackLocked={track.locked} />
           ))
         )}
+
+        {/* Mesa attenuations / ambient raises drawn over the stem's waveform */}
+        {stemKind && regions?.drawKind === stemKind && <RegionDrawLayer kind={stemKind} />}
+        {stemKind === 'board' && <RegionBands kind="autoGate" />}
+        {stemKind === 'board' && <RegionBands kind="keepOpen" />}
+        {stemKind === 'ambient' && <RegionBands kind="autoRaise" />}
+        {stemKind === 'ambient' && <RegionBands kind="noRaise" />}
+        {stemKind && <RegionBands kind={stemKind} />}
 
         {/* Track duration marker */}
         <div

@@ -2,8 +2,16 @@
 
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
-import { splitLongSegments, clampSegmentToBounds, styleWholeSegment, type SegmentStyleUpdate } from '@/lib/subtitle-utils';
+import { splitLongSegments, clampSegmentToBounds, styleWholeSegment, fillGapFromOriginal, type SegmentStyleUpdate } from '@/lib/subtitle-utils';
 import { STYLE_PRESETS, DEFAULT_CONSTRAINTS } from '@/config/subtitle-styles';
+import { STEM_TRACK_IDS, buildStemClipsForWindow, ensureStemTracks, hasStemTracks, type StemSegment } from '@/lib/audio-stems';
+import { resolvePasteTrackId } from '@/lib/track-compat';
+/** A split never leaves a piece shorter than this. The playhead moves in
+ *  fractional frame steps (75666.666…), so splitting twice at "the same"
+ *  point produced a 1.5e-11 ms clip that FFmpeg rejects at export
+ *  ("Invalid duration specification for t: 1.45e-14"). */
+const MIN_SPLIT_PIECE_MS = 10;
+import type { ComposeVersion } from '@/types/project';
 import type {
   CompositionClip,
   CompositionTrack,
@@ -26,14 +34,9 @@ export interface DragState {
   offsetMs: number; // mouse offset from clip start
 }
 
-export interface ComposeVersion {
-  id: string;
-  label: string;
-  createdAt: string;
-  clips: CompositionClip[];
-  subtitleSegments: SubtitleSegment[];
-  subtitleStyle: SubtitleStyle;
-}
+// The type lives in types/project.ts (reels read the versions too); kept
+// re-exported here for the existing importers.
+export type { ComposeVersion };
 
 // Module-level clipboard for copy/paste of compose clips. Lives outside the
 // store so it survives store resets and isn't serialized into project.json.
@@ -41,6 +44,10 @@ export interface ComposeVersion {
 // copied clip, so a multi-clip paste preserves the layout starting at the
 // playhead.
 let composeClipboard: { trackId: string; offsetMs: number; clip: CompositionClip }[] = [];
+// Subtitles that lived inside the span of the last clip copy (clamped to it).
+// Used by rippleInsertAtPlayhead so an inserted piece brings its subs along —
+// plain paste ignores this, so its behavior is unchanged.
+let composeAttachedSubs: { offsetMs: number; seg: SubtitleSegment }[] = [];
 
 interface ComposeUndoEntry {
   clips: CompositionClip[];
@@ -63,7 +70,14 @@ function splitSubtitlesAtTime(segments: SubtitleSegment[], timeMs: number): Subt
       const totalDur = seg.endMs - seg.startMs;
       const splitRatio = (timeMs - seg.startMs) / totalDur;
 
-      if (seg.words && seg.words.length > 0) {
+      // Only trust words[] when it matches the TEXT token-for-token. A drifted
+      // words array (e.g. an edge word dropped by a defensive clamp while the
+      // text kept it) would silently LOSE words when the halves' text is
+      // rebuilt from words — the "última palabra desaparece al dividir" bug.
+      const textTokens = seg.text.split(/\s+/).filter(Boolean);
+      const wordsMatchText = !!seg.words && seg.words.length === textTokens.length;
+
+      if (seg.words && seg.words.length > 0 && wordsMatchText) {
         let splitWordIdx = 0;
         for (let i = 0; i < seg.words.length; i++) {
           if (seg.words[i].startMs >= timeMs) { splitWordIdx = i; break; }
@@ -129,6 +143,12 @@ interface ComposeStore {
 
   // Drag
   dragState: DragState | null;
+  // Track a clip is being dragged over (cross-track vertical drag) — for highlight.
+  dragTargetTrackId: string | null;
+  /** Last track the user clicked (or whose clip they selected). Paste targets it
+   *  when the type fits. UI state: never persisted, never in an undo entry. */
+  activeTrackId: string | null;
+  setActiveTrackId: (trackId: string | null) => void;
 
   // Data
   tracks: CompositionTrack[];
@@ -137,6 +157,8 @@ interface ComposeStore {
 
   // Composition format
   aspectRatio: CompositionAspect;
+  // Letterbox/pillarbox fill color behind the video (default black)
+  backgroundColor: string;
 
   // Subtitles
   subtitleSegments: SubtitleSegment[];
@@ -171,9 +193,13 @@ interface ComposeStore {
   selectSubtitle: (id: string | null, addToSelection?: boolean) => void;
   selectAllSubtitles: () => void;
   selectSubtitlesFromPlayhead: (direction: 'left' | 'right') => void;
+  /** Shift+click: select the contiguous run of subtitles between the current
+   *  selection and the clicked one (inclusive). No selection → just clicked. */
+  selectSubtitleRange: (id: string) => void;
 
   // Drag
   setDragState: (state: DragState | null) => void;
+  setDragTargetTrackId: (trackId: string | null) => void;
 
   // Clips
   addClip: (clip: Omit<CompositionClip, 'id'>) => string;
@@ -192,6 +218,10 @@ interface ComposeStore {
   copySelectedClips: () => void;
   pasteClips: () => void;
   canPasteClips: () => boolean;
+  /** Premiere-style INSERT paste (Ctrl+Shift+V): splits clips straddling the
+   *  playhead, shifts everything at/after it right by the pasted span, and
+   *  inserts the clipboard clips WITH the subtitles captured in their span. */
+  rippleInsertAtPlayhead: () => void;
 
   // Tracks
   addTrack: (type: CompositionTrack['type'], label: string) => string;
@@ -199,6 +229,13 @@ interface ComposeStore {
   toggleTrackMute: (id: string) => void;
   toggleTrackLock: (id: string) => void;
   toggleTrackVisible: (id: string) => void;
+  /** "Mesa y ambiente como pistas separadas": put every part's processed
+   *  stems on the a_mesa / a_amb tracks (created after a1) and MUTE a1 (the
+   *  baked mix) — one undo entry. */
+  applyStemTracks: (layout: StemSegment[], mainAudioFileName?: string, mainAudioOffsetMs?: number) => void;
+  /** Back to the single mix: drop the stem tracks (+ clips) and unmute a1. */
+  removeStemTracks: () => void;
+  stemTracksActive: () => boolean;
 
   // Media bin
   addToBin: (asset: MediaBinAsset) => void;
@@ -214,9 +251,13 @@ interface ComposeStore {
   addSubtitleSegment: () => void;
   syncSubtitlesToClips: () => void;
   regenerateSubtitles: () => void;
+  /** Rebuild subtitles for the empty stretch under the playhead from the
+   *  ORIGINAL transcription (source time), remapped to the edited timeline. */
+  fillSubtitleGapAtPlayhead: (original: SubtitleSegment[]) => { ok: boolean; added: number; reason?: string };
 
   // Composition format
   setAspectRatio: (ratio: CompositionAspect) => void;
+  setBackgroundColor: (color: string) => void;
 
   // Style
   setSubtitleStyle: (style: SubtitleStyle) => void;
@@ -293,6 +334,8 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
 
   // Drag
   dragState: null,
+  dragTargetTrackId: null,
+  activeTrackId: null,
 
   // Data
   tracks: [],
@@ -301,6 +344,7 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
 
   // Composition format
   aspectRatio: '16:9',
+  backgroundColor: '#000000',
 
   // Subtitles
   subtitleSegments: [],
@@ -380,7 +424,31 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
     set({ selectedSubtitleIds: ids, selectedClipIds: [] });
   },
 
+  selectSubtitleRange: (id) => {
+    const state = get();
+    const sorted = [...state.subtitleSegments].sort((a, b) => a.startMs - b.startMs);
+    const clickedIdx = sorted.findIndex((s) => s.id === id);
+    if (clickedIdx < 0) return;
+    const selectedIdxs = state.selectedSubtitleIds
+      .map((sid) => sorted.findIndex((s) => s.id === sid))
+      .filter((i) => i >= 0);
+    if (selectedIdxs.length === 0) {
+      set({ selectedSubtitleIds: [id], selectedClipIds: [] });
+      return;
+    }
+    // Span from the whole current selection to the clicked subtitle — so with
+    // one selected, Shift+click far left/right grabs everything in between.
+    const lo = Math.min(clickedIdx, ...selectedIdxs);
+    const hi = Math.max(clickedIdx, ...selectedIdxs);
+    set({
+      selectedSubtitleIds: sorted.slice(lo, hi + 1).map((s) => s.id),
+      selectedClipIds: [],
+    });
+  },
+
   setDragState: (state) => set({ dragState: state }),
+  setDragTargetTrackId: (trackId) => set({ dragTargetTrackId: trackId }),
+  setActiveTrackId: (trackId) => set({ activeTrackId: trackId }),
 
   addClip: (clipData) => {
     const id = uuidv4();
@@ -472,10 +540,10 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
     // If a clip is selected, use it; otherwise find any clip under playhead
     const firstSelected = state.selectedClipIds[0] ?? null;
     let clip = firstSelected ? state.clips.find((c) => c.id === firstSelected) : undefined;
-    if (!clip || t <= clip.timelineStartMs || t >= clip.timelineEndMs) {
-      clip = state.clips.find((c) => t > c.timelineStartMs && t < c.timelineEndMs);
+    if (!clip || t <= clip.timelineStartMs + MIN_SPLIT_PIECE_MS || t >= clip.timelineEndMs - MIN_SPLIT_PIECE_MS) {
+      clip = state.clips.find((c) => t > c.timelineStartMs + MIN_SPLIT_PIECE_MS && t < c.timelineEndMs - MIN_SPLIT_PIECE_MS);
     }
-    if (!clip || t <= clip.timelineStartMs || t >= clip.timelineEndMs) return;
+    if (!clip || t <= clip.timelineStartMs + MIN_SPLIT_PIECE_MS || t >= clip.timelineEndMs - MIN_SPLIT_PIECE_MS) return;
 
     state.saveSnapshot();
     const sourceOffset = t - clip.timelineStartMs;
@@ -498,7 +566,7 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
     const state = get();
     const t = state.currentTimeMs;
     const toSplit = state.clips.filter(
-      (c) => t > c.timelineStartMs && t < c.timelineEndMs
+      (c) => t > c.timelineStartMs + MIN_SPLIT_PIECE_MS && t < c.timelineEndMs - MIN_SPLIT_PIECE_MS
     );
     if (toSplit.length === 0) return;
     state.saveSnapshot();
@@ -734,6 +802,16 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
       offsetMs: c.timelineStartMs - earliest,
       clip: JSON.parse(JSON.stringify(c)) as CompositionClip,
     }));
+    // Capture the subtitles inside the copied span (clamped) so a ripple
+    // insert can bring them along with the clips.
+    const spanEnd = Math.max(...selected.map((c) => c.timelineEndMs));
+    composeAttachedSubs = state.subtitleSegments
+      .filter((s) => s.endMs > earliest && s.startMs < spanEnd)
+      .sort((a, b) => a.startMs - b.startMs)
+      .map((s) => {
+        const seg = clampSegmentToBounds(JSON.parse(JSON.stringify(s)) as SubtitleSegment, earliest, spanEnd);
+        return { offsetMs: seg.startMs - earliest, seg };
+      });
   },
 
   pasteClips: () => {
@@ -741,12 +819,15 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
     const state = get();
     const pasteAt = state.currentTimeMs;
     get().saveSnapshot();
+    // Onto the ACTIVE track when it takes the clip's type, else its own track
+    // (see resolvePasteTrackId) — same rule as the reel editor.
     const newClips: CompositionClip[] = composeClipboard.map((entry) => {
       const dur = entry.clip.timelineEndMs - entry.clip.timelineStartMs;
       const startMs = pasteAt + entry.offsetMs;
       return {
         ...JSON.parse(JSON.stringify(entry.clip)),
         id: uuidv4(),
+        trackId: resolvePasteTrackId(entry.clip, state.tracks, state.activeTrackId),
         timelineStartMs: startMs,
         timelineEndMs: startMs + dur,
       } as CompositionClip;
@@ -760,6 +841,81 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
   },
 
   canPasteClips: () => composeClipboard.length > 0,
+
+  rippleInsertAtPlayhead: () => {
+    if (composeClipboard.length === 0) return;
+    const state = get();
+    const T = state.currentTimeMs;
+
+    // Span of the inserted material = everything shifts right by this much.
+    const D = Math.max(...composeClipboard.map((e) => e.offsetMs + (e.clip.timelineEndMs - e.clip.timelineStartMs)));
+    if (!(D > 0)) return;
+
+    get().saveSnapshot();
+
+    // 1) Split clips straddling T so their right halves can shift cleanly
+    //    (same math as splitAllAtPlayhead). The left half drops any
+    //    transition — it now cuts into the inserted material.
+    const splitClips: CompositionClip[] = [];
+    for (const c of state.clips) {
+      if (T > c.timelineStartMs && T < c.timelineEndMs) {
+        const off = T - c.timelineStartMs;
+        const splitSrc = c.sourceInMs + off;
+        splitClips.push(
+          { ...c, id: uuidv4(), timelineEndMs: T, sourceOutMs: splitSrc, transitionAfter: undefined },
+          { ...c, id: uuidv4(), timelineStartMs: T, sourceInMs: splitSrc },
+        );
+      } else {
+        splitClips.push(c);
+      }
+    }
+
+    // 2) Ripple: shift clips and subtitles at/after T right by D. A subtitle
+    //    straddling T stays put (it belongs to the material before the cut).
+    const shiftedClips = splitClips.map((c) => c.timelineStartMs >= T
+      ? { ...c, timelineStartMs: c.timelineStartMs + D, timelineEndMs: c.timelineEndMs + D }
+      : c);
+    const shiftedSubs = state.subtitleSegments.map((s) => s.startMs >= T
+      ? { ...s, startMs: s.startMs + D, endMs: s.endMs + D, words: s.words?.map((w) => ({ ...w, startMs: w.startMs + D, endMs: w.endMs + D })) }
+      : s);
+
+    // 3) Insert the clipboard clips at T, on the active track when it takes
+    //    them (same rule as Ctrl+V — the two must not disagree).
+    const newClips: CompositionClip[] = composeClipboard.map((entry) => {
+      const dur = entry.clip.timelineEndMs - entry.clip.timelineStartMs;
+      const startMs = T + entry.offsetMs;
+      return {
+        ...JSON.parse(JSON.stringify(entry.clip)),
+        id: uuidv4(),
+        trackId: resolvePasteTrackId(entry.clip, state.tracks, state.activeTrackId),
+        timelineStartMs: startMs,
+        timelineEndMs: startMs + dur,
+      } as CompositionClip;
+    });
+
+    // 4) Insert the subtitles that came with the copied span.
+    const newSegs: SubtitleSegment[] = composeAttachedSubs.map((entry) => {
+      const seg = JSON.parse(JSON.stringify(entry.seg)) as SubtitleSegment;
+      const dur = seg.endMs - seg.startMs;
+      const start = T + entry.offsetMs;
+      const shift = start - seg.startMs;
+      return {
+        ...seg,
+        id: uuidv4(),
+        startMs: start,
+        endMs: start + dur,
+        words: seg.words?.map((w) => ({ ...w, startMs: w.startMs + shift, endMs: w.endMs + shift })),
+      };
+    });
+
+    set({
+      clips: [...shiftedClips, ...newClips],
+      subtitleSegments: [...shiftedSubs, ...newSegs].sort((a, b) => a.startMs - b.startMs),
+      selectedClipIds: newClips.map((c) => c.id),
+      selectedSubtitleIds: [],
+      dirty: true,
+    });
+  },
 
   addTrack: (type, label) => {
     const state = get();
@@ -807,6 +963,45 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
       tracks: s.tracks.map((t) => (t.id === id ? { ...t, muted: !t.muted } : t)),
       dirty: true,
     })),
+
+  applyStemTracks: (layout, mainAudioFileName, mainAudioOffsetMs) => {
+    get().saveSnapshot();
+    const ids = STEM_TRACK_IDS.compose;
+    const s = get();
+    const totalMs = layout.reduce((m, seg) => Math.max(m, seg.concatStartMs + seg.durationMs), 0);
+    const stemClips = buildStemClipsForWindow({
+      layout,
+      trackIds: ids,
+      concatFromMs: 0,
+      concatToMs: totalMs,
+      timelineStartMs: 0,
+      mainAudioFileName,
+      mainAudioOffsetMs,
+      makeId: () => uuidv4(),
+    });
+    const tracks = ensureStemTracks(s.tracks, ids, 'a1').map((t) => (t.id === 'a1' ? { ...t, muted: true } : t));
+    set({
+      tracks,
+      clips: [...s.clips.filter((c) => c.trackId !== ids.board && c.trackId !== ids.ambient), ...stemClips],
+      selectedClipIds: [],
+      dirty: true,
+    });
+  },
+
+  removeStemTracks: () => {
+    get().saveSnapshot();
+    const ids = STEM_TRACK_IDS.compose;
+    set((s) => ({
+      tracks: s.tracks
+        .filter((t) => t.id !== ids.board && t.id !== ids.ambient)
+        .map((t) => (t.id === 'a1' ? { ...t, muted: false } : t)),
+      clips: s.clips.filter((c) => c.trackId !== ids.board && c.trackId !== ids.ambient),
+      selectedClipIds: [],
+      dirty: true,
+    }));
+  },
+
+  stemTracksActive: () => hasStemTracks(get().tracks, STEM_TRACK_IDS.compose),
 
   toggleTrackLock: (id) =>
     set((s) => ({
@@ -904,7 +1099,7 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
     get().saveSnapshot();
     const state = get();
     const t = state.currentTimeMs;
-    const endMs = Math.min(state.durationMs, t + 2000);
+    const endMs = Math.min(state.durationMs, t + 500); // 0.5 second default duration
     const newSeg: SubtitleSegment = { id: uuidv4(), startMs: t, endMs, text: '' };
     set((s) => ({
       subtitleSegments: [...s.subtitleSegments, newSeg].sort((a, b) => a.startMs - b.startMs),
@@ -969,6 +1164,45 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
     set({ subtitleSegments: resplit, dirty: true });
   },
 
+  fillSubtitleGapAtPlayhead: (original) => {
+    const state = get();
+    const t = state.currentTimeMs;
+
+    const covering = state.subtitleSegments.find((s) => s.startMs <= t && t < s.endMs);
+    if (covering) {
+      return { ok: false, added: 0, reason: 'El playhead está sobre un subtítulo. Colócalo en el hueco vacío que quieres rellenar.' };
+    }
+
+    // Gap bounds: previous subtitle end → next subtitle start (or timeline edges).
+    let gapStart = 0;
+    let gapEnd = state.durationMs;
+    for (const s of state.subtitleSegments) {
+      if (s.endMs <= t && s.endMs > gapStart) gapStart = s.endMs;
+      if (s.startMs >= t && s.startMs < gapEnd) gapEnd = s.startMs;
+    }
+
+    const videoClips = state.clips
+      .filter((c) => c.trackId === 'v1')
+      .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+
+    const fresh = fillGapFromOriginal(
+      original, videoClips, gapStart, gapEnd,
+      state.subtitleConstraints,
+    );
+    if (fresh.length === 0) {
+      return { ok: false, added: 0, reason: 'La transcripción original no tiene texto en ese tramo.' };
+    }
+
+    get().saveSnapshot();
+    set((s) => ({
+      subtitleSegments: [...s.subtitleSegments, ...fresh].sort((a, b) => a.startMs - b.startMs),
+      selectedSubtitleIds: fresh.map((f) => f.id),
+      selectedClipIds: [],
+      dirty: true,
+    }));
+    return { ok: true, added: fresh.length };
+  },
+
   // Style
   setSubtitleStyle: (style) => set({ subtitleStyle: style, dirty: true }),
 
@@ -981,6 +1215,7 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
   setSubtitleConstraints: (constraints) => set({ subtitleConstraints: constraints, dirty: true }),
 
   setAspectRatio: (ratio) => set({ aspectRatio: ratio, dirty: true }),
+  setBackgroundColor: (color) => set({ backgroundColor: color, dirty: true }),
 
   // Versions
   saveVersion: (label) => {
@@ -1076,6 +1311,18 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
     const hasMainAudio = state.clips.some((c) => c.trackId === 'a1');
     const autoClips: CompositionClip[] = [];
     const audioOffset = audioSourceOffsetMs ?? 0;
+    // A composition saved while the project had no separate audio file put the
+    // MUXED VIDEO itself on a1 (its embedded track). Parts projects now keep an
+    // audio MASTER wav (sync.mixedAudioPath) that every re-mix refreshes
+    // without touching the video — whose embedded track goes stale — so point
+    // those clips at the wav, shifted like the auto-created clip (0 for parts
+    // projects). Idempotent; persisted with the next Save.
+    const retargetTo = videoFileName && audioFileName && audioFileName !== videoFileName ? audioFileName : null;
+    const baseClips = retargetTo
+      ? state.clips.map((c) => (c.trackId === 'a1' && c.type === 'audio' && c.fileName === videoFileName
+        ? { ...c, fileName: retargetTo, originalName: retargetTo, sourceInMs: c.sourceInMs + audioOffset, sourceOutMs: c.sourceOutMs + audioOffset }
+        : c))
+      : state.clips;
 
     if (!hasMainVideo && videoFileName) {
       autoClips.push({
@@ -1104,7 +1351,9 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
       });
     }
 
-    const clips = [...state.clips, ...autoClips];
+    const clips = [...baseClips, ...autoClips];
+    // A stale id would silently redirect the first paste of the next project.
+    set({ activeTrackId: null });
 
     // Remove empty legacy tracks (v2/Cutaways, a2/Extra Audio) that have no clips
     const usedTrackIds = new Set(clips.map((c) => c.trackId));
@@ -1137,6 +1386,7 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
       clips,
       mediaBin: state.mediaBin,
       aspectRatio: state.aspectRatio ?? '16:9',
+      backgroundColor: state.backgroundColor ?? '#000000',
       subtitleSegments: sortedSubtitles,
       durationMs,
       subtitleStyle: subtitleStyle ?? defaultComposeStyle,
@@ -1155,7 +1405,7 @@ export const useComposeStore = create<ComposeStore>((set, get) => ({
 
   getCompositionState: () => {
     const s = get();
-    return { tracks: s.tracks, clips: s.clips, mediaBin: s.mediaBin, aspectRatio: s.aspectRatio };
+    return { tracks: s.tracks, clips: s.clips, mediaBin: s.mediaBin, aspectRatio: s.aspectRatio, backgroundColor: s.backgroundColor };
   },
 
   markClean: () => set({ dirty: false }),

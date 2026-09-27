@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
 import { applyAudioFilters } from '@/server/ffmpeg-wrapper';
+import { buildDuckVolumeExpr } from '@/server/audio-duck';
 import { jobManager } from '@/server/job-manager';
 import type { AudioAmplifySettings } from '@/types/project';
 
@@ -42,6 +43,16 @@ export async function POST(
 
   // Build FFmpeg filter chain
   const filters: string[] = [];
+
+  // 0. Board ducking FIRST (before amplify) — attenuate the "je-je"/"eehh" filler
+  //    regions on the RAW board so the compressor/loudnorm below don't boost them
+  //    back up. Region times are absolute in the board wav (what the editor uses).
+  const duckExpr = buildDuckVolumeExpr(project.audio.boardDuckRegions);
+  if (duckExpr) {
+    filters.push(`volume=eval=frame:volume='${duckExpr}'`);
+    const active = (project.audio.boardDuckRegions ?? []).filter((r) => r.enabled).length;
+    console.log(`[amplify] ducking ${active} board region(s) before amplify`);
+  }
 
   // 1. Optional compressor (before gain/normalization to even out dynamics)
   if (settings.compressor) {

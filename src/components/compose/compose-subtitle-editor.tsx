@@ -148,6 +148,9 @@ export function ComposeSubtitleEditor() {
                 className="flex-1 bg-transparent text-sm outline-none min-w-0 resize-none overflow-hidden"
                 value={seg.text}
                 rows={Math.max(1, seg.text.split('\n').length)}
+                // Grow with SOFT wraps too — `rows` only counts hard newlines
+                // and the column is narrower now that it shares the top half.
+                style={{ fieldSizing: 'content' } as React.CSSProperties}
                 onChange={(e) => handleTextChange(seg.id, e.target.value)}
                 onClick={(e) => e.stopPropagation()}
                 onFocus={() => { userInteracting.current = true; }}

@@ -228,7 +228,8 @@ Any change to the color pipeline is a minefield. Lessons learned
   `startMs/endMs` if a clamp/remap is done without updating words. See
   `splitByWords` in `subtitle-utils.ts` and `clampSegmentToBounds` —
   defensive code is in place but be careful when adding new mutations.
-- **Compose autosave is debounced 3s.** Destructive ops save
+- **Compose does NOT autosave** — Save / Ctrl+S only (verified in the
+  browser). Reels autosaves with a 3 s debounce; destructive ops save
   immediately. Right-click delete on reel tabs requires a confirm dialog
   — there is no X button (intentional, prevents accidents).
 - **Reel video player** had a long history of feedback loops between
@@ -290,6 +291,1363 @@ Any change to the color pipeline is a minefield. Lessons learned
   `sync.muxedVideoPath` then any video source's embedded audio, so
   transcription (local OR Groq) works straight from an imported video —
   ffmpeg extracts the audio in convertForWhisper/convertForGroq.
+- **Partes (multi video+board pairs)** — `/project/[id]/parts` page +
+  `project.parts[]` (`ProjectPart` in types) + `partsConcat`. Each part =
+  one video source + one board-audio source, processed by
+  `src/server/workers/part-worker.ts` (`runPartPipeline`: extract →
+  align (python `--align-only`, GCC-PHAT) → mix (atrim+amix) → mux
+  (`-c:v copy` + AAC 192k 48k mono)). The pipeline is STAGED via
+  `mode: 'align' | 'mix' | 'full'`: 'align' stops after correlation
+  (part status 'aligned', offset reviewable + manually editable via
+  PATCH alignmentOffsetMs — mm:ss input in the UI, positive = mesa
+  antes), 'mix' re-mixes+muxes with the STORED offset plus per-part
+  `boardGainDb` + `boardCompress` (default TRUE; the SAME
+  compand(-25dB,4:1)+volume+alimiter chain as the audio-prep amplifier,
+  applied inline to the board branch) and volumes. Two opt-in per-part mix
+  upgrades (helpers in `src/server/audio-duck.ts`, PARTS-ONLY for now — the
+  single-pair audio-prep chain still uses loudnorm/compand):
+  **`boardSpeechLevel`** ("Nivelar voz") = RATIO leveler
+  (`buildVoiceLevelerFilter` in audio-duck.ts): a compand transfer curve
+  ANCHORED to the measured integrated loudness — the loudest voice (≈ I+18,
+  crest measured on the real mesa; +12 overshot into the limiter) maps to
+  `boardLevelCeilingDb` (default −3), and below it dynamics compress by
+  `boardLevelRatio` (default 2:1) so QUIET lines get MORE absolute boost yet
+  keep an audible share of the delivery's dynamics; below I−18 the curve
+  knees to unity (room noise untouched). Replaces the manual gain+compand
+  (ignored while active) AND the earlier speechnorm design, which normalized
+  everything toward the peak: loud hit the ceiling harshly while quiet got
+  only the capped dB (the user heard exactly that). Board-branch safety
+  limiter runs `level=0` — alimiter DEFAULTS to level=1, which re-normalizes
+  the limited output to FULL SCALE and squashed everything to 0 dBFS
+  regardless of the curve ("acople"). Verified on the real mesa (I −30.3):
+  max −2.0, mean −37.5→−18.3, p50→p90 span 10→6.8 dB.
+  **El ancla se mide sobre la VENTANA DE LA PARTE, y el codo sobre el ruido
+  de sala** (`measureBoardWindow` en part-mix-chain; `boardLUFS` +
+  `boardNoiseFloorDb` en la parte; `levelerCurvePoints({noiseFloorDb})`).
+  `measureLoudnessLUFS` medía los PRIMEROS 8 MIN del wav de mesa: en el
+  5-sep (mp3 de la cena entera, 1 h 40) leyó −26 LUFS mientras la ventana de
+  la parte 1 está a −43,4 → el codo de «no tocar» (I−18…I−26 = −44…−52 dBFS)
+  caía justo sobre las colas de frase (la palabra final de 39:57 a −49…−53 en
+  la escala del compand salía a −52, cero ganancia, con el resto a −10; el
+  usuario: «la palabra final no se amplifica»). Ahora worker, vista previa y
+  auto-raises miden LUFS + suelo sobre [boardTrim, boardTrim+duración de la
+  mezcla] (tope 15 min). El suelo NO es el p10 del RMS de 50 ms (dio −71: el
+  codo quedó bajo la sala y los huecos entre frases subieron a −11, tan altos
+  como la voz) sino el p10 de un SEGUIDOR tipo compand (ataque 50 ms / caída
+  300 ms sobre |x|, muestreado cada 25 ms) — la escala que ve el filtro — que
+  dio −61,3, donde vive la sala entre frases (−55…−61). Codo: gLo = max(I−26,
+  suelo+4), vLo = max(I−18, suelo+12) (rampa de 8 dB; con 6 dB la sala en sus
+  momentos altos ganaba 16 dB), acotado vLo ≤ I−2. Resultado medido en la
+  previa real: cola de la palabra −41…−52 → −21…−25 dB, sala −54…−77 (cruda
+  −56…−63), voz fuerte igual (−10). En un set donde la mesa solo graba el
+  bolo (30-ago, I −30 y suelo −60) el codo queda como estaba (I−18/I−26 gana
+  al max) — sin cambio de sonido allí. La UI muestra «sonoridad de la mesa en
+  esta parte X LUFS, ruido de sala Y dB» y la curva pasa `noiseFloorDb`.
+  **PUERTA DE MESA pre-calculada antes del nivelador** («bendi» subía y
+  «siones» caía sin amplificar, con cualquier ratio): el compand decide la
+  ganancia con un seguidor de 300 ms y, bajo la zona de voz, una rampa de
+  8 dB de entrada → ~40 dB de ganancia; la cola de una palabra (−43 → −55 en
+  la escala del compand en 1,2 s) cruza esa rampa y la ganancia se desploma
+  35 dB en 400 ms. Ninguna curva estática separa la cola (−49…−55) de la sala
+  entre frases (−54…−61): solo el tiempo. `buildMesaGateDb` (ambient-gain-
+  curve.ts) construye desde la MISMA máscara de voz del motor de ambiente
+  (dos micros, blips fuera, huecos < pausa mínima rellenados; ahora
+  `computeAmbientGainDb` devuelve `voice`) una curva 0 dB en voz +30 ms antes
+  y +300 ms de retención después, −24 dB fuera, abre en 10 ms y cierra en
+  250 ms (medido: con 200/120 la cola de «bendiciones» se cortaba 100 ms
+  antes de apagarse sola; el ratio del nivelador es lo que decide cuánto se
+  levanta la cola — 1,5:1 la deja 5 dB bajo la primera sílaba como en la
+  grabación, 4:1 la aplana a 2 dB — y la caída del compand no influye); `prepareAmbientGainCurve(..., mesaGatePath)` la escribe como
+  `part_<id8>_mesagate.wav` y `buildPartMixFilter({boardGateCurve:
+  {inputIndex}})` la multiplica sobre la mesa justo tras el trim de
+  alineación (mismo reloj que las envolventes) y ANTES del nivelador. Con la
+  sala ya 24 dB abajo, el codo del nivelador pasa a suelo−10 → suelo−2
+  (`levelerCurvePoints({gated})`), así la cola conserva la curva completa.
+  Entradas: 0 mesa, 1 cámara, luego la curva de ambiente si el duck está
+  activo y luego la puerta si hay nivelado (índices 2/3 según haya curva);
+  el análisis de envolventes corre cuando CUALQUIERA de los dos está activo
+  (antes solo con el duck). Medido en la previa real (ratio 1,5:1 del
+  usuario): sílabas de «bendiciones» +30/+30/+30/+33/+31 dB (antes la cola
+  perdía 35 dB), sala entre frases −80…−87 (cruda −54…−77), «soplo» tras la
+  frase ≤ −57 dB (45 dB bajo la voz, inaudible bajo el ambiente). Las zonas
+  je-je (voz=0 en la máscara) quedan además cerradas por la puerta. La
+  descripción de cadena añade «puerta de mesa −24 dB solo cuando la mesa cae a su ruido de
+  sala (retención 300 ms, cierre 250 ms)», así las partes ya mezcladas avisan de re-mezcla.
+  **La máscara de la puerta NO es la del ambiente** («entre 2:31 y 2:32 la
+  señal no se amplifica, suena alejándose; en mitad de frase en 3:23; en 3:42
+  la voz se atenúa mientras sube el ambiente»): la regla de dos micros
+  (mesa−cámara > delta−6) dice «no hay voz» en cuanto el cómico se aparta del
+  micro o habla bajo una risa — la mesa baja 8–10 dB y la cámara sigue oyendo
+  la sala (medido: voz a −52…−57 con la cámara a −18, relación −33…−38 frente
+  al umbral −30,7) — y la puerta le quitaba 24 dB a la palabra. Ahora
+  `computeAmbientGainDb` devuelve además `gateVoice` = voz cruzada ∪ «el
+  seguidor de la mesa (ataque instantáneo / caída 300 ms sobre el RMS de
+  10 ms, `followerDb`) supera su suelo + 6 dB» (`MESA_GATE_OPEN_DB`), con las
+  mismas zonas je-je a 0, blips fuera y huecos < pausa mínima rellenados; el
+  suelo es el p10 del seguidor sobre TODA la parte fuera de las zonas je-je
+  (con 80 zonas atenuadas el p10 caía dentro de ellas, 7 dB bajo la sala
+  real), persistido como `ambientVoiceCalibMesaFloorDb` (worker, auto-raises
+  y — para partes mezcladas antes de existir el campo — `measureMesaGateFloorDb`
+  desde la previa, porque el p10 de una ventana de 30 s es voz, no suelo).
+  Por qué aguanta en las dos grabaciones: el público que se cuela en la mesa
+  vive EN el suelo (5-sep: risa −70…−74 con suelo −62; 30-ago: ≈ −46 con
+  suelo del seguidor −45), así que la puerta sigue cerrada en las risas; la
+  voz, aunque apartada, queda 10–15 dB por encima. Medido en la previa real
+  de la parte 1 del 5-sep: 2:31–2:33 −10…−32 dB (antes −20…−100), 3:23,5
+  −11…−27 (antes −23…−42), 3:42–3:46 hablando bajo la risa −10…−27 (antes
+  −67…−95), «bendiciones» idéntica; el cierre en una risa sigue a −70…−92.
+  El ambiente sigue subiendo en esas pausas (su máscara no cambia: la de dos
+  micros es la que en 30-ago libera 62/74 pausas con público) — se veta con
+  una zona roja si molesta.
+  The sidechain duck threshold is
+  scaled to the same measurement (fixed 0.02 went deaf on quiet boards).
+  **`ambientDuckOnVoice`** ("Bajar ambiente con la voz") = sidechaincompress
+  keyed by the PROCESSED board: ambient drops within ~15 ms when the comic
+  speaks (kills the roomy echo of the voice in the camera mic) and swells
+  back over `ambientVoiceReleaseMs` (default 400 — the laugh's fade-in) in
+  every gap. The sidechain KEY runs `ambientVoiceAnticipateMs` (default 200)
+  AHEAD of the mix (atrim on the key branch — offline lookahead): the ambient
+  starts dropping BEFORE a phrase begins and swelling BEFORE it ends, keeping
+  the fades glued to the voice in short gaps (verified: pre-onset −37 vs −29
+  unanticipated; post-end already recovering). Duck depth is DETERMINISTIC via the parallel-blend trick
+  (dry·α + wet·(1−α), α=10^(−depth/20); ratio 20 squashes the wet copy, so
+  the floor is exactly `ambientVoiceDuckDb`, default 8, and silence passes
+  bit-transparent). Verified empirically: −7.5 dB during voice, 0.0 dB in
+  gaps, full recovery ≤ release. The part card's "Mezclar y muxar" step is a
+  SIGNAL-CHAIN layout (user asked for "algo limpio, sin redundancias"): a
+  Mesa (voz) block (radio Nivelar-auto vs Manual gain+compand, je-je duck
+  accordion), an Ambiente block (voice-duck controls), and a Mezcla block —
+  the mesa/ambient VOLUMES exist ONLY there, as the ear-check sliders (they
+  used to be duplicated in a separate inputs row). Each block shows waveform
+  + player rows via `src/components/parts/track-row.tsx` (envelope endpoint,
+  ABSOLUTE amplitude scale so raw-vs-processed visually shows the applied
+  gain; -6/-12 dB guide lines; click-to-seek; use reduce not Math.max(...arr)
+  — a 20-min envelope is ~50k elements and the spread overflows the stack).
+  The mix run now also writes the PROCESSED STEMS next to the mix —
+  `part_<id8>_board_proc.wav` / `part_<id8>_amb_proc.wav`, tapped exactly
+  where each branch enters the final amix (post leveler/gain/duck) and capped
+  to the mix duration — so those rows play the real thing, not an
+  approximation. Re-run 'mix' (or "Aplicar" in compose's PartsMixPanels) to
+  apply any of it. **Settings preview**: POST
+  `/api/projects/[id]/parts/[partId]/mix-preview?startSec=&durSec=` renders a
+  30 s window through the SAME chain builder (`buildPartMixFilter` in
+  `src/server/part-mix-chain.ts`, shared with the worker — verified
+  bit-identical, Δ 0.00 dB vs the full mix's slice) into
+  `part_<id8>_prev_{board,amb,mix}.wav`, in ~0.7 s on real files; the card's
+  "Probar los ajustes sin remezclar" bar calls it and the Procesada rows swap
+  to the preview files. The chain builder centralizes leveler/pre-gain/duck
+  threshold/regions; the worker passes full mode, the preview passes
+  window+soloOutput mode (see the no-exit quirk in §7).
+  Editing the offset
+  of a 'done' part drops it to 'aligned' (re-mix needed) and rewrites
+  `part_<id8>_alignment.json` so the embedded AlignmentView (the same
+  before/after envelope-waveform component as audio-prep, parameterized
+  via `dataFileName`/`applyOffset` props) re-renders correctly. The
+  singleton /audio-prep page still only handles the FIRST camera+board
+  pair — per-part alignment lives in the parts flow.
+  **The parts flow IS Sync & Mix now**: `PartsFlow`
+  (`src/components/parts/parts-flow.tsx`) renders at `/project/[id]/sync`
+  (the menu entry, title "Sync & Mix") AND at `/project/[id]/parts`
+  (kept as an alias for old links — no separate menu item). A single
+  camera+board pair = a one-part project (its concat is an instant
+  clone, see below). The OLD single-pair mixer moved verbatim to
+  `/project/[id]/sync-legacy` — reachable ONLY via the link under the
+  Sync & Mix header, not from the menu — and is still the place for the
+  audio-prep processed audios (subtracted voice, amplified board).
+  N parts run in PARALLEL (one job
+  each); ALL project.json writes go through `withProjectWrite` /
+  `updatePart` in part-worker (serialized per project — plain
+  `updateProject` races). Derived files are namespaced
+  `part_<id8>_*` (audio/) and `export/part_<id8>_muxed.mp4` — that name
+  deliberately does NOT match the `muxed_*.mp4` glob the mux route
+  blast-deletes. After all parts are done the user orders them and
+  `runPartsConcat` joins them with the concat DEMUXER (`-f concat -c
+  copy`, uniform streams by construction) into `export/muxed_<ts>.mp4`,
+  seeding `sync.muxedVideoPath/muxedDurationMs`, `muxedAudioOffsetMs: 0`
+  and CLEARING `selectedAudioPath`/`mixedAudioPath` (use-video-directly
+  precedent) → downstream (transcription/compose/reels) works off the
+  embedded audio. **Single-part concat = APFS clone**: with 1 part the
+  "join" shells out to `/bin/cp -c` (clonefile — instant, zero extra
+  disk, byte-identical; verified) instead of re-copying the multi-GB
+  file through ffmpeg; falls back to the ffmpeg concat on error. Node's
+  own `fs.copyFile(COPYFILE_FICLONE_FORCE)` throws ENOSYS on this setup
+  even though the volume clones fine — use `cp -c`, not the Node API.
+  **Single-part projects auto-join**: `runPartPipeline` runs that clone
+  itself (own 'parts-concat' job, awaited before the part job completes)
+  whenever the project has exactly one part, so "Mezclar y muxar" alone
+  seeds `sync.muxedVideoPath` — no "Unir partes" click. The
+  PartsConcatCard collapses to a one-line status for one part (button
+  only reappears as "Generar vídeo final" if the auto-join failed or the
+  part was mixed before this existed), and the compose/reels jeje apply
+  skips its explicit concat POST when `parts.length === 1`. Multi-part
+  projects are unchanged (the user orders parts before joining).
+  **Single-part AUDIO-ONLY re-mix (the "vuelve a escribir el fichero" fix)**:
+  the part video depends only on the source + alignment offset, never on the
+  mix, yet every re-mix rewrote the 25+ GB `part_*_muxed.mp4` to embed new
+  audio. Now the pipeline records `muxedForOffsetMs` + `muxedAudioTrimMs`
+  (keyframe-snap residual) on the part when it muxes, and a later `mode:'mix'`
+  with the SAME offset (single part, part muxed + final muxed present,
+  partsConcat done, mix duration consistent ±0.25 s) SKIPS the mux and the
+  join entirely: it re-runs the audio chain (+stems), writes
+  `part_<id8>_mix_sync.wav` (the mix with the head residual trimmed — a
+  lossless PCM copy, sample-exact vs `mix[trim..]`, verified) and points
+  `sync.mixedAudioPath` at it with `muxedAudioOffsetMs: 0` + a fresh
+  `sync.audioRev`. Downstream then follows the legacy single-pair contract
+  (compose/reels `getAudioSrc`, render `audioSrc`, transcription priority 2)
+  — same timeline as the embedded track, so nothing needs remapping. The
+  full mux path ALSO sets mixedAudioPath (after the join clears it) so a
+  single-part project is uniformly "muxed video for picture + mix_sync wav
+  for sound"; the muxed file's embedded audio can be stale after fast
+  re-mixes (the part video player's label says so). Offset change, multi-
+  part, or any missing file → normal mux. Parts muxed before this exist do
+  ONE full mux (to record the fields), then go fast. Verified: 2 s re-mix,
+  part/final muxed mtimes untouched, audioRev bumped, PartCard button reads
+  "Re-mezclar (solo audio)".
+  **Re-mix cost trims** (the jeje-apply "tarda mucho" fixes): stage 2
+  skips the board-wav conversion when the wav is newer than its source
+  (rewriting it busted the mtime-keyed LUFS + envelope caches on every
+  re-mix), and the two processed-stem passes run CONCURRENTLY with the
+  video mux (registerProcess:false so cancel still kills the mux; stem
+  failure is non-fatal — only the listen-back rows go stale). Apply from
+  compose/reels (PartsMixPanels) now shows job progress text via
+  pollJob's onProgress. Negative offsets (camera started first) seek
+  the video to a keyframe at-or-after |offset| and atrim the residual
+  off the mix — same math as the single mux route. API:
+  `/api/projects/[id]/parts` (+`/[partId]`, `/[partId]/process`,
+  `/reorder`, `/concat`); GET reconciles orphaned 'processing' parts
+  after server restarts.
+  **Consumer-side fallout (found after shipping — every place that
+  ranked `audio.extractedTracks[0]` / `sync.selectedAudioPath` /
+  `sync.mixedAudioPath` ABOVE the muxed video had to be fixed, since
+  those first two are now empty and the third would silently pick
+  PART 1's own camera wav or a stale path):**
+  - `resolveTranscriptionAudio` (whisper-worker.ts) — moved the muxed-
+    video-embedded-audio priority ABOVE extractedTracks. Before: it
+    transcribed only `extractedTracks[0]` (part 1's camera audio) and
+    silently ignored every later part.
+  - `render-worker.ts` reel/YouTube export `audioSrc` resolution — the
+    `extractedTracks[0]` fallback is now skipped whenever a muxed video
+    exists, so exported reels use the muxed file's own embedded audio
+    per clip instead of seeking into part 1's short standalone wav
+    (silence for any clip whose `sourceInMs` falls in a later part).
+  - Compose/Reels page `getDurationMs` — now prefers
+    `sync.muxedDurationMs` over the first video SOURCE's own duration
+    (which is only part 1's length) when there's no transcription yet.
+  - **Compose PREVIEW had no sound at all** (not just partial) — this
+    was the sneaky one. `getAudioSrc`/`getAudioFileName` in
+    `compose/page.tsx` only read `mixedAudioPath`/`selectedAudioPath`;
+    with both cleared they returned `undefined`, so (a) `loadComposition`
+    never auto-created an a1 audio clip, AND (b) even if one existed,
+    `compose-preview.tsx`'s base `<Audio src={audioSrc}>` layer (the v1
+    `<Video>` is always `volume={0}` — audio is EXCLUSIVELY carried by
+    a1) had no src to play. Fixed by falling back both functions to the
+    muxed video's own filename/URL, mirroring `getVideoFileName`/
+    `getVideoSrc` — Remotion's `<Audio>` happily extracts the audio
+    track from a video file. Verified live in the browser: clicking
+    Play advances `currentTime` on the real `<audio>` element bound to
+    `muxed_*.mp4`, zero console errors.
+- **Perf: streaming de ficheros grandes SIN backpressure** —
+  `/api/projects/[id]/audio/file` (sirve el muxed de 25+ GB a compose/reels)
+  puenteaba `createReadStream` a un `ReadableStream` web con
+  `nodeStream.on('data', chunk => controller.enqueue(chunk))` — sin mirar
+  `controller.desiredSize` ni pausar el stream de Node, así que un cliente
+  atascado (el buffer de `<video>` se llena) no frenaba nada: el servidor
+  seguía leyendo el fichero a velocidad de disco hacia una cola sin límite,
+  metiendo GBs en memoria. Arreglado con `Readable.toWeb(createReadStream(...))`
+  (mismo patrón que ya usaba `export/download/route.ts`), que sí propaga la
+  contrapresión. La misma ruta enviaba siempre `Cache-Control: no-cache` sin
+  ETag/Last-Modified — el navegador no podía revalidar y retransmitía el
+  fichero entero en cada montaje (compose monta `<Video muted>` Y `<Audio>`
+  apuntando a menudo a la MISMA URL del muxed en proyectos de partes); ahora
+  responde 304 con ETag `size-mtimeMs` (verificado con curl). El endpoint de
+  envelope (`/api/projects/[id]/audio/envelope`) tampoco compartía cómputo en
+  vuelo — varias `TrackRow` + `BoardDuckingPanel` pidiendo el envelope del
+  MISMO wav en paralelo (montaje en frío) disparaban un ffmpeg por petición;
+  ahora un `Map<path, Promise>` de in-flight coalescing lo reduce a un solo
+  proceso (verificado: 5 peticiones concurrentes → 1 ffmpeg vivo). El GET de
+  `/api/projects/[id]/parts` releía y parseaba el project.json (584 KB en el
+  proyecto real) hasta 4 veces por llamada — se sondea sin parar mientras una
+  parte procesa; ahora reutiliza el resultado ya fusionado de
+  `withProjectWrite` en vez de un `getProject` extra al final.
+- **Perf: inputs numéricos de nivelado/duck en PartCard iban directos a
+  servidor por tecla** — Techo/Atenuación/vuelve-en/anticipa llamaban a
+  `patchAndRefresh` (PATCH + recarga completa de `/parts` + `project.json`) en
+  CADA pulsación, reescribiendo el project.json y re-renderizando toda la
+  página por cada dígito tecleado — de ahí la sensación de "pesadez"/difícil
+  de editar en esa zona. Mismo arreglo que crop-keyframes: estado local
+  (`ceilingStr`/`duckDbStr`/`releaseMsStr`/`anticipateMsStr`) + `onBlur`/Enter
+  para confirmar (`commitDraftNumber`, con clamp a los mismos min/max de la
+  ruta PATCH). Verificado con automatización real de teclado: 0 PATCHes
+  mientras se teclea, exactamente 1 al perder el foco.
+- **Perf: `ReelExtraAudio` corría un rAF propio para siempre** — el loop se
+  auto-reprogramaba sin mirar `isPlaying`, así que con el editor de reels
+  simplemente ABIERTO (sin reproducir) seguía iterando clips 60 veces por
+  segundo indefinidamente — un consumo de fondo real detrás de la sensación de
+  "todo el proyecto pesa". Reescrito como efecto REACTIVO sobre
+  `currentTimeMs`/`isPlaying` (sin `requestAnimationFrame` propio): durante la
+  reproducción se dispara igual de a menudo porque el tick de
+  `reel-video-player` ya empuja `currentTimeMs` cada frame; en pausa solo
+  reacciona a un scrub real, cero trabajo en reposo.
+- **Perf: paneles de reels suscritos al `currentTimeMs` crudo** —
+  `VideoClipMotionPanel` y `CropKeyframesPanel` leían `s.currentTimeMs` sin
+  redondear, re-renderizando el panel entero (incluida la lista de keyframes)
+  60 veces por segundo durante la reproducción solo para una etiqueta de
+  referencia. Redondeo A 50 ms DENTRO DEL SELECTOR
+  (`Math.round(s.currentTimeMs / 50) * 50`) — el propio store de Zustand evita
+  el re-render si el valor redondeado no cambió; la acción que de verdad crea
+  el keyframe lee el valor exacto de `get()`, no este derivado.
+- **Perf: `TrackRow` redibujaba el waveform entero en cada tick de audio** —
+  el playhead se pintaba dentro del mismo efecto de canvas que el waveform
+  (dependía de `posFrac`, que cambia ~4 Hz vía `onTimeUpdate`), así que cada
+  tick repetía el resize del canvas + los DOS bucles de pico sobre 48-50k
+  muestras solo para mover una línea de 1.5 px. Separado en un `<div>`
+  posicionado absolutamente con `left: ${posFrac*100}%` — el canvas ahora solo
+  redibuja cuando cambian los datos (`env`/`behindEnv`/`color`), no en cada
+  tick de reproducción.
+- **Detector je-je v2 (`detect_jeje_v2` en `scripts/detect_board_fillers.py`)** —
+  derivado de DATOS, no de intuición: se midieron las 9 risas de micro
+  confirmadas por el usuario (29-ago, `boardDuckRegions`) contra ~1660 trenes
+  de pulsos del mismo wav. Lo que separa un je-je de una frase NO es la
+  profundidad de los valles (el habla a 10 ms también los tiene) sino: (1) los
+  valles del je-je vuelven al RUIDO DE SALA (valley−floor ≈ +1 dB; en habla
+  +7…+16), (2) período ≥ 170 ms (las sílabas van a 135–180), (3) la región
+  queda ≥ 15 dB bajo el nivel de voz local (p95 en ±8 s) y el pico ≥ 2 dB
+  bajo él, (4) pulsos ≤ 90 ms de ancho a −6 dB con duty ≤ 0.5. Trabaja sobre
+  envolvente RMS a 10 ms (la de 25 ms emborrona pulsos de 30 ms). Resultado:
+  7/7 trenes reales recuperados (los 2 "fallos" son un "ja" aislado de 430 ms
+  y un sonido sostenido — no son trenes); en la franja revisada por el
+  usuario propone 20 zonas, 9 sobre etiquetas y 11 extra que quedan para el
+  ✓/✗. Fuera de esa franja NO hay verdad de campo (0–426 s es pre-show de la
+  mesa; muchos trenes ahí parecen je-je reales) — no interpretar las
+  propuestas/min de fuera como falsos positivos. `--jeje-v1` restaura el
+  detector antiguo. Cada propuesta lleva `pulses`, `period_ms` y
+  `level_below_ctx_db` (la UI los muestra como "por qué"). El modo
+  `--examples` ("Buscar parecidos") ya no usa el prototipo de 8 rasgos
+  antiguos (no re-encontraba ni los propios ejemplos: 0/9): CALIBRA las
+  puertas del v2 con las ✓ (cada puerta se ensancha justo hasta admitir los
+  trenes de todos los positivos, así un ✓ siempre se re-encuentra) y
+  descarta los candidatos cuyo vector de descriptores queda más cerca de una
+  ✗ que de una ✓. Verificado: 9/9 positivos re-encontrados; con 11 ✗ ninguna
+  vuelve y las propuestas en la franja bajan de 14 a 10. El tope
+  `--learn-max` (def 120) se aplica por SIMILITUD — el `[:max]` antiguo
+  cortaba por TIEMPO tras el dedup y tiraba los ejemplos del minuto 4. Harness de evaluación en el
+  scratchpad de la sesión (`eval_jeje.py` sobre `board29.wav` regenerado del
+  source — el `part_*_board.wav` del proyecto había desaparecido del audio/).
+- **Recalibración con la 2ª noche (30-ago, 83 ✓ manuales)** — las puertas
+  del 29-ago (9 positivos flojos) rechazaban 34 de los 74 positivos
+  alcanzables del 30-ago por "pico ≥ 2 dB bajo la voz" (esa noche los je-je
+  suenan tan fuerte como la frase) y 16 por "valles ≤ 6 dB sobre el ruido".
+  Puertas actuales = p03/p97 de los positivos de AMBAS noches: período
+  ≥ 165, valles ≤ +12 sobre el ruido, región ≥ 14 dB bajo la voz, pico hasta
+  6 dB POR ENCIMA de la voz local, ancho ≤ 100 ms, duty ≤ 0.5, cv ≤ 0.45.
+  Recall 30-ago 35→62/83 (los 9 no alcanzables son "ja" sueltos o risas
+  sostenidas de 350 ms, no trenes), 29-ago sigue 7/7 trenes; a cambio
+  ~13 propuestas/min. LÍMITE MEDIDO: ni la envolvente, ni el espectro de
+  los pulsos (centroide, planitud, armonicidad, bandas), ni el nivel del
+  público en la cámara alrededor separan los ✓ del resto de trenes
+  similares (~1.400 en 27 min) — la revisión ✓/✗ es el paso decisivo y
+  "Buscar parecidos" (calibrado por grabación) la forma de estrechar.
+  **Pendiente ≠ rechazada**: las 78 propuestas del 30-ago que el usuario no
+  tocó eran idénticas a sus ✓ (él marcó a mano encima de varias); tratarlas
+  como ✗ mataba el aprendizaje. `BoardDuckRegion.rejected` distingue: ✗ pone
+  `rejected:true`, ✓ lo limpia; lo no marcado ("por revisar", chip ámbar)
+  no enseña nada y solo `rejected===true` alimenta los negativos.
+- **"Qué suena" en cada reproductor (claridad del paso 3)** — el usuario no
+  sabía si la fila "Cruda" llevaba el filtro je-je, de qué venía el
+  comprobador de oído, ni por qué el vídeo no coincidía con la mezcla tras un
+  re-mix rápido. Ahora: cada `TrackRow` lleva un chip `kind`
+  (ORIGINAL / PROCESADA / VISTA PREVIA 30 s / MEZCLA REAL), "generada HH:MM",
+  un `sublabel` con lo que incluye y lo que NO, la cadena aplicada y un
+  `warning`. El worker guarda en la parte `mixedAt`, `muxedAt` y
+  `mixChainApplied` {board, ambient, mix} (las descripciones de
+  part-chain-description en el momento de mezclar; el fast path NO toca
+  muxedAt); la tarjeta compara `describe*(part)` actual con lo aplicado →
+  "⚠ ajustes cambiados desde esta mezcla" en el estado y en cada fila
+  procesada, y `mixedAt > muxedAt` → "⚠ vídeo con audio anterior a la mezcla
+  vigente" + botón "Muxar el vídeo con la mezcla vigente" (`forceMux: true`
+  en /process salta el fast path). La vista previa guarda su propio snapshot
+  de cadena al generarse. El comprobador de oído dice explícitamente SUENA
+  (originales + sliders + compresor que imita el nivelador) / NO SUENA
+  (filtro je-je, ducking, limitador). Partes mezcladas antes de este cambio
+  muestran "de una versión anterior — re-mezcla una vez para registrarlo".
+  Verificado en navegador: ✓ → PATCH ajuste → ⚠ en estado y 3 filas →
+  re-mix rápido → filas ✓ pero vídeo ⚠ + botón → forceMux → todo ✓.
+- **Zoom en todas las ondas (`TrackRow`)** — +/−/Todo junto al nombre,
+  slider "Desplazar la ventana" cuando hay zoom, ventana mínima 1 s, anclado
+  al playhead si está a la vista, y la vista sigue al playhead en reproducción
+  (mismo comportamiento que el editor je-je). El dibujo recorta la envolvente
+  al `[vStart, vEnd]` (la referencia `behind` desplaza su índice con
+  `offsetSec*1000 + vStart`); el clic para saltar mapea dentro de la ventana.
+  OJO en automatización: los botones "Zoom +" del panel je-je comparten el
+  `title` — filtrar por `!closest('details')` para llegar a los de las filas.
+  **El mux del vídeo siempre está a mano**: junto a "Re-mezclar (solo
+  audio)" hay "Mezclar y muxar el vídeo" (forceMux), y dentro de VÍDEO el
+  botón aparece siempre (con la nota "ya lleva la mezcla vigente" / "de una
+  versión anterior: no consta con qué mezcla se muxó") — antes solo salía
+  cuando `mixedAt > muxedAt`, que las partes mezcladas antes de ese registro
+  nunca cumplen.
+- **BUG del zoom: cierre obsoleto (`stale closure`)** — `zoom`/`pan` en
+  TrackRow calculaban la ventana nueva desde la variable `view` capturada en
+  el render, así que DOS CLICS SEGUIDOS aplicaban UNO SOLO (React agrupa los
+  renders y el segundo handler seguía viendo la ventana vieja). En un set de
+  27 min eso se lee como "el zoom no va". Arreglado con `setView(prev => …)`
+  (actualización funcional) y paso ×4 en vez de ×2 — de 27 min a ~2 s en tres
+  clics. Verificado en el navegador: 3 clics rápidos → 2:45 → 0:41 → 0:10 →
+  0:02. MISMO patrón en cualquier control que encadene pulsaciones rápidas.
+- **`MixStackView` — el mezclador dibujado** (`src/components/parts/
+  mix-stack-view.tsx`, en el bloque Mezcla bajo el comprobador de oído): tres
+  carriles sobre la MISMA línea de tiempo — mesa procesada × vol. mesa,
+  ambiente procesado × vol. ambiente y la mezcla resultante debajo. Los stems
+  se toman donde cada rama entra al amix, así que su tiempo ya coincide con
+  el de la mezcla; el dibujo multiplica sus envolventes por el valor ACTUAL
+  de los sliders (cliente, instantáneo) y marca en ROJO lo que pasa de
+  0 dBFS. Cuando los volúmenes ya no son los de la mezcla existente, el
+  carril de mezcla añade en ámbar la SUMA ESTIMADA con los valores nuevos
+  (cota superior: las envolventes de pico solo suman linealmente en fase) —
+  el relleno morado sigue siendo el fichero real. Para que el dibujo siga al
+  ratón MIENTRAS se arrastra, `AlignmentEarCheck` gana `onMixLive` (se dispara
+  en cada `onChange`); el PATCH sigue en `onPointerUp`, así que no se
+  reescribe project.json por píxel.
+- **Mesa y ambiente como PISTAS SEPARADAS en Compose y Reels**
+  (`src/lib/audio-stems.ts`, `GET /api/projects/[id]/audio/stems`, acciones
+  `applyStemTracks`/`removeStemTracks` en ambos stores, sección "Mesa y
+  ambiente como pistas separadas" en `PartsMixPanels` — que Compose enlaza al
+  store de compose y `ReelMixPanels` al reel activo, solo en fase timeline).
+  Qué hace: crea las pistas `a_mesa`/`a_amb` (compose) o `ra_mesa`/`ra_amb`
+  (reel) justo debajo de la principal, pone en ellas los stems procesados de
+  CADA parte (`part_<id8>_board_proc.wav` / `_amb_proc.wav`, tap post-volumen)
+  y SILENCIA la pista principal (a1/ra1) — no la borra: `loadComposition` la
+  recrearía, y así "Volver a la mezcla única" es quitar pistas + desmutear.
+  Reloj: los stems viven en el reloj de MEZCLA de su parte; el muxed empieza
+  `muxedAudioTrimMs` después → `sourceIn = (t − concatStart_k) + trim_k`,
+  partes back-to-back por `order` (`computeStemLayout`); en un reel se aplica
+  por cada clip ra1 sobre su rango de fuente (`buildStemClipsForWindow`), así
+  un reel que cruza el límite entre partes sale con un clip por parte
+  (verificado: reel 15–25 s de un set de 20+15 s → mesa/ambiente Parte 1
+  src 15–20 s + Parte 2 src 0–5 s, export = mezcla ±0,1 dB y 0,0 ms).
+  Partes sin mesa (solo vídeo) llevan el audio principal en la pista de
+  ambiente a ×2 para que el silencio de la principal no deje hueco.
+  **Normalización del mezclador (`STEM_MIX_NORMALIZATION = 0.5`)**: la
+  mezcla de la parte es `amix` con su normalización por defecto — cada rama
+  entra a ×0,5 (medido: (b+a)/2 −16,0 dB vs mezcla −15,6). Los ficheros stem
+  son las RAMAS (lo que describen "techo −3 dB" y las lecturas de nivel), así
+  que un clip en una pista de stems entra al mezclador de Compose/Reels a ×0,5
+  (`trackMixerGain`): ×1 en el clip = su parte exacta de la mezcla, y
+  mesa ×1 + ambiente ×1 = la mezcla. Aplicado en compose-preview,
+  reel-extra-audio, AMBOS caminos de render-worker y la estimación de
+  MixStackView (que además ahora escala cada carril RELATIVO al volumen con
+  que se hizo la mezcla — los stems ya llevan ese volumen — y promedia ÷2:
+  antes multiplicaba dos veces y marcaba "recorte" que no existía). Mover un
+  clip de stem a una pista de audio normal pierde el factor (+6 dB).
+  **Bugs previos que salieron al medir**: (1) el export perdía 3,0 dB en
+  TODO audio mono (la mezcla principal de los proyectos de partes y cualquier
+  capa mono) en cuanto había una capa extra — `aformat=channel_layouts=stereo`
+  sube mono→estéreo a 1/√2 por lado; ahora `pan=stereo|FL=FL+FC|FR=FR+FC`
+  (mono a unidad, estéreo intacto, verificado con ambos); (2) los mutes de
+  pista no existían en el export (ni en el reproductor de reels, que no tenía
+  botón): ahora a1/ra1 mutead@ → `muteMainAudio` (volume=0 sobre [outa]),
+  pista extra muteada → sus clips se omiten, y el reproductor de reels tiene
+  botón de mute por pista de audio (rojo cuando está activo, como Compose) más
+  un efecto que aplica el mute de ra1 al instante (`video.volume=0`, o el
+  `<audio>` separado) — el tick lo re-afirma cada frame; (3) la suma de capas
+  extra (`amix normalize=0`) no llevaba limitador → ahora el mismo
+  `alimiter=limit=0.95:attack=5:release=50` de la mezcla, para que
+  mesa ×1 + ambiente ×1 reproduzca la mezcla también en los picos.
+  **Reproducción por encima de ×1**: el volumen de un `<audio>` no pasa de
+  1.0 (lanza al asignar > 1). Compose usa `<Audio useWebAudioApi>` de Remotion
+  (solo cuando `base > 1`, ganancia por GainNode); ReelExtraAudio crea un
+  AudioContext compartido + `createMediaElementSource` + GainNode por elemento
+  (una sola vez por elemento; el contexto se reanuda al primer uso) y cae a
+  `el.volume` recortado si falla. El "Intensidad" de reels sube a 0–200 %
+  como el de Compose.
+  **Reels heredan los stems de Compose**: `buildReelExtraAudioClips` mapea
+  `a_mesa→ra_mesa`, `a_amb→ra_amb` (el resto sigue a ra2) y
+  `tracksAfterCarry` crea las pistas y copia el mute de a1 a ra1
+  (`enterTimelinePhase` recibe ahora `composeTracks`; por defecto mutea si
+  llegaron stems) — sin eso un reel sonaría mezcla + stems (triple). El
+  backfill de capas extra mira ra2 Y las pistas de stems para no duplicar.
+  Verificado en navegador: reel nuevo → pistas creadas, 4 clips de stems
+  (con los volúmenes editados en Compose), ra1 muteada y `video.volume=0`.
+  Export verificado end-to-end (proyecto desechable de 2 partes, 20 s + 15 s,
+  volúmenes de mezcla 1,5/0,8): con stems a ×1 el export iguala la mezcla
+  embebida en 0,0–0,1 dB en 6 ventanas (palabra, risa, pausa de cada parte)
+  y es SAMPLE-EXACTO frente al wav de mezcla (0,0 ms); la pista embebida del
+  muxed va +21 ms (parte 1) / +32 ms (parte 2) respecto al wav de mezcla —
+  priming AAC, previo e imperceptible. Con mesa ×0,5 / ambiente ×2 en la
+  parte 1: −7,6 / +6,2 dB en sus ventanas, 0,0 en la parte 2.
+  OJO automatización: en el panel de navegador de la sesión
+  `document.visibilityState === 'hidden'` y `requestAnimationFrame` NO se
+  dispara → el bucle `tick` del reproductor de reels no corre (el `<video>` sí
+  reproduce y el playhead del store no avanza). No es un bug de la app —
+  verificar la lógica del tick por otras vías (efectos, botones) o en un
+  navegador visible. Compose guarda con Save/Ctrl+S (no hay autosave).
+- **Pantalla de edición en DOS MITADES (Compose y fase timeline de Reels)**
+  (`src/components/shared/editor-split.tsx`). El apilado anterior (preview
+  arriba, subtítulos + panel en medio, timeline abajo a su altura natural)
+  se volvió inutilizable en cuanto mesa y ambiente pasaron a ser pistas: la
+  timeline quedaba aplastada al fondo. Ahora: MITAD SUPERIOR = subtítulos
+  (30 %) | preview (centro, ajustado por altura) | propiedades (30 %:
+  overlays, propiedades del clip o estilo de subtítulos, y DEBAJO los
+  acordeones globales — je-je, subir ambiente, stems — "lo seleccionado va
+  arriba", misma regla que reels); MITAD INFERIOR = toda la timeline
+  (barra de herramientas fija + pistas). La barra entre mitades se arrastra
+  (20–80 %, doble clic = 50 %) y el reparto se guarda en localStorage
+  (`compose-split-top-pct` / `reel-split-top-pct`; se lee en un effect, no en
+  el inicializador, para no romper la hidratación). El cuerpo de la timeline
+  rellena su mitad (`h-full flex-col`, controles `flex-shrink-0`, contenedor
+  `flex-1 overflow-y-auto`) con la REGLA `sticky top-0` y la barra «Aplicar»
+  `sticky bottom-0`; si hay más pistas de las que caben, la rueda vertical
+  sin modificador hace scroll de pistas (nativo) en vez de desplazar el
+  tiempo — Shift+rueda y el trackpad lateral siguen desplazando. El ancho de
+  la vista (`viewportWidthPx`) se sigue midiendo sobre ese contenedor.
+- **El panel de almacenamiento NO conocía las partes (borró la mesa cruda)**
+  (`/api/projects/[id]/files`, `collectReferencedFiles`). Solo miraba
+  `audio.*`, `sync.*`, clips y exports, así que TODO lo derivado de una parte
+  (`part_<id8>_board.wav`, `_mix.wav`, `_alignment.json`, `_ambgain.wav`,
+  `_fillers.json` y `export/part_<id8>_muxed.mp4`) salía como «huérfano» y
+  «Eliminar huérfanos» lo borró en el proyecto real del 30-ago: el panel je-je
+  se quedó sin onda («Pulsa Detectar rellenos…» = 404 del envelope), la
+  AlignmentView sin datos y el siguiente re-mix habría reescrito 28 GB.
+  Sobrevivieron justo los ficheros que SÍ estaban referenciados (los stems por
+  los clips del reel, `mix_sync` por `sync.mixedAudioPath`). Ahora cada parte
+  registra sus ficheros como referenciados con su papel; los `envelope_*` y
+  `_prev_*` siguen siendo huérfanos (se regeneran solos). Robustez añadida:
+  `src/server/part-files.ts` (`ensurePartBoardWav`) regenera la mesa cruda
+  desde el source (misma conversión que la etapa 2) cuando las rutas
+  `audio/envelope` o `audio/file` la piden y no existe (una conversión
+  compartida entre peticiones concurrentes; verificado en el proyecto real:
+  la petición devolvió 200 y el wav reapareció), y el fast path del worker
+  clona el vídeo final de vuelta como `part_<id8>_muxed.mp4` (`cp -c`) si
+  falta, en vez de caer al mux completo. `concatParts` (stems) acepta partes
+  «aligned» con `muxedDurationMs` — editar zonas je-je desde la timeline baja
+  la parte a «aligned» (re-mix pendiente) y antes eso hacía desaparecer los
+  stems y etiquetaba la parte «(sin mezclar)»; ahora dice «(re-mezcla
+  pendiente)».
+- **Onda ORIGINAL en gris detrás de la PROCESADA en las pistas de stems**
+  (`ClipWaveform` prop `behind`, `stemOriginalOf` en audio-stems.ts): igual
+  que las filas de Sync & Mix, cada clip de mesa/ambiente dibuja primero la
+  señal cruda (mesa: `part_<id8>_board.wav` desplazada `max(0, offset)`;
+  ambiente: `<videoSourceId>_audio.wav` desplazada `max(0, −offset)`) en gris
+  a su nivel real y encima la procesada en color × volumen del clip — un
+  je-je atenuado se ve como pulsos grises sin color, el ducking como color
+  por debajo del gris y una subida como color por encima. Leyenda «gris
+  original · color procesada» bajo el nombre de la pista (tooltip con el
+  detalle).
+  **BUG que dejaba la timeline SIN onda en cualquier bolo entero**: la primera
+  versión daba al canvas el ancho ENTERO del clip (27 min × zoom × dpr ≈
+  328 000 px) y el navegador no pinta un canvas por encima de ~32 000 px —
+  fallaba en silencio a todos los zooms, por eso el usuario decía «no se ve
+  como en Sync & Mix». Ahora `ClipWaveform` recibe `leftPx` +
+  `viewportWidthPx` y solo crea un canvas del TRAMO VISIBLE (+256 px de
+  margen por lado, dpr ≤ 2), posicionado con `left` dentro del clip; se
+  redibuja al desplazar/zoom (≤ ~2 000 px de picos, barato). Verificado con
+  `getImageData` en el proyecto real: mezcla 12 940 px de color, mesa
+  24 236 color / 80 gris (la cruda queda debajo de la nivelada salvo en los
+  cortes), ambiente 3 568 color / 13 624 gris (la cámara cruda asoma por
+  encima del ambiente atenuado).
+- **Pistas separadas dibujadas como SEÑAL + regiones editables encima**
+  (`src/lib/envelope-cache.ts`, `src/components/parts/clip-waveform.tsx`,
+  `src/components/parts/audio-regions-context.tsx`). El usuario rechazó las
+  barras verdes planas y los paneles laterales "desalineados": ahora cada clip
+  de audio dibuja su envolvente (el mismo endpoint de 25 ms que Sync & Mix,
+  escala absoluta, × el volumen del clip para que subir/bajar se vea) en un
+  canvas dentro del clip — `ClipWaveform` cae en silencio si el endpoint no
+  sirve ese fichero (el `muxed_*.mp4` vive en export/, que el endpoint no
+  resuelve; los stems y `mix_sync.wav` sí). `envelope-cache` comparte UNA
+  petición por fichero y lleva `sync.audioRev` en la clave, así un re-mix
+  refresca la onda. Colores: mesa esmeralda sobre `bg-emerald-950`, ambiente
+  cielo sobre `bg-sky-950`, resto de audios verde oscuro; la etiqueta lleva
+  fondo negro para leerse sobre la onda.
+  **Regiones**: el estado del editor vive en `AudioRegionsProvider` (uno por
+  timeline, envolviendo la de Compose y la del reel) y se consume desde tres
+  sitios con el mismo contexto: `RegionBands kind` como overlay `z-20` dentro
+  del cuerpo de las pistas `a_mesa`/`a_amb` (`ra_*` en reels), la
+  `AudioRegionsLane` de reserva (solo se pinta cuando NO existen las pistas de
+  stems) y `RegionsApplyBar` bajo las pistas. **La lane de reserva también
+  DIBUJA la señal** (`RegionTrackWaveform`, 48 px por fila): era la vista que
+  el usuario tenía delante («sigo sin ver el dibujo en Mesa −dB / Ambiente
+  +dB») porque sus bandas planas eran lo único que se pintaba si no se pulsa
+  «Separar en pistas». Ahora cada fila reconstruye el stem sobre la timeline
+  (por parte y por clip de vídeo, `sourceIn = (t − concatStart_k) + trim_k`,
+  los cortes salen de los clips del editor) con el original en gris detrás,
+  reutilizando `ClipWaveform`. **Lápiz** (`RegionDrawLayer`): en la lane
+  de reserva siempre, y en las pistas de stems al activar el botón ✏ de la
+  cabecera (`drawKind` en el contexto, sustituye al ＋): arrastrar sobre la
+  pista crea una región con ese rango (`addRange`, mapeado por los clips de
+  vídeo; si cruza un corte se recorta a la parte), clic suelto = 0,8 s ahí.
+  La capa va a z-10 bajo las bandas (z-20) y sobre el clip, con
+  `preventDefault` en pointerdown para que el clip no arranque un move.
+  **Línea de ganancia aplicada** (`ClipWaveform`, cuando hay `behind`):
+  ámbar, `20·log10(procesada ÷ original)` por columna sobre picos de 25 ms
+  (solo donde el original supera −50 dBFS; huecos donde no), escala −36…+24
+  dB con raya punteada en 0 dB y etiquetas — es "todo lo modificado": cortes
+  je-je, nivelado, ducking, subidas y volumen de mezcla, sin necesitar el
+  `_ambgain.wav`. **Pistas de 96 px** (`src/lib/track-heights.ts`:
+  `trackHeightOf` — stems y lane de reserva 96, el resto 48; el arrastre
+  vertical de clips usa `rowDeltaForDy`, que recorre las alturas reales en
+  vez de `round(dy/48)`). **Controles de zona en la cabecera**
+  (`RegionKindControls`): dB (−40…+24, con signo — la mesa también puede
+  amplificar y el ambiente atenuar; la cadena ya era agnóstica al signo),
+  fade in/out (ms) y rampa lineal/curva; con una zona de esa pista
+  SELECCIONADA editan la zona (PATCH al salir del campo), si no editan los
+  valores con los que nacen las nuevas (por proyecto en localStorage
+  `audio-regions-defaults:<id>`). `fadeShape: 'curve'` = smoothstep w²(3−2w)
+  en `buildDuckVolumeExpr` (guardado con `st(0,…)` dentro de la condición de
+  un `if()` para que `ld(0)` se evalúe después — el orden de operandos de `*`
+  en la eval de FFmpeg no está garantizado); verificado offline con un seno
+  (meseta −20,0 dB exacta en ambos; en la rampa, lineal −1,4/−7,8 dB y
+  curva −0,8/−9,2 dB a u≈0,25/0,75 — la S arranca más suave y cae más
+  tarde; `volume=eval=frame` cuantiza la rampa por frame, de ahí lo grueso). Las
+  bandas se dibujan para AMBOS tipos como silueta de ganancia (`gainPolygon`:
+  base abajo si sube, arriba si atenúa; rampas rectas o en S).
+  **Zonas «sin subida» (`part.ambientNoRaiseRegions`, kind `noRaise`)**: el
+  usuario señaló una subida AUTOMÁTICA (del motor de curva, no una zona suya)
+  que quería quitar. Son regiones en el reloj de la cámara (como las de
+  subida manual) que `prepareAmbientGainCurve` pasa como `noRaiseRangesMs` y
+  `computeAmbientGainDb` aplica tras decidir las subidas y ANTES de los
+  desplazamientos de lookahead: `target.fill(lo)` en el rango, así ni la
+  subida anticipada se cuela (verificado con envolventes sintéticas: la pausa
+  con risa sube a +4,0 sin zona y queda a −8,0 con ella, la voz alrededor
+  intacta). PATCH `ambientNoRaiseRegions` (mismo drop a «aligned»), la
+  descripción de cadena las cuenta ("N zona(s) sin subida automática"). En
+  la timeline van como banda ROJA sobre el carril/pista de AMBIENTE; el
+  selector «subida / sin subir» de la cabecera de ambiente decide qué crean
+  el lápiz y el ＋ (`ambientNewKind` en el contexto); una zona roja
+  seleccionada no muestra dB/fades (no los tiene).
+  **Las subidas AUTOMÁTICAS son cajas (kind `autoRaise`)**: «en 23,3 s hay una
+  subida errónea y no aparece caja, así que no es eliminable». El motor
+  devuelve ahora sus decisiones (`raiseRangesMs` de `computeAmbientGainDb` =
+  tramos a `hi` tras el lookahead; `prepareAmbientGainCurve` los pasa al reloj
+  de cámara como `autoRaises`), el worker los persiste en
+  `part.ambientAutoRaises` (+`ambientAutoRaisesAt`) en cada curva completa, y
+  `POST /parts/[partId]/auto-raises` los calcula SIN mezclar (mismo análisis,
+  ~3 s, escribe el `_ambgain.wav`; en vuelo compartido) — el provider de la
+  timeline lo llama una vez por parte mezclada que aún no los tenga (mensaje
+  «Calculando las subidas automáticas…» en la barra). En la timeline salen en
+  el carril/pista de ambiente como caja azul DISCONTINUA «+N dB auto», seleccionable y
+  arrastrable (el gesto la convierte en zona tuya, ver más abajo); ✕ / Supr =
+  anularla con un veto «sin subida» de su mismo rango dibujado como contorno
+  tenue (la caja desaparece si un veto cubre ≥ la mitad; ✕ sobre el contorno la
+  devuelve). Tras re-mezclar la lista se
+  regenera y refleja los vetos (verificado sintético: [[4850,7900]] → con
+  veto [5500,7500] quedan [[4850,5500],[7500,7900]], los restos de rampa).
+  Se ocultan si `ambientDuckOnVoice` está apagado.
+  **PREVISIÓN al editar** (`src/lib/ambient-plan.ts`, `buildAmbientPlan`;
+  `ClipWaveform` prop `plan`; `ambientPlanFor`/`ambientPlanForFile` en el
+  contexto): el usuario decía «cuando elimino una subida automática debería
+  repintar, y al añadir una manual igual; he subido 20 dB y pinta menos que
+  la automática de 4». La onda de color y la línea ámbar salían de los STEMS
+  en disco, que no cambian hasta «Aplicar». Ahora, mientras una parte tenga
+  cambios sin aplicar (`dirtyParts` o `describeAmbientChain(part) !==
+  mixChainApplied.ambient`, que sobrevive a una recarga), la fila/pista de
+  ambiente dibuja la PREVISIÓN: onda = cámara cruda × ganancia prevista y
+  línea ámbar = esa ganancia (nivel con voz −duck en todas partes, +gapBoost
+  dentro de las subidas automáticas persistidas menos los vetos con rampas
+  release/attack, + cada zona manual × su rampa lineal/S, + volumen de
+  ambiente — los stems ya llevan el volumen, así que aplicado y previsto
+  comparten escala); la ganancia que llevan los ficheros queda punteada y
+  tenue, y arriba pone «previsión · pulsa Aplicar». Al aplicar, `dirtyParts`
+  se vacía, `audioRev` sube y se vuelve a dibujar lo real. Verificado con el
+  caso sintético: voz −4,5 (−8 + 3,5 de volumen ×1,5), subida +7,5, veto
+  −4,5, manual +20 → +15,5, mitad de rampa S +5,5. Las siluetas de las zonas
+  ESCALAN con los dB (`gainPolygon(..., db)`: alcance 30 % + |dB|/30 → +4 es
+  un escalón bajo, +20 casi llena, un veto de 0 dB es una tapa fina) y las
+  cajas automáticas van casi sin relleno (solo trazo discontinuo + cinta)
+  para no apilar tintes. La mesa NO tiene previsión (el nivelador no es
+  reproducible en cliente); sus zonas rojas ya muestran el corte.
+  OJO dev server: tras editar `audio-regions-lane.tsx` el watcher de Next NO
+  recompiló ese módulo (el chunk de compose llevaba el contexto nuevo pero la
+  lane vieja: dos contenedores de bandas en vez de tres, cero cajas con 193
+  entradas `autoRaise` en `placed`). Si un cambio no aparece con el bundle
+  "fresco", `touch` del fichero y recarga — se verificó por el fiber de React
+  (`dependencies.firstContext.memoizedValue`) antes de tocar nada.
+  **Disco lleno = mux truncado**: el 30-ago tenía 33 GB libres y un «Mezclar
+  y muxar el vídeo» (forceMux) se quedó sin espacio a los 22 GB de los 28,8
+  (`part_<id8>_muxed.mp4` truncado, job «perdido», 570 MB libres). Se
+  repuso clonando el vídeo final (`cp -c`, 0 bytes) y volvieron 21 GB. Un mux
+  completo necesita ~29 GB libres en ese proyecto; con menos, solo
+  «Re-mezclar (solo audio)» (fast path: no toca el vídeo). Las subidas de ambiente se
+  dibujan como la CURVA que son (polígono SVG: rampa `fadeInMs`, meseta, rampa
+  `fadeOutMs`, con `preserveAspectRatio="none"` y `non-scaling-stroke`); las
+  atenuaciones de mesa como banda roja con bordes. Solo la cinta superior
+  (15 px: seleccionar, mover, etiqueta, ✕) y las dos asas de la meseta toman
+  el puntero; el resto del overlay es `pointer-events-none` para que el clip
+  del stem siga siendo pulsable (volumen, corte). El arrastre engancha
+  `pointermove/up` en `window` mientras dura el gesto (sin captura de puntero,
+  que lanzaba con ids sintéticos); NO hacer `preventDefault()` en el
+  `pointerdown` de la cinta — suprime el click de compatibilidad y con él el
+  salto del cursor. El botón ＋ de cada pista de stem (cabecera) añade una
+  región en el cursor. Cuando el proyecto no tiene partes, el provider no se
+  monta y todo lo anterior renderiza null. Verificación pendiente del usuario
+  (pidió probarlo él).
+- **Atenuaciones y subidas EN LA TIMELINE de Compose y de Reels** (versión inicial, carriles propios)
+  (`src/lib/audio-region-map.ts` + `src/components/parts/audio-regions-lane.tsx`,
+  montado en `multi-track-timeline.tsx` y en `reel-timeline.tsx`). Dos carriles
+  bajo las pistas — "Mesa −dB" (las zonas je-je) y "Ambiente +dB" (las subidas
+  manuales de público) — con una banda por cambio: clic para seleccionar, ✕ o
+  Supr para borrarla, arrastrar el cuerpo para moverla y los bordes para
+  redimensionarla, y ＋ en la cabecera para añadir una en el cursor (800 ms,
+  con los dB de la última zona activa o −30 / +6). Cada edición hace PATCH a la
+  parte al momento; el audio NO cambia hasta pulsar "Aplicar (re-mezclar
+  audio)", que aparece en cuanto hay cambios sin aplicar y llama a
+  `applyPendingParts` (en `remix-ducking.ts`, compartido con PartsMixPanels
+  para que las dos vías no se desincronicen).
+  **«No se pudo aplicar — Partes sin procesar: Parte 2»**: la versión anterior
+  (`applyPartRemix`) re-mezclaba SOLO las partes de `dirtyParts` (estado en
+  memoria del navegador) y llamaba al concat DESPUÉS DE CADA UNA. Dibujar una
+  zona hace PATCH y baja la parte de «done» a «aligned», así que una zona
+  dibujada antes de recargar no deja rastro en `dirtyParts` — solo en el
+  estado — y el concat, que exige TODAS las partes mezcladas, fallaba
+  nombrando una parte que el usuario no había tocado ese día (caso real del
+  5-sep: la Parte 2 tenía 3 zonas je-je sin aplicar de una sesión anterior y
+  el usuario editaba la Parte 1). Ahora `partNeedsRemix(part)` en
+  part-chain-description (status ≠ done, o `mixSettingsChanged`: la cadena
+  actual ≠ `mixChainApplied`; falso si está procesándose o sin alinear) define
+  lo pendiente EN SERVIDOR, el contexto expone la UNIÓN con `dirtyParts` (así
+  la barra «Aplicar» reaparece tras recargar y la previsión se dibuja igual),
+  `applyPendingParts` las re-mezcla todas y une UNA sola vez al final — el
+  concat copia las partes enteras (10+ GB en un bolo real), hacerlo por parte
+  repetía todo eso para nada. Si alguna parte no tiene offset de alineación,
+  avisa por nombre ANTES de re-mezclar en vez de gastar minutos hacia un vídeo
+  que no se puede unir.
+  **WAV MAESTRO de los proyectos de varias partes + fast path multi-parte**
+  («¿la atenuación aplicada repinta la señal? ¿al borrar una subida se queda
+  pintada en medio? ¿hay que remezclar para escuchar?»). Tres causas: (1) en
+  multi-parte NADIE subía `sync.audioRev` (el worker solo en la rama de una
+  parte, el concat nunca), así que la caché de envolventes del cliente
+  (`envelope-cache`, clave con audioRev) seguía sirviendo los stems viejos y
+  la onda no repintaba tras Aplicar; (2) el fast path de audio exigía
+  `singlePart`, así que en multi-parte cada Aplicar re-muxaba la parte (GB) y
+  luego unía (10+ GB) — minutos para oír un cambio; (3) bajo la previsión se
+  dibujaba en punteado tenue la ganancia de los ficheros, y una subida recién
+  borrada seguía «pintada en medio». Ahora: `writeProjectMixWav` (part-worker)
+  escribe `audio/parts_mix_sync.wav` = las mezclas de todas las partes con
+  vídeo, en `order`, cada una recortada al `muxedAudioTrimMs` y RELLENADA/
+  cortada a EXACTAMENTE `muxedDurationMs` (`apad,atrim=end`: la mezcla acaba
+  ~100–150 ms antes que su muxed, cuyo vídeo se corta en un límite de paquete,
+  y el demuxer concat desplaza la siguiente parte por la duración del FICHERO
+  — una concatenación a pelo salió 285 ms corta en tres partes), una parte
+  solo-vídeo aporta la pista de su muxed; apunta `sync.mixedAudioPath` a él
+  con `muxedAudioOffsetMs 0` y sube `audioRev`. Lo reconstruye el worker tras
+  CADA mezcla de una parte (fast o completa; si no puede, sube audioRev igual)
+  y `runPartsConcat` al unir; se salta si la suma de duraciones no cuadra con
+  el vídeo unido (±80 ms: un offset cambió — hay que volver a unir) o falta
+  una mezcla. Verificado en el 5-sep: 1458,706 s exactos y +21 ms constantes
+  frente al audio embebido en las cuatro ventanas (inicio, medio y final de
+  la parte 3 incluidos) — el mismo priming AAC de la pista embebida, sin
+  deriva. El fast path ya no exige una sola parte (la vuelta a clonar el
+  muxed de la parte desde el final sí sigue siendo solo de una parte): re-mezcla
+  de la parte 2 (4:30) 9 s, de la parte 1 (13:23) 16 s, vídeo intacto. El job
+  devuelve `fastPath` y `applyPendingParts` solo UNE si alguna parte se
+  re-muxó de verdad; la tarjeta de unión avisa cuando el vídeo unido lleva
+  audio más viejo que la mezcla (Compose, Reels, export y transcripción ya
+  usan el wav maestro por el contrato single-pair). `loadComposition` re-apunta
+  a1 del muxed al wav cuando existe audio separado distinto del vídeo (una
+  composición guardada sin audio separado llevaba el mp4 y se quedaría con
+  el audio embebido viejo). `ClipWaveform` ya no pinta la línea tenue de la
+  ganancia aplicada bajo una previsión. Sigue sin haber escucha «en vivo» de
+  zonas sin aplicar: Aplicar es ahora la previa (segundos, solo audio).
+  **Los CIERRES de la puerta de mesa son cajas editables (kinds `autoGate` y
+  `keepOpen`)** — «esta zona que baja en el micro principal no me aparece
+  editable»: la línea ámbar se desploma al final de una frase porque la puerta
+  pre-calculada cierra −24 dB ahí, y no había nada que seleccionar ni vetar
+  (el ambiente sí tenía su pareja `autoRaise`/`noRaise` desde hacía tiempo).
+  Ahora es el MISMO patrón en el lado de la mesa. Motor:
+  `computeAmbientGainDb` acepta `keepOpenRangesMs` (reloj de envolvente, como
+  `mutedRangesMs`) y fuerza `gateVoice = 1` ahí DESPUÉS de `tidy` — antes no
+  vale: la limpieza borra los tramos de menos de 60 ms y se comería una zona
+  corta o recortada por el inicio de la ventana; solo se toca `gateVoice`, NO
+  la máscara `voice` del ambiente (los dos motores siguen desacoplados, y se
+  verificó que la del ambiente no cambia). `buildMesaGateDb` devuelve además
+  `closedRangesMs` = los tramos con `open == 0` ANTES de las rampas (la
+  DECISIÓN, igual que `raiseRangesMs` sale de `shifted`), descartando los de
+  menos de 50 ms, que no llegan a −24 dB a través del cierre de 250 ms.
+  `prepareAmbientGainCurve` los devuelve como `autoGates` en el reloj del wav
+  de MESA (+`regionOffsetMs`, el mismo desplazamiento que las zonas je-je, así
+  que la previa de 30 s cuadra) y **acotados a la mezcla audible**
+  (`min(keyDb, ambDb, rawDb) × hop`): en modo completo la envolvente de mesa
+  llega al final del mp3 de la cena entera, así que sin el tope salía una caja
+  de una hora. El worker persiste `boardAutoGates` (+`At`) junto a
+  `ambientAutoRaises`, vaciándolos si el nivelador está apagado, y la ruta
+  `/auto-raises` — que antes salía por la puerta de atrás cuando el duck
+  estaba apagado y NO pasaba el 7.º argumento `mesaGatePath`, por lo que jamás
+  construía la puerta — ahora corre si duck O nivelador están activos, pasa la
+  ruta del gate y devuelve `{autoRaises, autoGates}`. PATCH acepta
+  `boardKeepOpenRegions` como `ambientNoRaiseRegions` (baja «done» →
+  «aligned»), y `describeBoardChain` añade «N zona(s) de mesa siempre abierta»
+  SOLO cuando N > 0 (la cadena se compara byte a byte: un fragmento
+  incondicional marcaría «ajustes cambiados» en todas las partes ya
+  mezcladas). Cliente: `RegionKind` gana los dos tipos y `trimOf` pasa a un
+  `BOARD_KINDS` (board, keepOpen, autoGate → `boardTrimMs`; antes todo lo que
+  no fuera literalmente 'board' usaba el trim de CÁMARA y las cajas habrían
+  salido desplazadas el offset entero); `placeRegions` sintetiza las cajas de
+  puerta como las de subida (id `gate:<parte>:<i>`, se ocultan si una zona
+  verde cubre ≥ la mitad); el contexto añade `boardNewKind` («atenuar» /
+  «abrir») que gobierna el lápiz y el ＋ de la mesa, `remove()` sobre una caja
+  de puerta crea la zona verde con su mismo rango, y las cajas son de solo
+  lectura (sin asas, trazo discontinuo, cinta invisible bajo 8 px para que
+  decenas de cierres no formen una franja sólida). Montado en las tres
+  superficies (Compose, reel, carril de reserva). Medido en la parte 1 del
+  5-sep (13:23): **93 cierres, mediana 990 ms, 115 s de 803 (14 %)**, todos
+  dentro de la parte (el tope funciona), 62 caen dentro del montaje y 3
+  empiezan dentro de un corte (la caja arranca donde vuelve la imagen);
+  ida y vuelta del reloj exacta en los 62. Prueba de extremo a extremo sobre
+  el audio real: sobre un cierre de 1,57 s tras una frase, la mesa procesada
+  pasa de −94…−80 dB (puerta cerrada) a −16…−50 dB con la zona verde, con la
+  palabra floja de dentro subiendo de −43,9 a −20,3 dB; al quitarla, la parte
+  vuelve a «done» con una re-mezcla rápida (16 s, vídeo intacto).
+  **Las zonas de ambiente son NIVELES ABSOLUTOS que SUSTITUYEN a lo automático**
+  (`src/lib/ambient-bands.ts`; «a veces las zonas de +4 dB suenan mucho más
+  altas; al hacer editable desaparece el +4 y sale una banda de +26, la cambio a
+  22, aplico y reaparecen zonas de +4 que hacen picos sobre los 22; editar no
+  debería regenerar, y borrar debería borrar, no salir en rojo»). Antes una zona
+  manual SUMABA sobre la curva (base −duck con voz, +gapBoost en una subida):
+  «hacer editable» un +4 se guardaba como +12, el +6 dibujado a mano en una
+  pausa muda quedaba a −2 y encima de una subida a +10, y dos bandas
+  superpuestas se apilaban — números que nadie podía comparar con el «+4 dB
+  auto». Peor: la banda entraba en la RAMA DE AMBIENTE que alimenta las
+  envolventes del motor, así que la puerta de público leía la propia banda
+  (+12 dB, con sus rampas) como una risa y re-decidía una subida MÁS ANCHA
+  alrededor de ella; el veto solo tapaba el tramo antiguo y los 130–500 ms
+  sobrantes reaparecían como cajas «+4 dB auto» pegadas a la banda (parte 2 del
+  5-sep: 24 subidas persistidas, 5 reales). Ahora: (1) `attenuationDb` de una
+  zona = dB sobre el ambiente ORIGINAL en su meseta — la misma escala que la
+  caja — y dentro de su tramo (fundido por sus rampas, lineal o S) SUSTITUYE al
+  nivel que el motor decidió: `applyManualBandsDb` la hornea en la curva
+  pre-calculada DESPUÉS de las rampas (`gain = gain·(1−w) + dB·w`), y
+  `buildPartMixFilter` ya no mete la expresión `volume` en la rama de ambiente
+  cuando el duck está activo (con el duck apagado no hay curva y la expresión
+  sobre base 0 dB significa lo mismo); `buildAmbientPlan` hace idéntico cálculo
+  para la previsión. (2) Los vetos se aplican también DESPUÉS de los
+  desplazamientos de lookahead (el tramo persistido es post-desplazamiento) y
+  se descartan tramos subidos < 50 ms (medido: 30 ms de redondeo tras un veto,
+  < 1 dB por la rampa). (3) `materializeAutoRaise` («hacer editable», teclear
+  otro dB o arrastrar la caja) crea la zona con EL MISMO nivel y tramo — suena
+  igual hasta que la editas — y el veto sobre el tramo del motor lleva
+  `ownerId = zona`: no se dibuja nunca y se borra con la zona (`remove` de una
+  zona quita sus vetos), así que borrar la zona devuelve la automática en un
+  solo gesto. (4) ✕/Supr sobre una caja crea un veto `retiresAuto`: no es una
+  zona roja sino un CONTORNO tenue discontinuo («anulada», solo lectura, sin
+  asas) que se puede seleccionar y ✕ para recuperar la subida; las zonas «sin
+  subir» dibujadas a mano siguen en rojo. (5) `placeRegions` no coloca los vetos
+  con dueño y, mientras la parte espera re-mezcla (`partNeedsRemix`), oculta
+  las cajas ≤ 600 ms pegadas (±150 ms) a un veto nacido de una caja — los restos
+  de la mezcla anterior; una vez mezclada, lo persistido es lo que suena y se
+  muestra todo. (6) Tooltips: la caja dice «+4 dB sobre el ambiente original (12
+  dB por encima del nivel con voz, −8)» — ese salto de 12 es lo que el oído
+  nota como «mucho más de 4». **Migración** (`migrateAmbientBands`, en
+  `migrateProject` de project-manager, en cada lectura hasta que la primera
+  escritura persiste `ambientBandsAbsolute: true`): cada zona pasa al nivel que
+  REALMENTE producía en el centro de su meseta (base + todas las zonas que
+  cubren ese punto) y cada veto con ≥ la mitad bajo una zona queda enlazado a
+  ella. Verificado en seco sobre el 5-sep (35/17/14 zonas): +12→+4 (las
+  editables), +6 sobre subida→+10, +6 en pausa muda→−2, diferencia 0,00 dB en el
+  centro de todas las zonas de las partes 2 y 3; en la parte 1 solo difieren dos
+  parejas de bandas +12 superpuestas a medias (duplicados: 0,5 s a +4 en vez de
+  +16). `describeAmbientChain` dice ahora «N zona(s) de nivel manual», así que
+  las partes mezcladas con el significado antiguo piden re-mezcla (correcto:
+  cambian rampas y solapes). Verificado con el planificador (18 casos: misma
+  zona +4 = 4,0; +6 = 6,0; alargada +4/+9 en el tramo nuevo; −20; mitad de
+  rampa lineal y S = −2,0; anulada = −8,0; volumen ×0,5 = −2,0), con el motor
+  sintético (veto sobre el tramo persistido → cero restos; +4/+6/−20 exactos;
+  alargada 3 s sobre la voz → +4 y −8 tras la rampa) y con el motor REAL sobre
+  la parte 2 (2,9 s): las 17 zonas clavan su meseta (4,0/6,0/16,0/20,0/22,0),
+  −8,0 a 300 ms de cada lado y ninguna subida automática en ±0,7 s de una zona
+  que sustituye a una automática.
+  **PISTA ACTIVA para pegar** (`src/lib/track-compat.ts`, `activeTrackId` en
+  los dos stores) — «al pegar un audio cortado de otro reel lo primero necesito
+  marcar la pista donde se va a pegar»: pulsar una cabecera (o un clip, o el
+  cuerpo de la pista) la marca con un filo azul, y Ctrl+V lleva ahí lo copiado
+  si el tipo encaja. `resolvePasteTrackId` centraliza la regla — pista activa
+  desbloqueada y compatible → ella; si no, la pista original del clip (lo de
+  siempre, byte a byte); si esa pista no existe en el destino → la primera
+  compatible desbloqueada, que arregla el clip copiado desde un reel con una
+  `ra3` que aquí no existe y que antes quedaba invisible pero sonaba en el
+  export. La usan `pasteClips` Y `rippleInsertAtPlayhead` en Compose y en
+  reels, así que Ctrl+V y Ctrl+Alt+V nunca discrepan; `clipFitsTrack` deja de
+  estar duplicada en los dos clip components. `activeTrackId` es estado de UI:
+  fuera del undo, fuera de project.json, y se limpia al cambiar de reel o al
+  cargar una composición (un id repetido entre reels apuntaría a otra pista).
+  Verificado con 7 casos: audio→pista de stems activa, vídeo que no se mueve
+  con una de audio activa, activa bloqueada → pista original, sin activa →
+  comportamiento anterior, huérfana → primera compatible.
+  **ONDA de los clips que apuntan al VÍDEO MUXADO** (`src/server/project-media.ts`):
+  el endpoint de envolvente solo resolvía `audio/` y `source/`, así que un clip
+  cuyo `fileName` es `muxed_<ts>.mp4` (el audio principal de Compose, y todo lo
+  pegado desde otro reel) devolvía 404 y `ClipWaveform` no pintaba nada, en
+  silencio. `resolveProjectMediaPath` unifica el orden de las dos rutas
+  (`audio/` → `export/` → `source/` → raíz del proyecto) y añade el rescate del
+  NOMBRE VIEJO: al unir las partes se escribe un `muxed_<ts>.mp4` nuevo y se
+  borra el anterior, pero los clips conservan el nombre con el que nacieron —
+  el reloj del vídeo unido es invariante por construcción, así que un
+  `muxed_*.mp4` que ya no existe se sirve como el `sync.muxedVideoPath` actual.
+  Medido en el 5-sep (cuyos 11 clips llevan `muxed_1788882941318.mp4`, borrado
+  hace dos uniones): 5,1 s la primera vez, 0,11 s cacheado, 343 KB de JSON,
+  1458,5 s de duración (= `muxedDurationMs` dentro de un hop) y el nombre viejo
+  devuelve el mismo envelope. El decodificado añade `-vn -map 0:a:0` (el coste
+  va con la DURACIÓN, no con los bytes: el demuxer se salta el vídeo) y la
+  caché de lo que no vive en `audio/` se escribe en `audio/`.
+  **ZONAS DE VOLUMEN por clip** (`ClipGainRegion` en types, `src/lib/clip-gain.ts`,
+  `ClipGainPanel` y `ClipGainBands` en components/shared) — «poder aplicar
+  amplificación/reducción» sobre un clip pegado: cada clip de audio acepta
+  zonas con sus dB, rampas y forma, en el reloj DEL FICHERO (el mismo que
+  `sourceInMs`), así que cortar el clip o hacer ripple no remapea nada. La
+  previa las aplica en vivo (`regionGainAt`, espejo JS de `buildDuckVolumeExpr`)
+  y el export las renderiza con el mismo filtro: en `renderReelVideo` la capa
+  extra pasa a `volume=<vol>,volume='<expr>':eval=frame,afade,adelay` — ANTES
+  del `adelay`, donde `t` sigue siendo relativa al clip. Un clip que cruza
+  varios cortes se exporta en un segmento por ventana, y las zonas se desplazan
+  por el seek DE ESE SEGMENTO. Sin zonas, `buildDuckVolumeExpr` devuelve null y
+  el grafo sale idéntico al de siempre. `maxClipGain` decide el camino Web
+  Audio de Remotion (un `<audio>` no pasa de ×1) y se calcula una sola vez para
+  que no cambie a media reproducción. Verificado con un tono: mesetas exactas
+  (−20,00 y +6,00 dB), y con la cadena completa incluido `adelay` la zona cae
+  sobre las muestras correctas del fichero (meseta −18,0 dB clavada); las
+  rampas difieren ≤ 0,9 dB por la cuantización de `eval=frame`. Las zonas viajan
+  de Compose al reel en `buildReelExtraAudioClips`.
+  **Los cuatro relojes** (`audio-region-map.ts`, con ida y vuelta verificada):
+  reloj del wav de la región → −trim de alineación (mesa: max(0, offset),
+  cámara: max(0, −offset)) → reloj de MEZCLA → −`muxedAudioTrimMs` → local del
+  muxed → +inicio de la parte en el concat → `sourceInMs` de los clips →
+  timeline, atravesando los cortes con `sourceRangeToTimelineSpans`. Por eso
+  una zona partida por un corte se dibuja en DOS bandas y una zona que el
+  usuario cortó fuera del montaje no se dibuja (verificado con un caso de dos
+  partes, offsets −2 s / +4 s y mux trim 300 ms). Compose pasa sus clips de v1
+  y Reels los de rv1 del reel activo, así que cada editor lo ve con sus
+  propios cortes. Los carriles solo aparecen en proyectos de PARTES.
+  OJO: `setPointerCapture` lanza si el id de puntero no está activo — va en
+  try/catch o el arrastre se rompe (así fallaba bajo automatización). Y las
+  bandas se recortan por `viewportWidthPx`, no por una constante.
+- **Borrar zona sobre la onda** — clic en una banda la selecciona y aparece
+  un botón rojo "borrar zona" pegado a ella (overlay HTML posicionado con la
+  vista actual); Supr/Retroceso con el bloque enfocado también borra. El
+  contenedor con `tabIndex` envuelve canvas + lista; el handler ignora
+  teclas cuyo target es input/audio/select.
+- **Revisión je-je en la UI (BoardDuckingPanel)** — el filtro previo va
+  como PASO 1 dentro del bloque Mesa, ANTES de nivelar (en la cadena FFmpeg
+  el duck ya iba antes del leveler; la UI ahora lo muestra así: "el filtro va
+  antes para que el nivelador no suba los je-je como frases flojas").
+  Pinchar una fila = audición automática (½ s antes → ½ s después, auto-
+  pausa vía `stopAtMsRef` en el loop rAF), botones ✓/✗ por fila (✓ =
+  `enabled` → se atenúa Y es positivo de "Buscar parecidos"; ✗ = intacto Y
+  negativo), chips de confianza y "N pulsos · cada X ms · Y dB bajo la voz",
+  y teclado con la lista enfocada (↑/↓, espacio, S/Y/J = ✓, N = ✗, avanza).
+- **Lectura de niveles y curvas** — `src/lib/level-stats.ts`
+  (`computeLevelStats`: ruido = p10 de la envolvente, voz = tramos ≥ ruido+12,
+  típica = p50, fuerte = p95, pico) alimenta cada `TrackRow` (ahora 72 px con
+  guías 0/−6/−12/−24 dB etiquetadas): las filas procesadas muestran
+  "orig → proc: típica −38→−20 (+18) · fuerte … · pico … · ruido …" medido
+  sobre la MISMA ventana, y una línea "aplicado: …" con la cadena exacta
+  (`src/lib/part-chain-description.ts`, espejo de `buildPartMixFilter` —
+  mantener sincronizados). `LevelerCurve` (SVG) dibuja la curva del
+  nivelador desde los MISMOS breakpoints que el compand
+  (`src/lib/leveler-curve.ts`, importado por audio-duck.ts) anclada al LUFS
+  medido, que ahora se persiste en `part.boardLUFS` (worker y preview lo
+  miden siempre, cacheado por mtime) y sitúa típica/fuerte/pico de la cruda
+  sobre la curva ("−38 → −20").
+- **Ducking del ambiente = ENVOLVENTE PRE-CALCULADA, no compresor**
+  (`src/server/ambient-gain-curve.ts` + `prepareAmbientGainCurve` en
+  part-mix-chain). Un sidechaincompress es REACTIVO: no sabe si el hueco que
+  empieza durará 150 ms (entre palabras) o 3 s (fin de frase), ni si el
+  público está riendo — por eso subía el ambiente entre palabras y metía
+  "ruido de fondo en la frase" pese a hold/release. Como el audio ya está en
+  disco, ahora se calcula la ganancia por adelantado y se aplica con
+  `amultiply` (la curva va como TERCER input, wav mono 8 kHz 0..1 escalado por
+  `gainMax`, re-multiplicado con `volume=gainMax`; `writeGainCurveWav` la
+  interpola por hop y la rellena hasta el final del ambiente):
+  1. **voz** = mesa YA PROCESADA (post filtro je-je + nivelador) sobre el
+     umbral; se borran blips < 60 ms y se RELLENAN los huecos < `pausa mínima`
+     → los huecos entre palabras son parte de la frase y no suben nada;
+  2. **puerta de público** (`ambientGateDb`, 0–30, def 6), decidida POR PAUSA
+     COMPLETA, no hop a hop: una pausa sube ENTERA (hasta el último instante
+     con público + 1 s de cola) si el ambiente suavizado (±200 ms) supera esos
+     dB sobre el ruido de sala en al menos el 15 % de la pausa; si no, no sube
+     nada. La primera versión decidía instante a instante contra un percentil
+     10 RODANTE (±5 s) y eso troceaba las risas: medido en la grabación real,
+     131 de 228 pausas subían menos de la mitad de su duración (mediana 47 %,
+     25 con varios sube-baja dentro de la misma pausa) — el usuario lo vio como
+     "en el segundo 6 el ambiente solo sube un intervalo pequeño". Con la
+     decisión por pausa y el suelo GLOBAL (p10 de toda la grabación; durante la
+     voz la cámara está alta, así que un p10 local no es "silencio"): 127
+     enteras / 4 parciales / 97 sin subir, mediana 92 %, cero troceos.
+     Sensibilidad medida (misma grabación): 0 dB → 228 pausas (8,3/min) ·
+     3 → 180 (6,6) · 6 → 131 (4,8) · 9 → 86 (3,1) · 12 → 32 (1,2). El suelo
+     medido se persiste en `part.ambientRoomFloorDb` y la vista previa lo
+     reutiliza — el p10 de una ventana de 30 s se desvía entre −2,3 y +3,2 dB
+     del real, lo que cambiaría qué pausas pasan la puerta;
+  1·b **qué es «voz»: comparación de los DOS micros, no un umbral sobre la
+     mesa nivelada** (`crossMicRawDb` en `computeAmbientGainDb`; el chain
+     builder expone `rawBoardBranch` = mesa con el duck je-je y el trim pero
+     SIN nivelador ni ganancia). El usuario veía "tramos sin voz con risas
+     donde el ambiente no entra": medido en la grabación real, en 372 de 435
+     tramos de público fuerte la mesa PROCESADA superaba el umbral (−33 dB)
+     porque el nivelador sube el público que se cuela en el micro de mesa
+     (crudo −46 → nivelado −27) hasta nivel de voz — la pausa se tomaba por
+     voz y el ambiente no subía. La RELACIÓN entre micros sí distingue quién
+     suena, sin importar cuánto: en voz, mesa−cámara ≈ −16 dB (p10 −18); en
+     risas ≈ −31 (p90 −28). Regla: voz ⇔ (mesa − cámara) > delta − 6 dB ∧
+     mesa > suelo + 6, sobre envolventes suavizadas 100 ms; delta = mediana
+     de mesa−cámara en el 30 % más alto de la mesa, suelo = p10 de la mesa
+     (calibración del run completo, persistida en la parte como
+     `ambientVoiceCalib{Delta,Floor,Loud}Db` y reutilizada por la vista
+     previa — una ventana de 30 s no puede calibrarse sola; verificado:
+     previa vs completo 0,00 dB). Override: mesa sostenida ≥ 400 ms (sobre la
+     suavizada) por encima de su nivel alto (p85) − 4 dB cuenta como voz
+     aunque el cómico grite sobre una carcajada que ahoga a la cámara;
+     ráfagas más cortas («¡eh!» dentro de una risa) siguen siendo pausa a
+     propósito — la risa sigue arriba y la mesa no se atenúa igualmente.
+     Resultado real (proxy independiente: mesa cruda < −38 dB ≥ 0,8 s con
+     público): pausas con público que SUBEN 16/74 → **62/74**; tramos de voz
+     clara (≥ 0,3 s) con ambiente arriba 7/124 (los 7 son ráfagas ≤ 0,66 s o
+     la subida anticipada). Margen medido: Δ 6 → 62 libres, 8 → 50, 12 → 23,
+     falsas pausas 0 en todos. La regla por umbral sigue como reserva cuando
+     no se pasa `crossMicRawDb` (harness `curve_harness.ts`).
+  2·a **hace falta un EVENTO de público, no un parpadeo** (el "¿por qué se
+     amplifica en 14:04 si la voz sigue y el ambiente no ha subido?"). El test
+     de la puerta era "por encima del listón durante el 15 % de la pausa" y NO
+     exigía continuidad, así que un destello de 0,2 s levantaba 1,6 s enteros.
+     Ahora una pausa solo sube si contiene UNA hinchada CONTINUA que pase
+     `eventBar` (= gateDb acotado a [6, 8] dB sobre el suelo de sala) durante
+     ≥ 500 ms y con ≥ 700 dB·ms de área. Medido en la grabación real: los dos
+     puntos que el usuario señaló puntúan 200 ms/108 dB·ms y 150 ms/136,
+     mientras las risas de verdad a pocos segundos puntúan 1370/6665 y
+     1400/8235 — separación limpia. Además la subida se ANCLA al evento: si la
+     risa llega dentro de los 600 ms siguientes al fin de la frase se sube
+     desde el principio de la pausa (para que la subida anticipada siga
+     metiendo la risa bajo las últimas palabras); si llega más tarde, se sube
+     DESDE la risa. Y el final de la subida usa el mismo `eventBar`, no
+     `gateDb`, así que con una puerta baja ya no se arrastra por el final
+     muerto de la pausa. Resultado sobre las 27 min reales, con las mismas
+     preferencias del usuario: subidas 239 → 149 (11,8 → 7,4/min); de esas,
+     las que contienen público real ≥ 0,3 s pasan del 38 % al 61 %; las
+     subidas con < 30 % de público 119 → 22; el público queda con el ambiente
+     ARRIBA en 88/105 → 94/105 de las risas del proxy independiente (mesa
+     cruda < −38 dB ≥ 0,8 s con cámara ≥ suelo+8) — es decir, MÁS recall y
+     MENOS falsos positivos a la vez. Los dos puntos denunciados quedan planos
+     a −22 dB y las risas contiguas siguen a +4.
+  2·c **todas las estadísticas se miden solo donde hay señal** (`validN`): la
+     cámara graba toda la noche y la mesa solo el bolo, así que `n` = max(len)
+     corría ~7 min más allá del final de la mesa repitiendo su última muestra
+     por el clamp de `at()`. Eran el 21 % de las muestras y arrastraban hacia
+     abajo los percentiles de calibración y el suelo de sala (un suelo más
+     bajo abre la puerta con ruido de sala). Ahora `pct()` recorta al solape
+     real. La mezcla es `amix duration=shortest`, así que esa cola nunca se
+     oye.
+  2·b **una zona je-je marcada = HUECO por definición** (`mutedRangesMs`):
+     antes, atenuar un tramo solo lo convertía en pausa si el resultado caía
+     bajo el umbral de voz — con la mesa del usuario (voz procesada ≈ −13 dB,
+     umbral −33) sus 162 zonas a −30 dB sí lo lograban pero una a −18 dB NO,
+     una dependencia invisible del valor de atenuación. Ahora
+     `prepareAmbientGainCurve` pasa las zonas ACTIVAS (con
+     `attenuationDb ≤ −1`) desplazadas al reloj de las envolventes
+     (`o.window ? base.boardInputSeekSec : o.boardTrimSec`) y la curva pone
+     voz=0 ahí. Caso del usuario: risa larga con el cómico hablando encima →
+     marcas esos trozos y la risa sube ENTERA. Verificado con FFmpeg real:
+     sin marcar, el ambiente cae a −11 dB en cada intervención; marcado a
+     solo −18 dB, se mantiene +6.0 dB toda la risa.
+  3. **subida anticipada** (`ambientPreRiseMs`, 0–1000, def 150): si la pausa
+     que sigue a la frase pasa la puerta, la rampa arranca `preRise` ms ANTES
+     de que la voz acabe — la risa entra bajo las últimas palabras en vez de
+     saltar después ("no pasa nada por mezclar voz y risa más alta");
+  4. rampas por limitación de pendiente: sube en `release`, baja en `attack`,
+     y la bajada se adelanta `anticipate` al inicio de la voz.
+  Verificado en FFmpeg real con un set sintético (frases de 4 palabras,
+  pausas con risa y una CALLADA): huecos entre palabras −12.0 dB clavados
+  (cero bombeo), pausas con risa +6.0, pausa callada −12.0 (la puerta
+  funciona), y la subida empieza 250 ms antes del fin de la voz (−10.9 →
+  −6.5 → −2.3 → +2.6 al acabar). Coste medido en la grabación REAL de 27 min:
+  **3,4 s** (dos decodificaciones a 8 kHz + JS); la vista previa de 30 s sigue
+  en 0,8 s. Barrido sobre esa grabación real (por qué la recomendación es
+  800 ms): pausa mínima 200 ms → 452 subidas (16,6/min, el bombeo que oía el
+  usuario); 400 → 9,4/min; 600 → 6,6/min; **800 → 5,1/min**; 1200 → 3,5/min;
+  la puerta de 6 dB descarta ~12 % de las pausas (las calladas) y baja el
+  tiempo con ambiente arriba del 32 % al 21 %. Botón "valores recomendados" =
+  anticipa 100 · ataque 20 · pausa mínima 800 · vuelve 400 · sube 250 ms
+  antes · puerta 6 dB. El camino sidechain antiguo sigue en `audio-duck.ts` como
+  reserva (se usa si el llamante no pasa curva) y la curva se guarda en
+  `audio/part_<id8>_ambgain.wav` (~26 MB en 27 min, útil para depurar).
+- **Ducking del ambiente (sidechain, reserva): ataque, PAUSA MÍNIMA y subida en huecos** —
+  `ambientVoiceAttackMs` (5–500, def 15; attack del sidechaincompress),
+  `ambientVoiceHoldMs` = "pausa mínima" (0–2000, **def 600**; en la CLAVE:
+  copia retardada `adelay=hold+anticipate` sumada con `amix normalize=0` —
+  el compresor sigue "viendo" voz hasta exactamente H ms después del fin
+  REAL de la voz, independientemente del lookahead). ES EL PARÁMETRO QUE
+  EVITA EL BOMBEO: el usuario tenía hold 0 + vuelve 50 y el ambiente
+  saltaba a +4 dB en cada hueco de 150 ms entre palabras ("ruido de fondo en
+  la frase"); medido con una frase sintética de 5 palabras: con 600/400 los
+  huecos quedan a −7…−10 dB y el ambiente sube solo tras 600 ms de silencio
+  (fin de frase o je-je atenuado — la clave es la mesa YA filtrada, así que
+  un je-je atenuado cuenta como pausa), llegando a +6 en ~1 s. Botón
+  "valores recomendados" (anticipa 100 · ataque 20 · pausa 600 · vuelve 400)
+  junto a los campos. Y
+  `ambientGapBoostDb` (0–12, def 0; `volume=+G dB` en la rama ambiente antes
+  del split y el suelo α profundizado en G, así huecos = +G y voz = −depth
+  respecto al ORIGINAL). `AmbientDuckDiagram` (SVG, no a escala) etiqueta
+  cada tramo con su valor. Verificado en FFmpeg real con voz sintética a
+  −21 dBFS: huecos +6.0 exacto, con voz −9.4…−11.3 (ajuste 12; residuo del
+  sidechain), hold 500 mantiene −9.7 hasta 5.5 s y "vuelve" 300 recupera a
+  5.8 s. OJO harness: la fuente `sine` de lavfi sale a ⅛ de amplitud (una
+  "voz" a `volume=0.1` queda a −41 dBFS, bajo el umbral y parece que el
+  duck no hace nada) y en zsh `env $v cmd` con `v="A=1 B=2"` NO separa
+  palabras (B se pierde y A vale "1 B=2" → NaN) — usar asignaciones
+  explícitas.
+- **Perf: `<details>` NO evita el montaje** — los hijos de un `<details>`
+  cerrado se montan y ejecutan sus effects igual. Los paneles je-je/ambiente de
+  PartsMixPanels descargaban ~0.5-1 MB de envelopes en CADA visita a
+  compose/reels sin abrirlos; ahora el contenido va tras un flag de estado
+  `onToggle` (lazy-mount). Mismo patrón para cualquier panel caro en acordeón.
+  Relacionados (misma sesión de caza de "pesadez"): TrackRow debe depender de
+  las PRIMITIVAS de `behind` (`fileName`/`offsetSec`), nunca del objeto inline
+  (identidad nueva por render → redibujado completo del waveform en cada evento
+  SSE); los callbacks de `useSSE` en board-ducking-panel van en `useCallback`
+  (inline = EventSource recreado ~60/s durante reproducción con detección en
+  marcha); y el `cancel()` del route SSE llama a `cleanup()` (antes filtraba la
+  suscripción + heartbeat hasta 15 s por conexión abandonada); loadFillers
+  omite el fetch de `fillersUrl` cuando es idéntica a `envelopeUrl` (el panel
+  boost pasaba la misma URL en ambos).
+- **Subtítulos de reel «picados» por frases** (`splitSegmentsWithConstraints`,
+  `chopOne`/`chunkSentence` en `src/lib/subtitle-utils.ts`; `SubtitleConstraints`
+  gana `splitMode: 'clasico' | 'picado' | 'remate'` y `maxWordsPerBlock`;
+  `REEL_DEFAULT_CONSTRAINTS` = picado, 3 palabras, 20 chars). El usuario pidió
+  bloques de ≤ 3 palabras con sentido gramatical (nunca artículo/posesivo/
+  preposición separado de lo que sigue), alineados con las frases y de una
+  sola línea, y un modo para comedia con la(s) última(s) palabra(s) sueltas.
+  Cómo: tokens = las `words` con tiempo (o el texto repartido por caracteres
+  si faltan/son inconsistentes; los tokens sin letras se pegan al anterior);
+  primero se corta en FRASES (puntuación final o pausa ≥ 700 ms), y dentro de
+  cada frase una programación dinámica elige los cortes: +40 por cortar tras
+  palabra pegajosa (`SPANISH_GLUE_WORDS` + adverbios de grado, subordinantes
+  y clíticos; una palabra con coma detrás nunca es pegajosa; dos palabras en
+  mayúscula seguidas = nombre, también pegadas), −6 por cortar en coma/pausa
+  ≥ 300 ms/antes de «¿¡», +2 por palabra que falte para llenar el bloque, +6
+  por palabra huérfana sin pausa, y se admite UNA palabra de más (+14) para
+  no romper «Te lo ha dicho»; límites duros: chars (una línea) y duración.
+  «remate» aísla la última unidad de cada frase de ≥ 4 palabras (última
+  palabra + sus pegajosas: «de mierda.», «soy Diego Dueño.»). Cada bloque se
+  mantiene en pantalla hasta el siguiente si el hueco es < 500 ms. Los
+  segmentos que ya cumplen se dejan intactos (sobreviven las ediciones);
+  `segmentViolates` cuenta también el exceso de palabras. Compose y
+  transcripción siguen en clásico (`splitMode` indefinido). Muestra real:
+  «No, | voy a contar | otras cosas. | Vamos a hablar | de los venezolanos |
+  de mierda. | Te lo ha dicho | y, | claro, viene | todos los días | y yo,
+  pues | como soy el dueño, | soy Diego Dueño.» Selector «Troceo» + «Máx.
+  palabras» en los dos paneles de subtítulos de reels (setup y timeline). **Botón
+  «Strip .,»** (`stripReelSubtitlePunctuation` en reel-store, una entrada de
+  undo; no-op si nada cambia — `stripTrailingPunctuation` devuelve la MISMA
+  referencia para un segmento intacto, así que se compara por identidad y no
+  se ensucia el autoguardado): quita el `.,;:` FINAL de cada bloque, en el
+  texto y en la última palabra del array `words` (que es lo que pinta el ASS),
+  sin tocar los signos interiores. Está en la cabecera de la lista de
+  subtítulos de la fase timeline y junto a «Regenerate» en el panel de setup —
+  el picado corta a media frase, así que la mayoría de bloques acaban en una
+  coma que el espectador no necesita leer. Ya existía en Compose y en la
+  página de subtítulos; en reels solo estaba en `reel-editor.tsx`, que NO se
+  monta en ninguna parte (código muerto desde que la edición pasó a
+  `reel-layout` + `reel-timeline-view`). Verificado con el troceado real:
+  13 bloques → 6 cambiados («No,»→«No», «soy Diego Dueño.»→«soy Diego
+  Dueño»), tiempos intactos, idempotente, «claro, viene» y «y yo, pues»
+  conservan su coma interior.
+- **Bits de Reels desde una VERSIÓN CON NOMBRE de Compose** («guardar
+  versiones de compose con nombre y recuperarlas al generar los bits»). Las
+  versiones ya existían (`ComposeVersion`, ahora en types/project.ts y
+  re-exportada por compose-store; botón marcador de la barra de Compose →
+  `composition.versions`, con clips, subtítulos y estilo de ESE momento). Lo
+  nuevo: el selector de fuente del detector de bits en Reels ofrece «Compose
+  (actual)», una entrada «Versión: <nombre>» por cada versión guardada y
+  «Vídeo completo»; `POST /bits` acepta `source: 'version'` + `versionId` y
+  detecta sobre los clips v1 y los `subtitleSegments` de la versión (ambos en
+  el reloj de esa versión, igual que compose + transcripción para el actual),
+  mapea `sourceStart/EndMs` con esos clips y persiste `project.bitsSource`
+  {kind, versionId, versionLabel, detectedAt}. El panel dice «Detectados sobre:
+  …» y mide la cobertura con los cortes de la versión; «Create Reel» pasa esos
+  clips y un `origin` a `createReel`, que marca el reel con
+  `composeVersionId/Label` y corta los subtítulos de la versión (helper
+  `segmentsForReel`: también en `enterTimelinePhase`, `resetTimeline` y
+  `syncReelSubtitlesFromBase`; el store guarda `composeVersions`, que la página
+  de reels refresca desde el proyecto). En la fase setup el reel usa los clips
+  de su versión (trim bar, audio extra, construcción de la timeline) y muestra
+  «Cortes de la versión de Compose «x»»; `baseDurationMs` toma el máximo entre
+  el compose actual y las versiones para que la barra de recorte no capé un
+  reel de una versión más larga. Si la versión se borra, el panel avisa y los
+  reels ya creados conservan sus clips (los subtítulos caen a la transcripción
+  actual). Verificado solo con tsc/eslint (sin harness: es cableado de UI).
+- **TRAMOS de una parte: qué trozo del vídeo se edita y dónde cae en la mesa**
+  (`part.videoRangeMs` / `part.boardRangeMs`, `src/lib/part-trims.ts`; «quiero
+  editar el vídeo entre 19:00 y 50:00 y el ambiente entre 70:00 y 101:00; el
+  dibujo es confuso y el remix mezcla las pistas mal»). Antes la única acotación
+  era la «ventana de búsqueda» del OFFSET (`alignSearch*Ms`), que el usuario
+  leía como «estas son las pistas»: puso 70:00–100:00 pensando en la mesa, eso
+  obligó al offset a ser ≥ 70:00 y el alineador enganchó un pico falso a 71:38
+  (8,7× el ruido); el offset real es 60:03 (31,5×), medido con los tramos.
+  Ahora: (1) **Vídeo: editar de A a B** — la parte ES ese tramo: `partTrims`
+  devuelve `ambientTrimMs = max(A, max(0, −offset))`, `boardTrimMs = ambientTrim
+  + offset` y `capMs = B − ambientTrim`, y lo usan el worker (mezcla con `-t`,
+  stems, mux con seek al keyframe ≥ A como el caso «cámara antes»), la previa
+  de 30 s, la ruta auto-raises, `partWindows` (relojes de las zonas en la
+  timeline), `stemOriginalOf` (onda gris) y el «Ir al playhead» de los paneles
+  je-je; cambiar el tramo baja «done» → «aligned» (el offset es de los FICHEROS
+  y sigue valiendo), y el fast path de solo-audio comprueba `muxedForRangeKey`
+  además del offset. Una parte solo-vídeo también recorta con `-ss/-t`.
+  (2) **Mesa: ese tramo cae entre C y D** — solo orienta al Realinear: el
+  worker corta con ffmpeg el tramo del vídeo y el de la mesa (±60 s de holgura)
+  en `part_<id8>_align_{cam,board}.wav`, alinea los dos EXTRACTOS y convierte el
+  offset del extracto al de fichero (`+ (origenMesa − origenCámara)`); la
+  ventana `alignSearch*` antigua, si existe, se traslada al reloj de los
+  extractos. El JSON de alineación guarda las envolventes de los extractos MÁS
+  `mic_origin_s`, `camera_origin_s`, `*_file_duration_s`, `video_range_s`,
+  `board_range_s`, `excerpt_offset_ms` y el `offset_ms` de fichero, y el PATCH
+  de offset manual recalcula el solape con los orígenes. (3) **Dibujo**
+  (`AlignmentView`): frase «Se edita: vídeo 19:00–50:00 ↔ mesa 79:03–110:03 ·
+  31:00» (avisa si cae fuera del tramo de mesa indicado); «Antes» dibuja cada
+  fichero ENTERO como barra gris con la envolvente analizada en su sitio y la
+  franja ámbar «vídeo: se edita»; «Después» va en el reloj de la mesa con eje de
+  tiempos (mm:ss) y la franja ámbar «se edita este tramo» = exactamente lo que
+  la parte mezcla y muxa. La fila de la ventana de offset desaparece de la UI
+  (los campos siguen en el tipo). Medido en el 18-sep: extractos 31 min + 33 min
+  → 10 s de correlación, offset 60:03,0, 31,5× (antes 71:38,9 a 8,7×); la
+  estimación de mesa del usuario iba 9 min corta y aun así el solape de 23 min
+  bastó. tsc/eslint limpios; el dibujo no se comprobó en pantalla.
+- **La PUERTA DE MESA es opt-in (`part.boardGate`, por defecto OFF)** — «no
+  quiero puertas de mute en la pista de mesa: las elimino siempre en edición;
+  lo que cuenta es atenuar el ambiente mientras hay voz». `prepareAmbientGainCurve`
+  solo construye la puerta con nivelador + `boardGate`; sin ella el nivelador va
+  sin `gated`, no hay `boardAutoGates` (el worker los vacía), `placeRegions` no
+  dibuja cajas de puerta, el selector «atenuar/abrir» de la mesa se reduce a
+  «atenuar» y `describeBoardChain` omite el fragmento (las partes mezcladas con
+  la puerta implícita piden una re-mezcla: correcto). Casilla en el bloque Mesa,
+  bajo «Nivelar voz». El comprobador de oído acepta `rangeMs` (el tramo de vídeo
+  de la parte): reproduce solo ese tramo y para al final, como hará la mezcla.
+- **El nivelador se ancla a la VOZ FUERTE medida (p95), no al LUFS integrado**
+  («la voz no se amplifica, o se amplifica por picos y queda desagradable; la
+  idea era subir uniforme: poco cerca de la saturación, más cuando está baja»).
+  Medido en la mesa del 18-sep (ventana 79:03 + 31 min): LUFS −16,1 pero la voz
+  (seguidor, tramos ≥ suelo+12) está en p50 −41 / p95 −16,5 — los golpes y
+  gritos (p99 −11, máx −6) inflan la sonoridad integrada 25 dB por encima de la
+  voz típica. Con el ancla en I el codo de «no tocar» (I−26…I−18 = −42…−34) caía
+  SOBRE la voz: p10 −45 → −45 (0 dB), p50 −41 → −37 (+4), p90 −29 → −11 (+18) —
+  exactamente «solo suben los picos». Ahora `measureBoardWindow` devuelve además
+  `loudDb` (p95 del seguidor sobre los frames de voz), se persiste como
+  `part.boardLoudDb`, y `buildPartMixFilter` ancla `meanLUFS = loudDb −
+  LEVELER_CREST_DB` (el LUFS queda solo de reserva); la UI dibuja esa curva y
+  dice «voz fuerte X dB → techo». Con ratio 4 en esa ventana: p10 −45 → −10,
+  p50 −41 → −9, p90 −29 → −6, p95 → −3 (techo), 0 dB → −0,9 (lo remata el
+  limitador): subida uniforme de +23…+35 con la dispersión de la voz de 29 dB a
+  7. Además la curva del panel se dibujaba SIEMPRE como «gated» (codo bajo el
+  suelo) aunque la puerta estuviera apagada — ahora `gated = boardGate &&
+  boardSpeechLevel`, la que aplica la mezcla. La descripción de cadena pasa a
+  «voz fuerte X dB → techo» (las partes antiguas piden re-mezcla). Harness:
+  `anchor_check.ts` en el scratchpad.
+- **El codo del nivelador es el del SUELO, no el del ancla** («¿por qué hace
+  bajadas tan absurdas en la voz? se va la voz»). Medido en 8:15–8:44 del
+  18-sep, original → procesada: −37…−48 → +25…+32 uniforme, pero −50 → +22,
+  −53 → +13, −54 → +7: el codo era max(I−26, suelo+4) → max(I−18, suelo+12) y,
+  con el ancla en la voz fuerte (−11), I−18 = −47 ganaba al suelo — las últimas
+  sílabas de cada palabra floja caían dentro del codo. Ahora, con suelo medido,
+  la rampa es suelo−2 → suelo+4 (unidad 2 dB bajo la sala, un tercio de la
+  ganancia en la sala, curva completa desde suelo+4): −50…−54 → +37…+40, sala
+  (−58) +16, −60 +2. Control «Suelo de voz» (`boardLevelKneeDb`, dBFS; vacío = sala+4)
+  junto a Techo, por si la sala molesta en las pausas (subirlo) o aún se pierden
+  palabras (bajarlo); `levelerCurvePoints({kneeDb})` lo dibuja y lo aplica.
+  OJO: la fila PROCESADA de la tarjeta comparaba contra el ORIGINAL desplazado
+  solo por el offset (sin el tramo de vídeo): con `videoRangeMs` la línea ámbar
+  y los «orig → proc» eran de 19 min antes (saltos de ±36 dB sin sentido) —
+  ahora usa `partTrims`. Harness `knee_check.ts` / `drop_check.ts`.
+- **TrackRow: línea ámbar de ganancia aplicada + zoom con la rueda** («me
+  gustaría hacer zoom y ver las atenuaciones como en edición»). Las filas
+  PROCESADA con `behind` dibujan ahora la misma línea que `ClipWaveform` en la
+  timeline: 20·log10(procesada ÷ original) por columna sobre picos, solo donde
+  el original supera −50 dBFS, escala −36…+24 con 0 dB punteado. Rueda sobre la
+  onda = zoom anclado en el cursor (`exp(deltaY·0,002)`, mínimo 1 s),
+  Shift+rueda o desplazamiento lateral del trackpad = pan; los botones +/−/Todo
+  siguen.
+- **Transiciones (xfade)** — `CompositionClip.transitionAfter` (`dissolve|wipe|
+  slide|zoom` + durationMs) on a video clip renders a Premiere-style transition
+  INTO the next adjacent clip. Export-only (previews show a plain cut). The
+  FFmpeg impl (renderReelVideo) uses **handle pre-roll**: the NEXT clip's video
+  input is seek-extended backwards by the transition duration (capped by
+  `sourceInMs` available) and xfade's offset = accumulated-real-duration −
+  handle, so the transition ends exactly at the cut and the TOTAL DURATION IS
+  PRESERVED — subtitles/audio/overlay timings need no compensation. Audio keeps
+  exact seeks (separate-input case) or `atrim`s the pre-roll off (embedded
+  case). Plain cuts within a transition chain use pairwise `concat=n=2`; all
+  clips get `settb=AVTB,fps=` for xfade. Verified empirically (red/green
+  synthetic: blend at mid-transition, duration exact, mixed chain OK).
+- **Keyframes de encuadre (reels)** — animated 9:16 crop (manual subject
+  tracking / pans with return): `ReelDefinition.cropKeyframes`
+  (`CropKeyframe = CropRegion + id + timeMs`, timeMs = REEL-TIMELINE ms),
+  linear interpolation between keyframes, constant before first/after last.
+  Shared math in `src/lib/crop-keyframes.ts` (`cropAtTime`,
+  `upsertCropKeyframe` 80ms-merge, `clampCropToFrame`, `minAnimatedCropScale`,
+  `remapCropKeyframesToClips`, `buildAnimatedCropFilter`). UI:
+  `CropKeyframesPanel` ("Encuadre y keyframes") in BOTH reel phases — Zoom /
+  Pos X / Pos Y as sliders + typed % boxes. With NO keyframes they edit the
+  static cropRegion; with keyframes EACH LIST ROW carries its own copy of the
+  controls and edits that keyframe BY ID (`updateCropKeyframe`) — a row opens
+  when the playhead is within 80 ms of it, and clicking a row moves the
+  playhead there. When the playhead sits between keyframes the panel shows
+  "＋ Keyframe en m:ss" instead, which snapshots the interpolated framing (no
+  jump) and opens the new row. This panel is the ONLY way to reframe in the
+  timeline phase (its preview is a canvas of the 9:16 result, not the source,
+  so there's no draggable rect there). In the
+  setup phase dragging the crop rect also auto-records a keyframe at the
+  playhead (frozen drag-start time, lazy one-snapshot undo, clamped in-frame —
+  keyframed windows never leave the source, so preview==export). The zoom
+  slider caps at `minAnimatedCropScale` (~316% on 16:9 sources) because
+  zoompan hard-clamps z≤10; without the cap the export would silently render
+  wider than the preview. `ReelVersion` snapshots carry cropRegion +
+  cropKeyframes (older versions restore without touching the framing). All
+  previews (rect overlay,
+  CropPreviewCanvas, TimelineCanvasPreview) draw `cropAtTime(...)`. Export:
+  `renderReelVideo({cropKeyframes})` skips the per-clip static crop, joins
+  clips at the 16:9 WORK canvas size (transform clips via the WYSIWYG branch
+  minus crop+scale; identity clips pre-scaled to work dims), then applies
+  `fps,settb=AVTB,pad(output-aspect canvas),zoompan` with piecewise-linear
+  z/x/y expressions over `it` (input time). render-worker REMAPS keyframe times
+  timeline→output (`remapCropKeyframesToClips`): the concat collapses gaps, and
+  because linear interpolation does NOT commute with a gap-collapsing map, the
+  remap emits a keyframe PAIR at every collapsed cut (t−1ms holding the pre-gap
+  value, t with the post-gap one — the player jumps the gap, so the crop jumps
+  too). Verified numerically with a gradient "ruler" source: export vs preview
+  ≤0.4% of frame width across a gap (was up to 18% before the pair). It also
+  synthesizes a single trim clip for setup-phase reels (no rv1 clips) using
+  `sourceStartMs/sourceEndMs` — NOT startMs/endMs, which are compose-timeline
+  times — so the fallback renderVideo path never silently drops the animation. Ripple ops
+  (`rippleDeleteSelected`, `collapseGapAtPlayhead`, `closeGapForSelected`,
+  `rippleInsertAtPlayhead`) shift keyframes with the content like subtitles.
+  Compose parity: N/A — the 9:16 crop selector only exists in reels.
+- **Columna derecha de la timeline de reels: primero el clip** — el orden es
+  `clip config → (encuadre + mezcla, plegados si hay clip seleccionado) →
+  estilo de subtítulos`. Al revés (como estuvo un rato) una lista de keyframes
+  larga empujaba el panel *Motion* fuera de la pantalla y había que bajar el
+  zoom del navegador al 60 % para llegar. Regla: **lo que el usuario acaba de
+  seleccionar va arriba del todo**, los acordeones globales debajo.
+- **Dos zooms se multiplican en reels** — el `Motion` por clip
+  (`transform.scale`, panel morado) actúa en el espacio 16:9 y DESPUÉS se
+  recorta la ventana 9:16, cuyo zoom es `1/cropAtTime(...).scale`. Lo que ve el
+  espectador es el PRODUCTO, así que con encuadre animado el mismo valor de
+  Motion se ve distinto en cada momento (el usuario lo reportó al cortar planos:
+  "el zoom del corte parte de los datos del último keyframe"). El panel de clip
+  muestra ahora una fila **"Zoom final"** = `transform.scale × cropZoom` en el
+  instante de referencia (playhead dentro del clip, si no su inicio), editable:
+  al teclear un valor absoluto se despeja `transform.scale`. Si el encuadre se
+  mueve DENTRO del plano (se muestrean los extremos y todos los keyframes
+  interiores) avisa del rango y ofrece **"Congelar el encuadre dentro de este
+  plano"** → `freezeCropInRange(reelId, start, end)`: borra los keyframes
+  interiores y clava el encuadre de entrada en ambos extremos, dejando el zoom
+  del plano como única variable.
+- **Atajos de teclado: normalizar la tecla, no leer `e.key` a pelo** — ambos
+  editores calculan `letter` = `e.key` en minúsculas si es `[a-zA-Z]`, si no
+  `e.code` (`KeyV` → `v`). Sin eso fallaban en silencio: **Shift+S** llega como
+  `e.key==='S'` (el `=== 's'` no casaba → "dividir todas las pistas" no hacía
+  nada) y en **macOS Option+V produce `'√'`**, así que `⌘+⌥+V` (ripple insert)
+  nunca disparaba. Verificado despachando el evento exacto de macOS
+  (`{key:'√', code:'KeyV', metaKey:true, altKey:true}`).
+- **Ripple insert (Ctrl+Alt+V / toolbar ⇥ button)** — `rippleInsertAtPlayhead`
+  in BOTH stores: splits clips straddling the playhead, shifts clips+subtitles
+  at/after it right by the clipboard span, inserts the copied clips AND the
+  subtitles captured within their span (clip copy now also fills an
+  attached-subs clipboard, clamped to the span). Ctrl+Shift+V was already
+  taken in reels ("paste behind") — hence Alt. Single undo entry.
 
 ---
 
@@ -384,6 +1742,20 @@ sub-directory has a different role:
 | `export/*.mp4` (renders) | ❌ Drop — final renders. | Re-derived from `project.json` + muxed file. |
 | `export/*.ass`, `export/debug_*` | ❌ Drop — generated per render. | Auto-recreated. |
 | `compose/`, `transcription/` | ⚠ Sometimes empty, sometimes hold media-bin extras (cutaways, image overlays). Copy if non-empty. | |
+
+**Can I delete `source/` once I have the muxed file, to save space?** Verified by
+reading the actual resolution order (not just this table's general advice):
+transcription (`resolveTranscriptionAudio` in whisper-worker.ts) and reel export
+(render-worker.ts) both prefer `sync.muxedVideoPath` STRICTLY BEFORE any
+`source/` fallback, and the YouTube/Compose export path explicitly checks for
+the muxed file and fails LOUDLY (asking to re-mux) rather than silently
+touching `source/`. So it's safe **once you've cut clips in Compose (or only
+use Reels) and won't touch Sync & Mix for that recording again.** It is NOT
+safe if: you still might re-align/re-mix a part or the legacy single-pair mux
+(`part-worker.ts`/mux route `fs.access` the source files and fail loudly if
+missing); or you export straight from Transcription with ZERO Compose clips
+(render-worker.ts's "simple trim" fallback uses the raw `source/` video
+directly, not the muxed file, in that specific case).
 
 ### Minimum bundle to move a project to another machine
 

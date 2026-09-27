@@ -186,6 +186,10 @@ export const STYLE_PRESETS: StylePreset[] = [
 export const REEL_DEFAULT_CONSTRAINTS: SubtitleConstraints = {
   maxCharsPerBlock: 20,
   maxDurationMs: 5000,
+  // Short, phrase-aligned blocks of at most 3 words: one line on a 9:16
+  // phone, never an article/possessive orphaned from its noun.
+  splitMode: 'picado',
+  maxWordsPerBlock: 3,
 };
 
 export function getPresetById(id: string): StylePreset | undefined {

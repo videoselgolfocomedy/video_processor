@@ -39,13 +39,29 @@ export function SubtitleSelectionStyleBar({
       {/* Color row */}
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[10px] text-muted-foreground w-10">Color</span>
-        <input
-          type="color"
-          value={color}
-          onChange={(e) => applyColor(e.target.value)}
-          className="w-6 h-6 rounded cursor-pointer border border-border p-0"
-          title="Aplicar color a los subtítulos seleccionados"
-        />
+        {/* Custom colour. It used to be a plain <input type="color"> showing its
+            last value (yellow) — indistinguishable from the recent swatches
+            beside it, so a click on it just opened the native picker and
+            applied nothing (the input only fires when the colour CHANGES).
+            Now it reads as "pick another colour" (rainbow chip), applies live
+            while you drag in the picker, and only records the colour in the
+            recents when the picker closes — dragging used to fill the recents
+            with near-identical reds/greens. */}
+        <label
+          className="relative flex h-6 w-6 cursor-pointer items-center justify-center rounded-full border border-border"
+          style={{ background: 'conic-gradient(#f43f5e, #f59e0b, #facc15, #22c55e, #06b6d4, #6366f1, #d946ef, #f43f5e)' }}
+          title="Elegir otro color (se aplica a los subtítulos seleccionados)"
+        >
+          <span className="h-3 w-3 rounded-full border border-black/40" style={{ backgroundColor: color }} />
+          <input
+            type="color"
+            value={color}
+            onChange={(e) => { setColor(e.target.value); onApply({ color: e.target.value }); }}
+            onBlur={(e) => pushColor(e.target.value)}
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          />
+        </label>
+        <span className="h-4 w-px bg-border" aria-hidden />
         {/* Recent color swatches */}
         {recentColors.map((c) => (
           <button
@@ -54,7 +70,7 @@ export function SubtitleSelectionStyleBar({
             onClick={() => applyColor(c)}
             className="w-5 h-5 rounded border border-border/60 hover:scale-110 transition-transform"
             style={{ backgroundColor: c }}
-            title={`Aplicar ${c}`}
+            title={`Aplicar ${c} a los subtítulos seleccionados`}
           />
         ))}
         <button

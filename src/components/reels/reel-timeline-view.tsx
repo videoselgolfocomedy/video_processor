@@ -5,19 +5,28 @@ import { useParams } from 'next/navigation';
 import { useReelStore } from '@/stores/reel-store';
 import { OverlayTemplatesBar, SaveOverlayAsTemplateButton, ApplyOverlayTemplateButton } from './overlay-template-controls';
 import { ReelVideoPlayer } from './reel-video-player';
+import { ClipGainPanel } from '@/components/shared/clip-gain-panel';
 import { ReelSubtitleBox } from './reel-subtitle-box';
 import { ReelTimeline } from './reel-timeline';
+import { EditorSplit } from '@/components/shared/editor-split';
 import { SubtitleStyleEditor } from '@/components/subtitles/subtitle-style-editor';
+import { ReelMixPanels } from './reel-mix-panels';
+import { CropKeyframesPanel } from './crop-keyframes-panel';
 import { useCustomPresets } from '@/hooks/use-custom-presets';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { RefreshCw, Scissors, Trash2, Bold, Frame } from 'lucide-react';
-import { splitLongSegments } from '@/lib/subtitle-utils';
+import { RefreshCw, Scissors, Trash2, Bold, Frame, RemoveFormatting } from 'lucide-react';
+import { splitSegmentsWithConstraints, segmentViolates, REEL_DEFAULT_MAX_WORDS } from '@/lib/subtitle-utils';
 import { formatTimestamp } from '@/lib/utils';
 import { getReelVideoElement } from './reel-video-ref';
-import { getActiveReelTransform, applyCanvasTransform, drawActiveOverlayVideos, hasActiveOverlayVideo } from '@/lib/reel-transform';
+import { getActiveReelTransform, drawTransformedCrop, drawActiveOverlayVideos, hasActiveOverlayVideo } from '@/lib/reel-transform';
+import { cropAtTime } from '@/lib/crop-keyframes';
 import { SubtitleSelectionStyleBar } from '@/components/subtitles/subtitle-selection-style-bar';
-import type { SubtitleStyle, SubtitleWord } from '@/types/project';
+import { CanvasBackgroundPicker } from '@/components/shared/canvas-background-picker';
+import { ExportAudioClipButton } from '@/components/audio/export-audio-clip-button';
+import { copyMotionTransform, getMotionTransform, hasMotionTransform } from '@/lib/motion-clipboard';
+import { FONT_FAMILIES } from '@/config/fonts';
+import type { SubtitleStyle, SubtitleWord, CompositionClip, SubtitleSplitMode } from '@/types/project';
 
 interface ReelTimelineViewProps {
   reelId: string;
@@ -439,25 +448,19 @@ function TimelineCanvasPreview({ reelId }: { reelId: string }) {
         return;
       }
 
-      const currentReel = useReelStore.getState().reels.find((r) => r.id === reelId);
-      const crop = currentReel?.cropRegion ?? reel.cropRegion;
-
-      const cropPixH = srcH * crop.scale;
-      const cropPixW = cropPixH * (9 / 16);
-      const sx = crop.centerX * srcW - cropPixW / 2;
-      const sy = crop.centerY * srcH - cropPixH / 2;
+      const rs = useReelStore.getState();
+      const currentReel = rs.reels.find((r) => r.id === reelId);
+      const crop = currentReel
+        ? cropAtTime(currentReel.cropRegion, currentReel.cropKeyframes, rs.currentTimeMs)
+        : reel.cropRegion;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.fillStyle = '#000';
+      ctx.fillStyle = currentReel?.composition.backgroundColor ?? '#000000';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // WYSIWYG: transform the source frame FIRST, then sample the crop window
+      // (see drawTransformedCrop) — matches the crop selector and the export.
       const activeT = getActiveReelTransform(reelId);
-      const applied = applyCanvasTransform(ctx, canvas.width, canvas.height, activeT);
-      ctx.drawImage(
-        video,
-        Math.max(0, sx), Math.max(0, sy), cropPixW, cropPixH,
-        0, 0, canvas.width, canvas.height
-      );
-      if (applied) ctx.setTransform(1, 0, 0, 1, 0, 0);
+      drawTransformedCrop(ctx, video, canvas.width, canvas.height, srcW, srcH, crop, activeT);
 
       // Draw PiP (secondary-track) video overlays on top, in output space.
       drawActiveOverlayVideos(ctx, canvas.width, canvas.height, reelId);
@@ -728,6 +731,7 @@ function WordStyleEditor({
 function SubtitleListEditor({ reelId }: { reelId: string }) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const updateReelSubtitleSegment = useReelStore((s) => s.updateReelSubtitleSegment);
+  const stripReelSubtitlePunctuation = useReelStore((s) => s.stripReelSubtitlePunctuation);
   const deleteSubtitleSegment = useReelStore((s) => s.deleteSubtitleSegment);
   const selectedSubtitleIds = useReelStore((s) => s.selectedSubtitleIds);
   const selectSubtitle = useReelStore((s) => s.selectSubtitle);
@@ -779,8 +783,16 @@ function SubtitleListEditor({ reelId }: { reelId: string }) {
   const constraints = reel.subtitleConstraints;
   return (
     <div className="flex-1 min-w-0 overflow-y-auto">
-      <div className="px-3 py-1.5 text-[10px] font-medium text-muted-foreground border-b border-border sticky top-0 bg-card z-10">
-        Subtitles ({reel.subtitleSegments.length})
+      <div className="px-3 py-1.5 text-[10px] font-medium text-muted-foreground border-b border-border sticky top-0 bg-card z-10 flex items-center justify-between">
+        <span>Subtitles ({reel.subtitleSegments.length})</span>
+        <button
+          className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-0.5"
+          onClick={() => stripReelSubtitlePunctuation(reelId)}
+          title="Eliminar la puntuación final (.,;:) de todos los bloques"
+        >
+          <RemoveFormatting className="h-3 w-3" />
+          Strip .,
+        </button>
       </div>
       <div className="divide-y divide-border">
         {reel.subtitleSegments.map((seg) => {
@@ -806,6 +818,8 @@ function SubtitleListEditor({ reelId }: { reelId: string }) {
                   className="flex-1 bg-transparent text-xs outline-none min-w-0 resize-none overflow-hidden"
                   value={seg.text}
                   rows={Math.max(1, seg.text.split('\n').length)}
+                  // Grow with soft wraps too (the column is 30 % of the top half).
+                  style={{ fieldSizing: 'content' } as React.CSSProperties}
                   onChange={(e) => handleTextChange(seg.id, e.target.value)}
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => {
@@ -932,17 +946,14 @@ function SubtitleConfigPanel({ reelId }: { reelId: string }) {
 
   const handleAutoSplit = useCallback(() => {
     if (!reel) return;
-    const { maxCharsPerBlock, maxDurationMs } = reel.subtitleConstraints;
-    const split = splitLongSegments(reel.subtitleSegments, maxCharsPerBlock, maxDurationMs);
+    const split = splitSegmentsWithConstraints(reel.subtitleSegments, reel.subtitleConstraints);
     updateReel(reelId, { subtitleSegments: split });
   }, [reel, reelId, updateReel]);
 
   if (!reel) return null;
 
   const constraints = reel.subtitleConstraints;
-  const violations = reel.subtitleSegments.filter(
-    (s) => s.text.length > constraints.maxCharsPerBlock || (s.endMs - s.startMs) > constraints.maxDurationMs
-  ).length;
+  const violations = reel.subtitleSegments.filter((s) => segmentViolates(s, constraints)).length;
 
   return (
     <div className="overflow-y-auto p-3 space-y-3">
@@ -988,6 +999,38 @@ function SubtitleConfigPanel({ reelId }: { reelId: string }) {
       {/* Constraints */}
       <div>
         <h3 className="text-xs font-medium mb-1.5">Constraints</h3>
+        {/* Modo de troceo: clásico por caracteres, o picado por frases (≤ N palabras) */}
+        <div className="mb-1.5">
+          <label className="block text-[10px] text-muted-foreground mb-0.5">Troceo</label>
+          <select
+            className="h-7 w-full rounded border border-border bg-background px-1 text-xs outline-none"
+            value={constraints.splitMode ?? 'clasico'}
+            title="Clásico: bloques por caracteres. Picado: ≤ N palabras, alineado con las frases y sin separar artículo/posesivo/preposición de lo que sigue. Remate: además, la última unidad de cada frase va sola (el golpe)."
+            onChange={(e) => setReelSubtitleConstraints(reelId, {
+              ...constraints,
+              splitMode: e.target.value as SubtitleSplitMode,
+              maxWordsPerBlock: constraints.maxWordsPerBlock ?? REEL_DEFAULT_MAX_WORDS,
+            })}
+          >
+            <option value="clasico">Clásico (por caracteres)</option>
+            <option value="picado">Picado (≤ N palabras, por frases)</option>
+            <option value="remate">Picado con remate (comedia)</option>
+          </select>
+        </div>
+        {(constraints.splitMode ?? 'clasico') !== 'clasico' && (
+          <div className="mb-1.5">
+            <label className="block text-[10px] text-muted-foreground mb-0.5">Máx. palabras por bloque</label>
+            <Input
+              type="number" min={1} max={8}
+              value={constraints.maxWordsPerBlock ?? REEL_DEFAULT_MAX_WORDS}
+              onChange={(e) => setReelSubtitleConstraints(reelId, {
+                ...constraints,
+                maxWordsPerBlock: Math.max(1, Math.min(8, parseInt(e.target.value) || REEL_DEFAULT_MAX_WORDS)),
+              })}
+              className="h-7 text-xs"
+            />
+          </div>
+        )}
         <div className="flex gap-2">
           <div className="flex-1">
             <label className="block text-[10px] text-muted-foreground mb-0.5">Max chars</label>
@@ -1050,20 +1093,6 @@ function SubtitleConfigPanel({ reelId }: { reelId: string }) {
 }
 
 /* ── Text clip config panel ─────────────────────────────────────────── */
-
-const FONT_FAMILIES = [
-  // Display / condensed faces — both bundled in fonts/ for FFmpeg ASS render
-  // and loaded via Google Fonts in layout.tsx for browser preview.
-  'Bebas Neue', 'Anton',
-  'Inter', 'Arial', 'Helvetica Neue', 'Helvetica', 'Georgia', 'Times New Roman',
-  'Courier New', 'Verdana', 'Impact', 'Comic Sans MS',
-  'Trebuchet MS', 'Palatino', 'Garamond', 'Bookman',
-  'Futura', 'Gill Sans', 'Lucida Grande', 'Lucida Console',
-  'Optima', 'Avenir', 'Avenir Next', 'Didot',
-  'American Typewriter', 'Rockwell', 'Copperplate',
-  'Menlo', 'Monaco', 'SF Pro Display', 'SF Pro Text',
-  'Baskerville', 'Cochin', 'Hoefler Text',
-];
 
 function TextClipConfigPanel({ reelId }: { reelId: string }) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
@@ -1395,8 +1424,15 @@ function TextClipConfigPanel({ reelId }: { reelId: string }) {
 // clip.transform.
 function VideoClipMotionPanel({ reelId }: { reelId: string }) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
-  const firstSelectedId = useReelStore((s) => s.selectedClipIds[0] ?? null);
+  // Rounded in the selector: only used as a display-reference for "Zoom
+  // final" (which clip instant to read transform×crop from), so the raw
+  // per-rAF-tick value (60/s during playback) would otherwise re-render this
+  // whole motion panel every frame for no visible benefit.
+  const playheadMs = useReelStore((s) => Math.round(s.currentTimeMs / 50) * 50);
+  const selectedClipIds = useReelStore((s) => s.selectedClipIds);
+  const firstSelectedId = selectedClipIds[0] ?? null;
   const updateClip = useReelStore((s) => s.updateClip);
+  const [canPasteMotion, setCanPasteMotion] = useState(() => hasMotionTransform());
 
   const clip = reel?.composition.clips.find((c) => c.id === firstSelectedId);
   if (!clip || clip.type !== 'video') return null;
@@ -1421,9 +1457,222 @@ function VideoClipMotionPanel({ reelId }: { reelId: string }) {
     });
   };
 
-  const row = (label: string, value: string, min: number, max: number, step: number, sliderVal: number, onChange: (v: number) => void) => (
+  const handleCopyMotion = () => {
+    copyMotionTransform(t);
+    setCanPasteMotion(true);
+  };
+  const handlePasteMotion = () => {
+    const copied = getMotionTransform();
+    if (!copied || !reel) return;
+    // Applies to every selected clip (not just this one) so a multi-select
+    // paste gives them all the same zoom/position/angle in one go.
+    const targets = selectedClipIds.length > 0 ? selectedClipIds : [clip.id];
+    for (const id of targets) {
+      const target = reel.composition.clips.find((c) => c.id === id);
+      if (!target || target.type === 'audio' || target.type === 'text') continue;
+      updateClip(reelId, id, { transform: { ...copied } });
+    }
+  };
+
+  // Label + slider + editable number input, all in the SAME natural unit
+  // (percent, degrees) — typing a value works exactly like dragging.
+  const row = (label: string, unit: string, min: number, max: number, step: number, value: number, onChange: (v: number) => void) => (
     <div className="flex items-center gap-2">
       <span className="text-[10px] text-muted-foreground w-12">{label}</span>
+      <input
+        type="range" min={min} max={max} step={step} value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="flex-1 h-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+      />
+      <input
+        type="number" min={min} max={max} step={step} value={value}
+        onChange={(e) => {
+          const n = parseFloat(e.target.value);
+          if (!isNaN(n)) onChange(Math.min(max, Math.max(min, n)));
+        }}
+        className="w-14 h-5 rounded border border-border bg-background px-1 text-right font-mono text-[10px]"
+      />
+      <span className="w-3 text-[9px] text-muted-foreground">{unit}</span>
+    </div>
+  );
+
+  return (
+    <div className="overflow-y-auto p-3 space-y-3">
+      {/* PiP overlay position/size — only for secondary-track video clips */}
+      {isOverlayVideo && (
+        <div className="space-y-2">
+          <h3 className="text-xs font-medium text-cyan-400">Overlay (PiP) — recuadro sobre el vídeo principal</h3>
+          {row('Pos X', '%', 0, 100, 1, Math.round(ov.x * 100), (v) => patchOverlay({ x: v / 100 }))}
+          {row('Pos Y', '%', 0, 100, 1, Math.round(ov.y * 100), (v) => patchOverlay({ y: v / 100 }))}
+          {row('Tamaño', '%', 5, 100, 1, Math.round(ov.width * 100), (v) => patchOverlay({ width: v / 100 }))}
+          {row('Opacidad', '%', 0, 100, 1, Math.round((clip.opacity ?? 1) * 100), (v) => updateClip(reelId, clip.id, { opacity: v / 100 }))}
+          <p className="text-[9px] text-muted-foreground italic leading-tight">
+            Este vídeo se superpone en un recuadro sobre el principal durante su tramo. Pos = centro del recuadro.
+          </p>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-medium text-purple-400">Motion (zoom / posición / ángulo)</h3>
+        <div className="flex items-center gap-1.5">
+          <button
+            className="text-[10px] text-muted-foreground hover:text-foreground"
+            onClick={handleCopyMotion}
+            title="Copiar zoom/posición/ángulo de este clip"
+          >
+            Copiar
+          </button>
+          <button
+            className="text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:hover:text-muted-foreground"
+            onClick={handlePasteMotion}
+            disabled={!canPasteMotion}
+            title="Pegar en el/los clip(s) seleccionado(s)"
+          >
+            Pegar
+          </button>
+          <button
+            className="text-[10px] text-muted-foreground hover:text-foreground"
+            onClick={() => updateClip(reelId, clip.id, { transform: { scale: 1, x: 0, y: 0, rotation: 0 } })}
+            title="Reset motion"
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+      {row('Zoom', '%', 10, 400, 1, Math.round((t.scale ?? 1) * 100), (v) => patch({ scale: v / 100 }))}
+      {row('Pos X', '%', -100, 100, 1, Math.round((t.x ?? 0) * 100), (v) => patch({ x: v / 100 }))}
+      {row('Pos Y', '%', -100, 100, 1, Math.round((t.y ?? 0) * 100), (v) => patch({ y: v / 100 }))}
+      {row('Ángulo', '°', -180, 180, 0.1, Math.round((t.rotation ?? 0) * 10) / 10, (v) => patch({ rotation: v }))}
+
+      {/* The clip's Motion zoom is NOT what the viewer sees: the 9:16 crop
+          window multiplies it (transform runs in 16:9 source space, the crop
+          is taken afterwards — see the WYSIWYG branch in ffmpeg-wrapper). With
+          an animated crop the same Motion value looks different at every
+          moment, which made "give this shot the same zoom as the first one"
+          guesswork. So we surface the PRODUCT and let it be typed directly. */}
+      {!isOverlayVideo && reel && (() => {
+        const inClip = (ms: number) => ms >= clip.timelineStartMs && ms < clip.timelineEndMs;
+        const refMs = inClip(playheadMs) ? playheadMs : clip.timelineStartMs;
+        const cropHere = cropAtTime(reel.cropRegion, reel.cropKeyframes, refMs);
+        const cropZoom = 1 / cropHere.scale;                       // ×1 … ×3.16
+        const finalPct = Math.round((t.scale ?? 1) * cropZoom * 100);
+        // Does the framing move WITHIN this shot? Then "the" final zoom is a range.
+        const zAt = (ms: number) => (t.scale ?? 1) / cropAtTime(reel.cropRegion, reel.cropKeyframes, ms).scale;
+        // Sample the ends AND every keyframe inside the shot — comparing only
+        // the endpoints misses a keyframe that bumps the zoom in the middle.
+        const samples = [
+          clip.timelineStartMs,
+          Math.max(clip.timelineStartMs, clip.timelineEndMs - 1),
+          ...(reel.cropKeyframes ?? [])
+            .filter((k) => k.timeMs > clip.timelineStartMs && k.timeMs < clip.timelineEndMs)
+            .map((k) => k.timeMs),
+        ].map(zAt);
+        const zStart = samples[0];
+        const zEnd = samples[1];
+        const animatedInClip = Math.max(...samples) - Math.min(...samples) > 0.01;
+        return (
+          <div className="space-y-1 rounded border border-purple-500/30 bg-purple-500/5 p-1.5">
+            {row('Zoom final', '%', 10, Math.round(400 * cropZoom), 1, finalPct, (v) =>
+              patch({ scale: Math.min(4, Math.max(0.1, v / 100 / cropZoom)) })
+            )}
+            <p className="text-[9px] leading-tight text-muted-foreground">
+              Lo que se ve = <span className="font-mono">Zoom del plano × encuadre</span>
+              {' '}(<span className="font-mono">{Math.round((t.scale ?? 1) * 100)}% × {cropZoom.toFixed(2)}</span>).
+              {animatedInClip
+                ? <> El encuadre se <strong>mueve dentro de este plano</strong>: el zoom final va de{' '}
+                    {Math.round(Math.min(...samples) * 100)}% a {Math.round(Math.max(...samples) * 100)}%
+                    {' '}(entra en {Math.round(zStart * 100)}%, sale en {Math.round(zEnd * 100)}%).</>
+                : <> Ajusta <strong>Zoom final</strong> para igualar planos sin hacer cuentas.</>}
+            </p>
+            {animatedInClip && (
+              <button
+                className="text-[9px] text-purple-300 hover:text-purple-200 underline"
+                title="Escribe un keyframe de encuadre al principio y al final del plano con el encuadre de su primer fotograma"
+                onClick={() => useReelStore.getState()
+                  .freezeCropInRange(reelId, clip.timelineStartMs, clip.timelineEndMs)}
+              >
+                Congelar el encuadre dentro de este plano
+              </button>
+            )}
+          </div>
+        );
+      })()}
+
+      <p className="text-[9px] text-muted-foreground italic leading-tight">
+        Tip: para enderezar un plano torcido, gira el ángulo y sube un poco el zoom para que no aparezcan esquinas negras. Para valores distintos por momento, divide el clip (S).
+      </p>
+
+      {/* Transition into the NEXT adjacent clip on this track (export via
+          FFmpeg xfade with handle pre-roll; the live preview shows a cut). */}
+      {(() => {
+        const nextAdjacent = (reel?.composition.clips ?? []).find(
+          (c) => c.id !== clip.id && c.trackId === clip.trackId && c.type === 'video' &&
+            Math.abs(c.timelineStartMs - clip.timelineEndMs) < 50
+        );
+        if (!nextAdjacent) return null;
+        const trans = clip.transitionAfter;
+        return (
+          <div className="space-y-2 border-t border-border pt-2">
+            <h3 className="text-xs font-medium text-purple-400">Transición al siguiente clip</h3>
+            <select
+              className="w-full h-6 rounded border border-border bg-background px-1 text-[10px] outline-none"
+              value={trans?.type ?? 'none'}
+              onChange={(e) => {
+                const v = e.target.value;
+                updateClip(reelId, clip.id, {
+                  transitionAfter: v === 'none'
+                    ? undefined
+                    : { type: v as NonNullable<CompositionClip['transitionAfter']>['type'], durationMs: trans?.durationMs ?? 500 },
+                });
+              }}
+            >
+              <option value="none">Ninguna (corte)</option>
+              <option value="dissolve">Disolver (dissolve)</option>
+              <option value="wipe">Barrido (wipe)</option>
+              <option value="slide">Desplazamiento (slide)</option>
+              <option value="zoom">Zoom</option>
+            </select>
+            {trans && row('Duración', 'ms', 100, 2000, 50, trans.durationMs, (v) =>
+              updateClip(reelId, clip.id, { transitionAfter: { ...trans, durationMs: Math.round(v) } })
+            )}
+            {trans && (
+              <p className="text-[9px] text-muted-foreground italic leading-tight">
+                Se renderiza en el export (el preview muestra un corte). Usa material previo al punto de entrada del clip siguiente, así la duración total no cambia.
+              </p>
+            )}
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+// Audio clip config: lower the intensity (volume) and define a fade-in ramp.
+// Mostly aimed at extra-audio layers (pasted / copied clips on ra2+), but works
+// for any audio clip. Applied live by ReelExtraAudio and on export by
+// renderReelVideo (volume + afade=t=in).
+function AudioClipConfigPanel({ reelId }: { reelId: string }) {
+  const params = useParams();
+  const projectId = params?.id as string | undefined;
+  const playheadMs = useReelStore((s) => s.currentTimeMs);
+  const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
+  const firstSelectedId = useReelStore((s) => s.selectedClipIds[0] ?? null);
+  const updateClip = useReelStore((s) => s.updateClip);
+
+  const clip = reel?.composition.clips.find((c) => c.id === firstSelectedId);
+  if (!clip || clip.type !== 'audio') return null;
+
+  // Volume/fade only apply to the EXTRA audio layers (ra2+). The main ra1 track
+  // is the gated muxed/separate audio; for it we only offer the WAV export.
+  const isExtra = clip.trackId !== 'ra1';
+  const clipDurMs = Math.max(0, clip.timelineEndMs - clip.timelineStartMs);
+  const volPct = Math.round((clip.volume ?? 1) * 100);
+  const fadeMs = clip.fadeInMs ?? 0;
+  const curve = clip.fadeInCurve ?? 'linear';
+
+  const row = (label: string, value: string, min: number, max: number, step: number, sliderVal: number, onChange: (v: number) => void) => (
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] text-muted-foreground w-16">{label}</span>
       <input
         type="range" min={min} max={max} step={step} value={sliderVal}
         onChange={(e) => onChange(parseFloat(e.target.value))}
@@ -1435,37 +1684,86 @@ function VideoClipMotionPanel({ reelId }: { reelId: string }) {
 
   return (
     <div className="overflow-y-auto p-3 space-y-3">
-      {/* PiP overlay position/size — only for secondary-track video clips */}
-      {isOverlayVideo && (
-        <div className="space-y-2">
-          <h3 className="text-xs font-medium text-cyan-400">Overlay (PiP) — recuadro sobre el vídeo principal</h3>
-          {row('Pos X', `${Math.round(ov.x * 100)}%`, 0, 100, 1, Math.round(ov.x * 100), (v) => patchOverlay({ x: v / 100 }))}
-          {row('Pos Y', `${Math.round(ov.y * 100)}%`, 0, 100, 1, Math.round(ov.y * 100), (v) => patchOverlay({ y: v / 100 }))}
-          {row('Tamaño', `${Math.round(ov.width * 100)}%`, 5, 100, 1, Math.round(ov.width * 100), (v) => patchOverlay({ width: v / 100 }))}
-          {row('Opacidad', `${Math.round((clip.opacity ?? 1) * 100)}%`, 0, 100, 1, Math.round((clip.opacity ?? 1) * 100), (v) => updateClip(reelId, clip.id, { opacity: v / 100 }))}
+      <h3 className="text-xs font-medium text-green-400">Audio — {clip.originalName}</h3>
+
+      {isExtra && (
+        <>
+          {/* Intensity / volume (0–200%, 1.0 = original — same range as Compose;
+              above 100% the live preview amplifies through Web Audio and the
+              export applies the exact gain) */}
+          {row('Intensidad', `${volPct}%`, 0, 200, 1, volPct, (v) => updateClip(reelId, clip.id, { volume: v / 100 }))}
+
+          {/* Fade-in duration — capped at the clip's own length */}
+          {(() => {
+            const fadeMax = Math.min(10000, Math.max(200, clipDurMs));
+            return row(
+              'Fade-in',
+              fadeMs >= 1000 ? `${(fadeMs / 1000).toFixed(1)}s` : `${fadeMs}ms`,
+              0,
+              fadeMax,
+              50,
+              Math.min(fadeMs, fadeMax),
+              (v) => updateClip(reelId, clip.id, { fadeInMs: Math.round(v) })
+            );
+          })()}
+
+          {/* Fade-in curve */}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-muted-foreground w-16">Curva</span>
+            <select
+              className="flex-1 h-6 rounded border border-border bg-background px-1 text-[10px] outline-none disabled:opacity-50"
+              value={curve}
+              disabled={fadeMs === 0}
+              onChange={(e) => updateClip(reelId, clip.id, { fadeInCurve: e.target.value as NonNullable<CompositionClip['fadeInCurve']> })}
+              title="Forma de la curva de fundido de entrada"
+            >
+              <option value="linear">Lineal</option>
+              <option value="exponential">Exponencial (suave al inicio)</option>
+              <option value="logarithmic">Logarítmica (sube rápido)</option>
+              <option value="quarter-sine">Cuarto de seno (muy suave)</option>
+            </select>
+            {fadeMs > 0 && (
+              <button
+                className="text-[10px] text-muted-foreground hover:text-foreground"
+                onClick={() => updateClip(reelId, clip.id, { fadeInMs: 0 })}
+                title="Quitar fundido"
+              >
+                x
+              </button>
+            )}
+          </div>
+
           <p className="text-[9px] text-muted-foreground italic leading-tight">
-            Este vídeo se superpone en un recuadro sobre el principal durante su tramo. Pos = centro del recuadro.
+            Capa de audio extra: se suma al audio principal. Baja la intensidad para que quede de fondo y usa el fade-in para que entre suave.
           </p>
-        </div>
+        </>
       )}
 
-      <div className="flex items-center justify-between">
-        <h3 className="text-xs font-medium text-purple-400">Motion (zoom / posición / ángulo)</h3>
-        <button
-          className="text-[10px] text-muted-foreground hover:text-foreground"
-          onClick={() => updateClip(reelId, clip.id, { transform: { scale: 1, x: 0, y: 0, rotation: 0 } })}
-          title="Reset motion"
-        >
-          Reset
-        </button>
+      {/* Volume zones — every audio clip, main track included. */}
+      <div className="border-t border-border pt-2">
+        <ClipGainPanel
+          clip={clip}
+          playheadMs={playheadMs}
+          projectId={projectId}
+          onChange={(regions) => {
+            useReelStore.getState().saveSnapshot();
+            updateClip(reelId, clip.id, { gainRegions: regions });
+          }}
+        />
       </div>
-      {row('Zoom', `${Math.round((t.scale ?? 1) * 100)}%`, 10, 400, 1, Math.round((t.scale ?? 1) * 100), (v) => patch({ scale: v / 100 }))}
-      {row('Pos X', `${Math.round((t.x ?? 0) * 100)}%`, -100, 100, 1, Math.round((t.x ?? 0) * 100), (v) => patch({ x: v / 100 }))}
-      {row('Pos Y', `${Math.round((t.y ?? 0) * 100)}%`, -100, 100, 1, Math.round((t.y ?? 0) * 100), (v) => patch({ y: v / 100 }))}
-      {row('Ángulo', `${(t.rotation ?? 0).toFixed(1)}°`, -150, 150, 1, Math.round((t.rotation ?? 0) * 10), (v) => patch({ rotation: v / 10 }))}
-      <p className="text-[9px] text-muted-foreground italic leading-tight">
-        Tip: para enderezar un plano torcido, gira el ángulo y sube un poco el zoom para que no aparezcan esquinas negras. Para valores distintos por momento, divide el clip (S).
-      </p>
+
+      {/* Export this clip's audio as WAV for external editing (Audacity, etc.) */}
+      {clip.fileName && (
+        <div className="border-t border-border pt-2">
+          <ExportAudioClipButton
+            projectId={projectId}
+            fileName={clip.fileName}
+            sourceInMs={clip.sourceInMs}
+            sourceOutMs={clip.sourceOutMs}
+            downloadName={clip.originalName?.replace(/\.[^.]+$/, '') || 'audio'}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -1598,6 +1896,7 @@ function ImageClipConfigPanel({ reelId }: { reelId: string }) {
 export function ReelTimelineView({ reelId, videoSrc, audioSrc, audioOffsetMs }: ReelTimelineViewProps) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const selectedClipIds = useReelStore((s) => s.selectedClipIds);
+  const setReelBackgroundColor = useReelStore((s) => s.setReelBackgroundColor);
 
   if (!reel) return null;
 
@@ -1608,6 +1907,9 @@ export function ReelTimelineView({ reelId, videoSrc, audioSrc, audioOffsetMs }: 
   const showTextPanel = selectedClip?.type === 'text';
   const showImagePanel = selectedClip?.type === 'image' || selectedClip?.type === 'gif';
   const showVideoPanel = selectedClip?.type === 'video';
+  // Audio panel shows for any audio clip (export-as-WAV works for all); the
+  // volume/fade controls inside are limited to the EXTRA layers (ra2+).
+  const showAudioPanel = selectedClip?.type === 'audio';
 
   return (
     <div className="flex h-full flex-col">
@@ -1621,46 +1923,71 @@ export function ReelTimelineView({ reelId, videoSrc, audioSrc, audioOffsetMs }: 
         <OverlayTemplatesBar reelId={reelId} />
       </div>
 
-      {/* Top row: preview + timeline */}
-      <div className="flex min-h-0" style={{ height: '50%' }}>
-        {/* Canvas preview */}
-        <div className="w-[180px] flex-shrink-0 border-r border-border p-2 flex items-center justify-center overflow-hidden">
-          <TimelineCanvasPreview reelId={reelId} />
-        </div>
-        {/* Timeline */}
-        <div className="flex-1 min-w-0 flex flex-col">
-          <ReelTimeline reelId={reelId} />
-        </div>
-      </div>
+      {/* Screen split in two halves (draggable): TOP = subtitles | preview |
+          properties, BOTTOM = the whole timeline — same layout as Compose. */}
+      <EditorSplit
+        storageKey="reel-split-top-pct"
+        top={(
+          <div className="flex h-full min-h-0">
+            {/* Left: subtitle list */}
+            <div className="w-[30%] min-w-[240px] flex-shrink-0 flex flex-col border-r border-border overflow-hidden">
+              <SubtitleListEditor reelId={reelId} />
+            </div>
 
-      {/* Bottom row: subtitles (50%) | right panel (50%) */}
-      <div className="flex flex-1 min-h-0 border-t border-border">
-        {/* Left: subtitle list */}
-        <div className="flex-1 min-w-0 flex flex-col border-r border-border">
-          <SubtitleListEditor reelId={reelId} />
-        </div>
-
-        {/* Right: clip config OR subtitle style */}
-        <div className="flex-1 min-w-0 flex flex-col overflow-y-auto">
-          {showTextPanel ? (
-            <TextClipConfigPanel reelId={reelId} />
-          ) : showImagePanel ? (
-            <ImageClipConfigPanel reelId={reelId} />
-          ) : showVideoPanel ? (
-            <VideoClipMotionPanel reelId={reelId} />
-          ) : (
-            <>
-              {selectedClipIds.length === 0 && reel.subtitleSegments.length > 0 && (
-                <ReelSubtitleSelectionStyle reelId={reelId} />
-              )}
-              <div className="p-3 border-b border-border">
-                <SubtitleStylePreview style={reel.subtitleStyle} />
+            {/* Middle: canvas preview of the 9:16 result */}
+            <div className="flex-1 min-w-0 flex flex-col items-center p-2 overflow-hidden">
+              <div className="flex w-full justify-center pb-1">
+                <CanvasBackgroundPicker
+                  value={reel.composition.backgroundColor ?? '#000000'}
+                  onChange={(color) => setReelBackgroundColor(reelId, color)}
+                />
               </div>
-              <SubtitleConfigPanel reelId={reelId} />
-            </>
-          )}
-        </div>
-      </div>
+              <div className="flex flex-1 min-h-0 w-full items-center justify-center">
+                <TimelineCanvasPreview reelId={reelId} />
+              </div>
+            </div>
+
+            {/* Right: clip config OR subtitle style.
+                ORDER MATTERS: the selected clip's properties go FIRST. The framing
+                and mix accordions below are tall (a long keyframe list alone fills
+                the column), and with them on top the Motion controls fell off the
+                bottom at 100% browser zoom — the user had to zoom the browser out
+                to 60% to reach them. */}
+            <div className="w-[30%] min-w-[300px] flex-shrink-0 flex flex-col overflow-y-auto border-l border-border">
+              {showTextPanel ? (
+                <TextClipConfigPanel reelId={reelId} />
+              ) : showImagePanel ? (
+                <ImageClipConfigPanel reelId={reelId} />
+              ) : showVideoPanel ? (
+                <VideoClipMotionPanel reelId={reelId} />
+              ) : showAudioPanel ? (
+                <AudioClipConfigPanel reelId={reelId} />
+              ) : null}
+
+              {/* Mesa ducking + ambient boost + animated crop — same tools as the
+                  setup phase, reachable while editing the timeline. Collapsed
+                  while a clip is selected so its properties stay in view. */}
+              <div className="p-2 space-y-2 border-y border-border">
+                <CropKeyframesPanel reelId={reelId} collapsed={!!selectedClip} />
+                <ReelMixPanels reelId={reelId} />
+              </div>
+
+              {!selectedClip && (
+                <>
+                  {selectedClipIds.length === 0 && reel.subtitleSegments.length > 0 && (
+                    <ReelSubtitleSelectionStyle reelId={reelId} />
+                  )}
+                  <div className="p-3 border-b border-border">
+                    <SubtitleStylePreview style={reel.subtitleStyle} />
+                  </div>
+                  <SubtitleConfigPanel reelId={reelId} />
+                </>
+              )}
+            </div>
+          </div>
+        )}
+        bottom={<ReelTimeline reelId={reelId} />}
+      />
     </div>
   );
 }

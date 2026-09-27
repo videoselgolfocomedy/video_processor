@@ -76,6 +76,31 @@ function collectReferencedFiles(project: ProjectState): Map<string, string> {
     add(e.outputPath, `Export ${e.presetId} (${e.status})`);
   }
 
+  // PARTS (Sync & Mix). Every file the part pipeline derives is namespaced
+  // `part_<id8>_*` and NOT pointed at by any sync/audio field — so this list
+  // used to show the raw mesa, the mix, the alignment data, the ambient gain
+  // curve and even the part's own muxed video as "orphans", and "Eliminar
+  // huérfanos" wiped them on a real project (the je-je panel went blank and
+  // the next re-mix would have rewritten 28 GB). Only the stems and mix_sync
+  // survived, and only because a reel clip / sync.mixedAudioPath named them.
+  for (const part of project.parts ?? []) {
+    const prefix = `part_${part.id.slice(0, 8)}`;
+    const who = `Parte "${part.name}"`;
+    refs.set(`${prefix}_board.wav`, `${who}: mesa cruda (je-je, alineación, referencia gris)`);
+    refs.set(`${prefix}_mix.wav`, `${who}: mezcla`);
+    refs.set(`${prefix}_mix_sync.wav`, `${who}: mezcla sincronizada (audio activo)`);
+    refs.set(`${prefix}_board_proc.wav`, `${who}: mesa procesada (stem)`);
+    refs.set(`${prefix}_amb_proc.wav`, `${who}: ambiente procesado (stem)`);
+    refs.set(`${prefix}_ambgain.wav`, `${who}: curva de ganancia del ambiente`);
+    refs.set(`${prefix}_mesagate.wav`, `${who}: puerta de la mesa (voz / sala)`);
+    refs.set(`${prefix}_alignment.json`, `${who}: datos de alineación`);
+    refs.set(`${prefix}_fillers.json`, `${who}: propuestas je-je`);
+    refs.set(`${prefix}_muxed.mp4`, `${who}: vídeo muxado (re-mix rápido)`);
+    add(part.muxedVideoPath, `${who}: vídeo muxado`);
+    add(part.mixedAudioPath, `${who}: mezcla`);
+    if (part.videoSourceId) refs.set(`${part.videoSourceId}_audio.wav`, `${who}: audio de cámara (ambiente crudo)`);
+  }
+
   return refs;
 }
 
@@ -120,6 +145,8 @@ async function listDirFiles(
 function inferOrphanRole(name: string, category: FileInfo['category']): string {
   const lower = name.toLowerCase();
   if (category === 'audio') {
+    if (lower.startsWith('envelope_')) return 'Caché de onda (se regenera sola)';
+    if (/^part_[0-9a-f]{8}_prev_/.test(lower)) return 'Vista previa 30 s (se regenera sola)';
     if (lower.includes('amplified')) return 'Amplificación previa (descartada)';
     if (lower.startsWith('mix_')) return 'Mix anterior (descartado)';
     if (lower.includes('ambient_aligned')) return 'Ambiente alineado (anterior)';

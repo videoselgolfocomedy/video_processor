@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs/promises';
 import { createReadStream } from 'fs';
+import { Readable } from 'stream';
 import path from 'path';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
+import { ensurePartBoardWav } from '@/server/part-files';
+import { resolveProjectMediaPath } from '@/server/project-media';
 
 /**
  * GET  /api/projects/[id]/audio/file?name=ambient.wav  → serve file
@@ -55,40 +58,25 @@ export async function GET(
 
   // Security: prevent path traversal
   const safeName = path.basename(name);
+  // A part's raw mesa is rebuilt from its source if it went missing (no-op otherwise).
+  await ensurePartBoardWav(id, safeName).catch((err) => console.warn('[audio/file]', (err as Error).message));
 
-  // Check in audio dir, then export dir, then source dir
-  const audioDir = getProjectDir(id, 'audio');
-  const exportDir = getProjectDir(id, 'export');
-  const sourceDir = getProjectDir(id, 'source');
-  let filePath = path.join(audioDir, safeName);
-
-  try {
-    await fs.access(filePath);
-  } catch {
-    // Try export dir (muxed videos)
-    filePath = path.join(exportDir, safeName);
-    try {
-      await fs.access(filePath);
-    } catch {
-      // Try source dir
-      filePath = path.join(sourceDir, safeName);
+  // audio/ → export/ → source/ → project root, plus the stale-muxed fallback
+  // (see resolveProjectMediaPath). Shared with the envelope endpoint so a name
+  // that draws a waveform always plays too, and vice versa.
+  let filePath = await resolveProjectMediaPath(id, safeName);
+  if (!filePath) {
+    // An absolute path inside the project is accepted as-is (stored paths).
+    const projectDir = getProjectDir(id);
+    if (name.startsWith(projectDir)) {
       try {
-        await fs.access(filePath);
-      } catch {
-        // Try absolute path if it's within the project dir
-        const projectDir = getProjectDir(id);
-        if (name.startsWith(projectDir)) {
-          filePath = name;
-          try {
-            await fs.access(filePath);
-          } catch {
-            return NextResponse.json({ error: 'File not found' }, { status: 404 });
-          }
-        } else {
-          return NextResponse.json({ error: 'File not found' }, { status: 404 });
-        }
-      }
+        await fs.access(name);
+        filePath = name;
+      } catch { /* fall through */ }
     }
+  }
+  if (!filePath) {
+    return NextResponse.json({ error: 'File not found' }, { status: 404 });
   }
 
   const stat = await fs.stat(filePath);
@@ -108,7 +96,26 @@ export async function GET(
   };
   const contentType = mimeTypes[ext] || 'application/octet-stream';
 
-  // Stream file using ReadableStream (handles large files without loading into memory)
+  // Revalidation info so the browser can skip re-transferring bytes it
+  // already has (a 304 costs nothing) instead of re-downloading the whole
+  // file on every mount — these files ARE overwritten in place (re-mixes,
+  // re-amplifies), so the tag must track mtime, never claim "immutable".
+  const etag = `"${stat.size}-${stat.mtimeMs}"`;
+  const lastModified = stat.mtime.toUTCString();
+  const ifNoneMatch = request.headers.get('if-none-match');
+  const ifModifiedSince = request.headers.get('if-modified-since');
+  if (ifNoneMatch === etag || (ifModifiedSince && new Date(ifModifiedSince) >= stat.mtime)) {
+    return new Response(null, {
+      status: 304,
+      headers: { ETag: etag, 'Last-Modified': lastModified, 'Cache-Control': 'no-cache' },
+    });
+  }
+
+  // Stream via Readable.toWeb (propagates backpressure to the fs stream) —
+  // the old manual `nodeStream.on('data', chunk => controller.enqueue(chunk))`
+  // bridge ignores controller.desiredSize, so a stalled client (Chrome caps
+  // its media buffer) let the server keep reading a 25+ GB file into an
+  // unbounded queue at disk speed. Same fix already used in export/download.
   const range = request.headers.get('range');
   if (range) {
     const match = range.match(/bytes=(\d+)-(\d*)/);
@@ -117,15 +124,7 @@ export async function GET(
       const end = match[2] ? parseInt(match[2]) : stat.size - 1;
       const chunkSize = end - start + 1;
 
-      const nodeStream = createReadStream(filePath, { start, end });
-      const webStream = new ReadableStream({
-        start(controller) {
-          nodeStream.on('data', (chunk) => controller.enqueue(chunk));
-          nodeStream.on('end', () => controller.close());
-          nodeStream.on('error', (err) => controller.error(err));
-        },
-        cancel() { nodeStream.destroy(); },
-      });
+      const webStream = Readable.toWeb(createReadStream(filePath, { start, end })) as ReadableStream;
 
       return new Response(webStream, {
         status: 206,
@@ -135,20 +134,14 @@ export async function GET(
           'Content-Length': String(chunkSize),
           'Accept-Ranges': 'bytes',
           'Cache-Control': 'no-cache',
+          ETag: etag,
+          'Last-Modified': lastModified,
         },
       });
     }
   }
 
-  const nodeStream = createReadStream(filePath);
-  const webStream = new ReadableStream({
-    start(controller) {
-      nodeStream.on('data', (chunk) => controller.enqueue(chunk));
-      nodeStream.on('end', () => controller.close());
-      nodeStream.on('error', (err) => controller.error(err));
-    },
-    cancel() { nodeStream.destroy(); },
-  });
+  const webStream = Readable.toWeb(createReadStream(filePath)) as ReadableStream;
 
   return new Response(webStream, {
     headers: {
@@ -156,6 +149,8 @@ export async function GET(
       'Content-Length': String(stat.size),
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-cache',
+      ETag: etag,
+      'Last-Modified': lastModified,
     },
   });
 }

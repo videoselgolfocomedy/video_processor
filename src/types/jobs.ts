@@ -8,6 +8,9 @@ export type JobType =
   | 'mix-preview'
   | 'audio-sync'
   | 'mux'
+  | 'part-pipeline'
+  | 'parts-concat'
+  | 'detect-fillers'
   | 'transcribe'
   | 'render';
 

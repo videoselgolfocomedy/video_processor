@@ -3,13 +3,18 @@
 import { useCallback, useRef } from 'react';
 import { useReelStore } from '@/stores/reel-store';
 import { formatTimestamp } from '@/lib/utils';
+import { mapComposeRangeToSource } from '@/lib/reel-source-mapping';
+import type { CompositionClip, ReelDefinition } from '@/types/project';
 
 interface ReelTrimBarProps {
   reelId: string;
   baseDurationMs: number;
+  /** Compose v1 clips — used to recompute the source mapping (incl. cut
+   *  segments) when the range is trimmed, so a cut-spanning reel stays correct. */
+  composeClips?: CompositionClip[];
 }
 
-export function ReelTrimBar({ reelId, baseDurationMs }: ReelTrimBarProps) {
+export function ReelTrimBar({ reelId, baseDurationMs, composeClips }: ReelTrimBarProps) {
   const reel = useReelStore((s) => s.reels.find((r) => r.id === reelId));
   const updateReel = useReelStore((s) => s.updateReel);
   const regenerateReelSubtitles = useReelStore((s) => s.regenerateReelSubtitles);
@@ -29,29 +34,33 @@ export function ReelTrimBar({ reelId, baseDurationMs }: ReelTrimBarProps) {
       const bar = barRef.current;
       if (!bar) return;
 
+      // Apply a new [startMs, endMs] compose range, recomputing the source
+      // mapping. When compose clips are available we map through them (handles
+      // cut-spanning reels: updates sourceSegments so the preview stays right);
+      // otherwise fall back to the legacy 1:1 source delta.
+      const applyRange = (newStart: number, newEnd: number) => {
+        const updates: Partial<ReelDefinition> = { startMs: newStart, endMs: newEnd };
+        if (composeClips && composeClips.length > 0) {
+          const m = mapComposeRangeToSource(composeClips, newStart, newEnd);
+          updates.sourceStartMs = m.sourceStartMs;
+          updates.sourceEndMs = m.sourceEndMs;
+          updates.sourceSegments = m.sourceSegments; // undefined clears stale segments
+        } else {
+          if (reel.sourceStartMs != null) updates.sourceStartMs = reel.sourceStartMs + (newStart - reel.startMs);
+          if (reel.sourceEndMs != null) updates.sourceEndMs = reel.sourceEndMs + (newEnd - reel.endMs);
+        }
+        updateReel(reelId, updates);
+      };
+
       const onMouseMove = (ev: MouseEvent) => {
         const rect = bar.getBoundingClientRect();
         const fraction = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
         const ms = Math.round(fraction * baseDurationMs);
 
         if (handle === 'left') {
-          const clamped = Math.max(0, Math.min(ms, reel.endMs - 1000));
-          const delta = clamped - reel.startMs;
-          // Keep sourceStartMs in sync — within a compose clip the mapping is 1:1
-          const updates: Record<string, number> = { startMs: clamped };
-          if (reel.sourceStartMs != null) {
-            updates.sourceStartMs = reel.sourceStartMs + delta;
-          }
-          updateReel(reelId, updates);
+          applyRange(Math.max(0, Math.min(ms, reel.endMs - 1000)), reel.endMs);
         } else {
-          const clamped = Math.max(reel.startMs + 1000, Math.min(ms, baseDurationMs));
-          const delta = clamped - reel.endMs;
-          // Keep sourceEndMs in sync — within a compose clip the mapping is 1:1
-          const updates: Record<string, number> = { endMs: clamped };
-          if (reel.sourceEndMs != null) {
-            updates.sourceEndMs = reel.sourceEndMs + delta;
-          }
-          updateReel(reelId, updates);
+          applyRange(reel.startMs, Math.max(reel.startMs + 1000, Math.min(ms, baseDurationMs)));
         }
       };
 
@@ -64,7 +73,7 @@ export function ReelTrimBar({ reelId, baseDurationMs }: ReelTrimBarProps) {
       window.addEventListener('mousemove', onMouseMove);
       window.addEventListener('mouseup', onMouseUp);
     },
-    [reel, reelId, baseDurationMs, updateReel, regenerateReelSubtitles]
+    [reel, reelId, baseDurationMs, composeClips, updateReel, regenerateReelSubtitles]
   );
 
   const handleBarClick = useCallback(

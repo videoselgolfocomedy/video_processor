@@ -4,6 +4,7 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { PROJECTS_DIR, PROJECT_DIRS } from '@/lib/constants';
 import { slugify } from '@/lib/utils';
+import { migrateAmbientBands } from '@/lib/ambient-bands';
 import type { ProjectState, AudioState, SyncState, TranscriptionState, CompositionState, YouTubeSubtitleConfig, SubtitleStyle } from '@/types/project';
 import { jobManager } from '@/server/job-manager';
 
@@ -361,7 +362,15 @@ function migrateProject(project: ProjectState): ProjectState {
     changed = true;
   }
 
-  return changed ? { ...project, audio, sync, transcription, composition, youtubeSubtitles, reels, exports } : project;
+  // Parts: manual ambient zones became ABSOLUTE levels (see lib/ambient-bands).
+  // Converted on every read until the first write persists the flag.
+  let parts = project.parts;
+  if (parts?.some((p) => !p.ambientBandsAbsolute)) {
+    parts = parts.map((p) => migrateAmbientBands(p) ?? p);
+    changed = true;
+  }
+
+  return changed ? { ...project, audio, sync, transcription, composition, youtubeSubtitles, reels, exports, ...(parts ? { parts } : {}) } : project;
 }
 
 export async function getProject(id: string): Promise<ProjectState | null> {

@@ -12,6 +12,7 @@ export function TimelineSubtitleTrack() {
   const scrollOffsetMs = useComposeStore((s) => s.scrollOffsetMs);
   const selectedSubtitleIds = useComposeStore((s) => s.selectedSubtitleIds);
   const selectSubtitle = useComposeStore((s) => s.selectSubtitle);
+  const selectSubtitleRange = useComposeStore((s) => s.selectSubtitleRange);
   const selectClip = useComposeStore((s) => s.selectClip);
   const updateSubtitleSegment = useComposeStore((s) => s.updateSubtitleSegment);
   const moveSelectedSubtitles = useComposeStore((s) => s.moveSelectedSubtitles);
@@ -22,7 +23,7 @@ export function TimelineSubtitleTrack() {
   const [editText, setEditText] = useState('');
   const [dragMode, setDragMode] = useState<DragMode>(null);
   const didDrag = useRef(false);
-  const dragOrigin = useRef({ mouseX: 0, origMs: 0, segId: '', prevDelta: 0 });
+  const dragOrigin = useRef({ mouseX: 0, origMs: 0, segId: '', prevDelta: 0, shift: false });
   const inputRef = useRef<HTMLInputElement>(null);
 
   const startEdit = useCallback((segId: string, text: string) => {
@@ -53,7 +54,7 @@ export function TimelineSubtitleTrack() {
       }
 
       saveSnapshot();
-      dragOrigin.current = { mouseX: e.clientX, origMs, segId, prevDelta: 0 };
+      dragOrigin.current = { mouseX: e.clientX, origMs, segId, prevDelta: 0, shift: e.shiftKey };
       didDrag.current = false;
       setDragMode(mode);
     },
@@ -94,7 +95,13 @@ export function TimelineSubtitleTrack() {
     const handleMouseUp = () => {
       if (!didDrag.current && dragMode === 'move') {
         const segId = dragOrigin.current.segId;
-        selectSubtitle(segId, true);
+        if (dragOrigin.current.shift) {
+          // Shift+click: extend selection as a contiguous range from the
+          // current selection to the clicked subtitle.
+          selectSubtitleRange(segId);
+        } else {
+          selectSubtitle(segId, true);
+        }
         selectClip(null);
         const seg = segments.find((s) => s.id === segId);
         if (seg) setCurrentTime(seg.startMs);
@@ -108,7 +115,7 @@ export function TimelineSubtitleTrack() {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [dragMode, zoomLevel, segments, updateSubtitleSegment, moveSelectedSubtitles, setCurrentTime, selectSubtitle, selectClip]);
+  }, [dragMode, zoomLevel, segments, updateSubtitleSegment, moveSelectedSubtitles, setCurrentTime, selectSubtitle, selectSubtitleRange, selectClip]);
 
   return (
     <>

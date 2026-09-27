@@ -25,7 +25,7 @@ export function ReelTimelineSubtitleBar({ reelId, segments }: ReelTimelineSubtit
   const [editText, setEditText] = useState('');
   const [dragMode, setDragMode] = useState<DragMode>(null);
   const didDrag = useRef(false);
-  const dragOrigin = useRef({ mouseX: 0, origMs: 0, segId: '', prevDelta: 0 });
+  const dragOrigin = useRef({ mouseX: 0, origMs: 0, segId: '', prevDelta: 0, shift: false });
   const inputRef = useRef<HTMLInputElement>(null);
 
   const startEdit = useCallback((segId: string, text: string) => {
@@ -58,7 +58,7 @@ export function ReelTimelineSubtitleBar({ reelId, segments }: ReelTimelineSubtit
       // For move: selection is handled on mouseUp (click) to allow toggle
 
       useReelStore.getState().saveSnapshot();
-      dragOrigin.current = { mouseX: e.clientX, origMs, segId, prevDelta: 0 };
+      dragOrigin.current = { mouseX: e.clientX, origMs, segId, prevDelta: 0, shift: e.shiftKey };
       didDrag.current = false;
       setDragMode(mode);
     },
@@ -101,9 +101,15 @@ export function ReelTimelineSubtitleBar({ reelId, segments }: ReelTimelineSubtit
 
     const handleMouseUp = () => {
       if (!didDrag.current && dragMode === 'move') {
-        // Click without drag: toggle this segment in the selection
+        // Click without drag: toggle this segment in the selection.
+        // Shift+click: extend selection as a contiguous range from the
+        // current selection to the clicked subtitle.
         const segId = dragOrigin.current.segId;
-        selectSubtitle(segId, true); // addToSelection = toggle
+        if (dragOrigin.current.shift) {
+          useReelStore.getState().selectSubtitleRange(reelId, segId);
+        } else {
+          selectSubtitle(segId, true); // addToSelection = toggle
+        }
         useReelStore.getState().selectClip(null);
         const seg = segments.find((s) => s.id === segId);
         if (seg) setCurrentTime(seg.startMs);

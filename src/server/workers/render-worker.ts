@@ -1,12 +1,16 @@
 import path from 'path';
+import { activeGainRegions, toDuckRegions } from '@/lib/clip-gain';
+import { trackMixerGain } from '@/lib/audio-stems';
 import fs from 'fs/promises';
 import { existsSync } from 'fs';
 import { jobManager } from '@/server/job-manager';
 import { getProject, updateProject, getProjectDir } from '@/server/project-manager';
-import { renderVideo, renderReelVideo, type ImageOverlayInput, type VideoOverlayInput } from '@/server/ffmpeg-wrapper';
+import { renderVideo, renderReelVideo, type ImageOverlayInput, type VideoOverlayInput, type ExtraAudioInput } from '@/server/ffmpeg-wrapper';
+import { ffmpegFadeCurve } from '@/lib/audio-fade';
+import { remapCropKeyframesToClips } from '@/lib/crop-keyframes';
 import { generateASS } from '@/server/ass-generator';
 import type { ASSTextOverlay } from '@/server/ass-generator';
-import type { ExportPreset, SubtitleStyle, SubtitleSegment, CropRegion, CompositionClip } from '@/types/project';
+import type { ExportPreset, SubtitleStyle, SubtitleSegment, CropRegion, CompositionClip, CompositionAspect } from '@/types/project';
 
 /**
  * Subtitle styles are designed at 1080px width base (the "design canvas").
@@ -53,6 +57,25 @@ const FONT_LIBASS_SIZE_RATIO: Record<string, number> = {
 function libassFontSize(family: string | undefined, browserFontSize: number, scale: number): number {
   const ratio = family ? (FONT_LIBASS_SIZE_RATIO[family] ?? 1.0) : 1.0;
   return Math.round(browserFontSize * scale * ratio);
+}
+
+/**
+ * Pixel width of the Remotion PREVIEW composition for a given compose aspect
+ * ratio — MUST mirror compose-preview.tsx (the `compositionWidth` switch).
+ * Text-overlay `fontSize` values are authored as RAW pixels inside that
+ * composition (no normalization), so the export must scale them by
+ * `preset.width / composePreviewWidth(aspect)` to match 1:1. For 16:9 the
+ * preview is 1920 wide (NOT the 1080 subtitle base), which is why using
+ * BASE_WIDTH here made overlays ~1.78× too big and overflow the frame.
+ */
+function composePreviewWidth(aspect: CompositionAspect | undefined): number {
+  switch (aspect) {
+    case '9:16': return 1080;
+    case '1:1':  return 1080;
+    case '4:5':  return 1080;
+    case '16:9':
+    default:     return 1920;
+  }
 }
 
 /**
@@ -288,10 +311,16 @@ async function runRender(options: RenderOptions): Promise<void> {
     const abs = p.includes('/') ? p : path.join(audioDir, p);
     return existsSync(abs) ? abs : undefined;
   };
+  // NOTE: the extracted-track fallback must NOT apply when a muxed video
+  // exists. The muxed timeline is the downstream reference and its embedded
+  // audio is the chosen mix; extractedTracks are per-source camera wavs. On
+  // parts-concat projects (selected/mixed cleared) extractedTracks[0] is only
+  // PART 1's camera audio — using it renders every later part silent and
+  // replaces the mix with raw camera sound.
   const audioSrc =
     resolveAudio(project.sync.selectedAudioPath) ??
     resolveAudio(project.sync.mixedAudioPath) ??
-    resolveAudio(project.audio.extractedTracks[0]?.path);
+    (muxedVideoSrc ? undefined : resolveAudio(project.audio.extractedTracks[0]?.path));
   if (!audioSrc) {
     console.log('[render] No separate audio file found on disk — using muxed video embedded audio');
   }
@@ -312,7 +341,11 @@ async function runRender(options: RenderOptions): Promise<void> {
     // Reel export — uses composition clips for timeline edits
     const reel = project.reels.find((r) => r.id === reelId);
     if (!reel) {
-      jobManager.failJob(jobId, `Reel ${reelId} not found`);
+      // Also mark the export record as errored — leaving it 'rendering' kept
+      // the queue stuck at "Iniciando…" forever. Typical cause: the export
+      // page held a stale project (reel deleted/recreated since it loaded).
+      const msg = `El reel ya no existe (¿borrado o recreado?). Recarga la página de Export e inténtalo de nuevo.`;
+      await failExport(projectId, exportId, jobId, msg, `Reel ${reelId} not found`);
       return;
     }
     subtitleStyle = reel.subtitleStyle;
@@ -327,8 +360,29 @@ async function runRender(options: RenderOptions): Promise<void> {
 
     // Get video clips from rv1 track, sorted by timeline position
     const videoClips = reel.composition.clips
-      .filter((c) => c.trackId === 'rv1')
+      .filter((c) => c.trackId === 'rv1' && c.sourceOutMs - c.sourceInMs >= 1)
       .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+
+    // Setup-phase reel with animated crop: the simple-trim fallback below goes
+    // through renderVideo, which can't animate. Synthesize the single trim
+    // clip so the export takes the renderReelVideo path (subtitles are already
+    // 0-based, matching the synthetic clip's timeline).
+    if (videoClips.length === 0 && reel.cropKeyframes && reel.cropKeyframes.length > 0) {
+      console.log('[render] Reel has crop keyframes but no rv1 clips — synthesizing single trim clip for the animated pipeline');
+      // startMs/endMs are COMPOSE-timeline times; the muxed-file seek times
+      // are sourceStartMs/sourceEndMs (same fallback as enterTimelinePhase).
+      const srcIn = reel.sourceStartMs ?? reel.startMs;
+      const srcOut = reel.sourceEndMs ?? reel.endMs;
+      videoClips.push({
+        id: 'kf-synthetic',
+        trackId: 'rv1',
+        type: 'video',
+        sourceInMs: srcIn,
+        sourceOutMs: srcOut,
+        timelineStartMs: 0,
+        timelineEndMs: srcOut - srcIn,
+      } as CompositionClip);
+    }
 
     if (videoClips.length > 0) {
       // Reel has timeline edits — use clip-based rendering
@@ -375,7 +429,10 @@ async function runRender(options: RenderOptions): Promise<void> {
                 x: tc.overlayPosition?.x ?? 0.5,
                 y: tc.overlayPosition?.y ?? 0.5,
                 width: tc.overlayPosition?.width ?? 0.8,
-                fontSize: libassFontSize(tc.textStyle?.fontFamily, tc.textStyle?.fontSize ?? 40, scale),
+                // Resolve the family the SAME way for the size-ratio and the ASS
+                // Style below — else an overlay with no fontFamily is sized with
+                // ratio 1.0 but rendered as Inter (ratio 1.21) → ~17% too small.
+                fontSize: libassFontSize(tc.textStyle?.fontFamily ?? 'Inter', tc.textStyle?.fontSize ?? 40, scale),
                 fontFamily: tc.textStyle?.fontFamily ?? 'Inter',
                 fontWeight: tc.textStyle?.fontWeight ?? 400,
                 color: tc.textStyle?.color ?? '#ffffff',
@@ -422,10 +479,12 @@ async function runRender(options: RenderOptions): Promise<void> {
         console.log(`[render] ASS debug: ${debugAssPath}`);
       }
 
-      // Compute audio clip ranges remapped to concat output timeline
-      // This allows muting audio during gaps where audio clips were removed
+      // Compute audio clip ranges remapped to concat output timeline.
+      // Only ra1 (the main audio track) gates the muxed/separate audio — gaps
+      // there get muted. Other audio tracks (ra2, …) are EXTRA layers mixed in
+      // additively below, not gates, so they're excluded here.
       const audioClips = reel.composition.clips
-        .filter((c) => c.trackId === 'ra1' || c.trackId === 'ra2')
+        .filter((c) => c.trackId === 'ra1')
         .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
 
       let audioClipRanges: { startMs: number; endMs: number }[] | undefined;
@@ -491,7 +550,11 @@ async function runRender(options: RenderOptions): Promise<void> {
             const overlapStart = Math.max(ic.timelineStartMs, cm.timelineStart);
             const overlapEnd = Math.min(ic.timelineEndMs, cm.timelineEnd);
             if (overlapStart < overlapEnd) {
-              const filePath = path.join(projectDir, ic.fileName!);
+              // Look for image files in compose/ subdirectory first, then project root (for legacy/moved files)
+              let filePath = path.join(projectDir, 'compose', ic.fileName!);
+              if (!existsSync(filePath)) {
+                filePath = path.join(projectDir, ic.fileName!);
+              }
               imageOverlays.push({
                 filePath,
                 startMs: cm.outputStart + (overlapStart - cm.timelineStart),
@@ -546,6 +609,79 @@ async function runRender(options: RenderOptions): Promise<void> {
         if (videoOverlays.length === 0) videoOverlays = undefined;
       }
 
+      // Extract EXTRA audio clips (audio on any track other than the main ra1)
+      // and remap to the concat output timeline. These are mixed additively
+      // on top of the main audio — same as the live ReelExtraAudio preview.
+      // Track mutes are honored on export (parity with the reel player):
+      // ra1 muted → the main audio is silenced; a muted extra track is skipped.
+      const mutedReelTracks = new Set(reel.composition.tracks.filter((t) => t.muted).map((t) => t.id));
+      const muteMainAudioReel = mutedReelTracks.has('ra1');
+      if (muteMainAudioReel) console.log('[render] ra1 is muted — main audio silenced, only extra layers play');
+      const extraAudioClips = reel.composition.clips
+        .filter((c) => c.type === 'audio' && c.trackId !== 'ra1' && c.fileName && !mutedReelTracks.has(c.trackId))
+        .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+
+      let extraAudio: ExtraAudioInput[] | undefined;
+      if (extraAudioClips.length > 0) {
+        let concatOff4 = 0;
+        const vcTimeMap4 = videoClips.map((vc) => {
+          const entry = { timelineStart: vc.timelineStartMs, timelineEnd: vc.timelineEndMs, outputStart: concatOff4 };
+          concatOff4 += vc.timelineEndMs - vc.timelineStartMs;
+          return entry;
+        });
+        extraAudio = [];
+        const projectDir = getProjectDir(projectId);
+        // An extra-audio fileName may live in audio/ (a mix), the project root
+        // (uploads / pasted reel_* files), export/, or source/. Resolve against
+        // all of them and skip the clip if it can't be found — a single missing
+        // layer must NOT abort the whole render.
+        const resolveExtraPath = (name: string): string | undefined => {
+          if (name.includes('/') && existsSync(name)) return name;
+          const base = path.basename(name);
+          for (const dir of [
+            getProjectDir(projectId, 'audio'),
+            projectDir,
+            getProjectDir(projectId, 'export'),
+            getProjectDir(projectId, 'source'),
+          ]) {
+            const cand = path.join(dir, base);
+            if (existsSync(cand)) return cand;
+          }
+          return undefined;
+        };
+        for (const ea of extraAudioClips) {
+          const filePath = resolveExtraPath(ea.fileName!);
+          if (!filePath) {
+            console.warn(`[render] extra audio file not found, skipping: ${ea.fileName}`);
+            continue;
+          }
+          for (const cm of vcTimeMap4) {
+            const overlapStart = Math.max(ea.timelineStartMs, cm.timelineStart);
+            const overlapEnd = Math.min(ea.timelineEndMs, cm.timelineEnd);
+            if (overlapStart < overlapEnd) {
+              // Only fade the segment that actually contains the clip's start.
+              const fadeInMs = overlapStart <= ea.timelineStartMs ? ea.fadeInMs : 0;
+              extraAudio.push({
+                filePath,
+                startMs: cm.outputStart + (overlapStart - cm.timelineStart),
+                endMs: cm.outputStart + (overlapEnd - cm.timelineStart),
+                sourceInMs: ea.sourceInMs + (overlapStart - ea.timelineStartMs),
+                // Stem tracks enter the mixer at ×0.5, like the part mix.
+                volume: (ea.volume ?? 1) * trackMixerGain(ea.trackId),
+                fadeInMs,
+                fadeInCurve: fadeInMs ? ffmpegFadeCurve(ea.fadeInCurve) : undefined,
+                // A clip that spans several video windows is emitted as one
+                // segment per window, each with its own seek — so the zones are
+                // shifted by THIS segment's source start, not the clip's.
+                gainRegions: toDuckRegions(activeGainRegions(ea), ea.sourceInMs + (overlapStart - ea.timelineStartMs)),
+              });
+            }
+          }
+        }
+        console.log(`[render] ${extraAudio.length} extra audio layer(s) for FFmpeg export`);
+        if (extraAudio.length === 0) extraAudio = undefined;
+      }
+
       jobManager.updateProgress(jobId, 2, 'Starting FFmpeg render...');
 
       const { promise: reelPromise, process: reelProc } = renderReelVideo({
@@ -554,8 +690,10 @@ async function runRender(options: RenderOptions): Promise<void> {
         audioSourceOffsetMs: muxedAudioOffsetMs,
         clips: videoClips,
         audioClipRanges,
+        muteMainAudio: muteMainAudioReel,
         imageOverlays,
         videoOverlays,
+        extraAudio,
         assFilePath: assFilePath2,
         fontsDirPath,
         outputPath,
@@ -565,9 +703,13 @@ async function runRender(options: RenderOptions): Promise<void> {
         crf: preset.crf,
         audioBitrate: preset.audioBitrate,
         cropRegion,
+        // Keyframe times live on the reel TIMELINE; the export concat collapses
+        // gaps, so remap to output time like every other timed element.
+        cropKeyframes: remapCropKeyframesToClips(reel.cropKeyframes, videoClips),
         sourceWidth,
         sourceHeight,
         codec: preset.codec,
+        backgroundColor: reel.composition.backgroundColor,
         onProgress: (percent) => {
           jobManager.updateProgress(jobId, 2 + percent * 0.96, `Rendering... ${Math.round(percent)}%`);
         },
@@ -623,8 +765,10 @@ async function runRender(options: RenderOptions): Promise<void> {
     segments = project.youtubeSubtitles?.segments ?? project.transcription.segments;
 
     // Check for compose timeline clips on v1 track
+    // Slivers (< 1 ms, left by splitting twice at a fractional playhead) are
+    // dropped: they occupy no time, and FFmpeg rejects their `-t 1e-14`.
     const composeVideoClips = (project.composition?.clips ?? [])
-      .filter((c: CompositionClip) => c.trackId === 'v1')
+      .filter((c: CompositionClip) => c.trackId === 'v1' && c.sourceOutMs - c.sourceInMs >= 1)
       .sort((a: CompositionClip, b: CompositionClip) => a.timelineStartMs - b.timelineStartMs);
 
     if (composeVideoClips.length > 0) {
@@ -730,7 +874,11 @@ async function runRender(options: RenderOptions): Promise<void> {
         });
 
         assTextOverlays = [];
-        const scale = preset.width / BASE_WIDTH;
+        // Text overlays are authored as RAW px inside the compose PREVIEW
+        // composition (1920 wide for 16:9, 1080 for vertical), so scale by the
+        // preview width — NOT BASE_WIDTH (1080), which over-scaled 16:9 overlays
+        // ~1.78× and pushed them off the frame. Subtitles keep their own base.
+        const scale = preset.width / composePreviewWidth(project.composition?.aspectRatio);
         for (const tc of textClips) {
           for (const cm of clipTimeMap) {
             const overlapStart = Math.max(tc.timelineStartMs, cm.timelineStart);
@@ -745,7 +893,10 @@ async function runRender(options: RenderOptions): Promise<void> {
                 x: tc.overlayPosition?.x ?? 0.5,
                 y: tc.overlayPosition?.y ?? 0.5,
                 width: tc.overlayPosition?.width ?? 0.8,
-                fontSize: libassFontSize(tc.textStyle?.fontFamily, tc.textStyle?.fontSize ?? 40, scale),
+                // Resolve the family the SAME way for the size-ratio and the ASS
+                // Style below — else an overlay with no fontFamily is sized with
+                // ratio 1.0 but rendered as Inter (ratio 1.21) → ~17% too small.
+                fontSize: libassFontSize(tc.textStyle?.fontFamily ?? 'Inter', tc.textStyle?.fontSize ?? 40, scale),
                 fontFamily: tc.textStyle?.fontFamily ?? 'Inter',
                 fontWeight: tc.textStyle?.fontWeight ?? 400,
                 color: tc.textStyle?.color ?? '#ffffff',
@@ -762,27 +913,36 @@ async function runRender(options: RenderOptions): Promise<void> {
         }
       }
 
-      // Audio gap muting from a1 clips
-      const composeAudioClips = (project.composition?.clips ?? [])
-        .filter((c: CompositionClip) => c.trackId === 'a1' || c.trackId === 'a2')
+      // Audio: the base a1 track drives GAP-MUTING (which output ranges of the
+      // main audio play); extra audio tracks (a2+) are mixed in as SEPARATE
+      // layers with their own file / source offset / volume / fade-in. This
+      // mirrors the reels export (ra1 = gated main, ra2+ = extra layers) so the
+      // two composition editors behave identically. Previously a2 was lumped
+      // into gap-muting, so a pasted/moved a2 clip neither played its own
+      // content nor faded on export.
+      const a1AudioClips = (project.composition?.clips ?? [])
+        .filter((c: CompositionClip) => c.trackId === 'a1')
+        .sort((a: CompositionClip, b: CompositionClip) => a.timelineStartMs - b.timelineStartMs);
+      const mutedComposeTracks = new Set((project.composition?.tracks ?? []).filter((t) => t.muted).map((t) => t.id));
+      const muteMainAudioCompose = mutedComposeTracks.has('a1');
+      if (muteMainAudioCompose) console.log('[render] a1 is muted — main audio silenced, only extra layers play');
+      const extraAudioClipsC = (project.composition?.clips ?? [])
+        .filter((c: CompositionClip) => c.type === 'audio' && c.trackId !== 'a1' && c.fileName && !mutedComposeTracks.has(c.trackId))
         .sort((a: CompositionClip, b: CompositionClip) => a.timelineStartMs - b.timelineStartMs);
 
-      let audioClipRanges: { startMs: number; endMs: number }[] | undefined;
-      if (composeAudioClips.length > 0) {
-        let concatOff = 0;
-        const vcTimeMap = videoClips.map((vc: CompositionClip) => {
-          const entry = {
-            timelineStart: vc.timelineStartMs,
-            timelineEnd: vc.timelineEndMs,
-            outputStart: concatOff,
-          };
-          concatOff += vc.timelineEndMs - vc.timelineStartMs;
-          return entry;
-        });
+      // Shared timeline→output map over the concatenated v1 clips.
+      let concatOffAudio = 0;
+      const vcTimeMapAudio = videoClips.map((vc: CompositionClip) => {
+        const entry = { timelineStart: vc.timelineStartMs, timelineEnd: vc.timelineEndMs, outputStart: concatOffAudio };
+        concatOffAudio += vc.timelineEndMs - vc.timelineStartMs;
+        return entry;
+      });
 
+      let audioClipRanges: { startMs: number; endMs: number }[] | undefined;
+      if (a1AudioClips.length > 0) {
         audioClipRanges = [];
-        for (const ac of composeAudioClips) {
-          for (const cm of vcTimeMap) {
+        for (const ac of a1AudioClips) {
+          for (const cm of vcTimeMapAudio) {
             const overlapStart = Math.max(ac.timelineStartMs, cm.timelineStart);
             const overlapEnd = Math.min(ac.timelineEndMs, cm.timelineEnd);
             if (overlapStart < overlapEnd) {
@@ -793,12 +953,65 @@ async function runRender(options: RenderOptions): Promise<void> {
             }
           }
         }
-
-        const totalConcatMs = concatOff;
+        const totalConcatMs = concatOffAudio;
         const totalAudioMs = audioClipRanges.reduce((sum, r) => sum + (r.endMs - r.startMs), 0);
         if (totalAudioMs >= totalConcatMs - 100) {
           audioClipRanges = undefined;
         }
+      }
+
+      // Extra-audio layers (a2+): each plays its own file from its own source
+      // offset, with per-clip volume + fade-in. Same resolver/fade logic as the
+      // reel export path (renderReelVideo applies volume + afade=t=in).
+      let extraAudio: ExtraAudioInput[] | undefined;
+      if (extraAudioClipsC.length > 0) {
+        const projectDirEA = getProjectDir(projectId);
+        const resolveExtraPath = (name: string): string | undefined => {
+          if (name.includes('/') && existsSync(name)) return name;
+          const base = path.basename(name);
+          for (const dir of [
+            getProjectDir(projectId, 'audio'),
+            projectDirEA,
+            getProjectDir(projectId, 'export'),
+            getProjectDir(projectId, 'source'),
+          ]) {
+            const cand = path.join(dir, base);
+            if (existsSync(cand)) return cand;
+          }
+          return undefined;
+        };
+        extraAudio = [];
+        for (const ea of extraAudioClipsC) {
+          const filePath = resolveExtraPath(ea.fileName!);
+          if (!filePath) {
+            console.warn(`[render] compose extra audio file not found, skipping: ${ea.fileName}`);
+            continue;
+          }
+          for (const cm of vcTimeMapAudio) {
+            const overlapStart = Math.max(ea.timelineStartMs, cm.timelineStart);
+            const overlapEnd = Math.min(ea.timelineEndMs, cm.timelineEnd);
+            if (overlapStart < overlapEnd) {
+              // Only fade the segment that actually contains the clip's start.
+              const fadeInMs = overlapStart <= ea.timelineStartMs ? ea.fadeInMs : 0;
+              extraAudio.push({
+                filePath,
+                startMs: cm.outputStart + (overlapStart - cm.timelineStart),
+                endMs: cm.outputStart + (overlapEnd - cm.timelineStart),
+                sourceInMs: ea.sourceInMs + (overlapStart - ea.timelineStartMs),
+                // Stem tracks enter the mixer at ×0.5, like the part mix.
+                volume: (ea.volume ?? 1) * trackMixerGain(ea.trackId),
+                fadeInMs,
+                fadeInCurve: fadeInMs ? ffmpegFadeCurve(ea.fadeInCurve) : undefined,
+                // A clip that spans several video windows is emitted as one
+                // segment per window, each with its own seek — so the zones are
+                // shifted by THIS segment's source start, not the clip's.
+                gainRegions: toDuckRegions(activeGainRegions(ea), ea.sourceInMs + (overlapStart - ea.timelineStartMs)),
+              });
+            }
+          }
+        }
+        console.log(`[render] ${extraAudio.length} compose extra audio layer(s) for FFmpeg export`);
+        if (extraAudio.length === 0) extraAudio = undefined;
       }
 
       // Extract image/gif overlays from compose
@@ -826,7 +1039,11 @@ async function runRender(options: RenderOptions): Promise<void> {
             const overlapStart = Math.max(ic.timelineStartMs, cm.timelineStart);
             const overlapEnd = Math.min(ic.timelineEndMs, cm.timelineEnd);
             if (overlapStart < overlapEnd) {
-              const filePath = path.join(projectDir, ic.fileName!);
+              // Look for image files in compose/ subdirectory first, then project root (for legacy/moved files)
+              let filePath = path.join(projectDir, 'compose', ic.fileName!);
+              if (!existsSync(filePath)) {
+                filePath = path.join(projectDir, ic.fileName!);
+              }
               imageOverlays.push({
                 filePath,
                 startMs: cm.outputStart + (overlapStart - cm.timelineStart),
@@ -916,6 +1133,8 @@ async function runRender(options: RenderOptions): Promise<void> {
         audioSourceOffsetMs: composeAudioOffsetMs,
         clips: videoClips,
         audioClipRanges,
+        muteMainAudio: muteMainAudioCompose,
+        extraAudio,
         imageOverlays,
         assFilePath: composeAssFilePath,
         fontsDirPath,
@@ -929,6 +1148,7 @@ async function runRender(options: RenderOptions): Promise<void> {
         sourceWidth,
         sourceHeight,
         codec: preset.codec,
+        backgroundColor: project.composition?.backgroundColor,
         onProgress: (percent) => {
           jobManager.updateProgress(jobId, 2 + percent * 0.96, `Rendering... ${Math.round(percent)}%`);
         },
@@ -970,8 +1190,10 @@ async function runRender(options: RenderOptions): Promise<void> {
       return; // Early return — compose rendering handled separately
     }
 
-    // Fallback: no compose clips, use simple trim
-    const durationSec = videoSource?.duration
+    // Fallback: no compose clips, use simple trim. Muxed timeline length wins
+    // — on parts-concat projects the first video source is only part 1.
+    const durationSec = (project.sync?.muxedDurationMs ? project.sync.muxedDurationMs / 1000 : undefined)
+      || videoSource?.duration
       || project.audio.extractedTracks[0]?.duration
       || 0;
     if (trimInMs !== undefined && trimOutMs !== undefined && (trimInMs > 0 || trimOutMs < durationSec * 1000)) {
@@ -1023,6 +1245,7 @@ async function runRender(options: RenderOptions): Promise<void> {
     cropRegion,
     sourceWidth,
     sourceHeight,
+    backgroundColor: project.composition?.backgroundColor,
     onProgress: (percent) => {
       jobManager.updateProgress(jobId, 2 + percent * 0.96, `Rendering... ${Math.round(percent)}%`);
     },

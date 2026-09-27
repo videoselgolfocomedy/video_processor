@@ -74,7 +74,7 @@ export default function ComposePage() {
 // Helper: get total duration from project
 function getDurationMs(project: {
   sources: Array<{ duration?: number }>;
-  sync: { muxedVideoPath?: string };
+  sync: { muxedVideoPath?: string; muxedDurationMs?: number };
   audio: { extractedTracks: Array<{ duration: number }> };
   transcription: { segments: Array<{ endMs: number }> };
 }): number {
@@ -85,6 +85,11 @@ function getDurationMs(project: {
     const lastEnd = Math.max(...segments.map((s) => s.endMs));
     if (lastEnd > 0) return lastEnd + 2000; // +2s padding
   }
+
+  // Muxed timeline length (authoritative once a mux/join exists). Important
+  // for parts-concat projects: the FIRST video source is only part 1, so its
+  // own duration would understate the full joined timeline.
+  if (project.sync.muxedDurationMs) return project.sync.muxedDurationMs;
 
   // Try source video duration
   const videoSource = project.sources.find((s) => 'type' in s && (s as { type: string }).type === 'video');
@@ -111,11 +116,24 @@ function getVideoSrc(project: { sync: { muxedVideoPath?: string }; sources: Arra
   return undefined;
 }
 
-function getAudioSrc(project: { sync: { mixedAudioPath?: string; selectedAudioPath?: string } }, projectId: string): string | undefined {
+function getAudioSrc(project: { sync: { mixedAudioPath?: string; selectedAudioPath?: string; muxedVideoPath?: string; audioRev?: number } }, projectId: string): string | undefined {
   const audioPath = project.sync.mixedAudioPath || project.sync.selectedAudioPath;
-  if (!audioPath) return undefined;
-  const name = audioPath.split('/').pop();
-  return `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(name || '')}`;
+  if (audioPath) {
+    const name = audioPath.split('/').pop();
+    // audioRev busts the browser cache after an in-place re-mix (mesa ducking).
+    const rev = project.sync.audioRev ? `&v=${project.sync.audioRev}` : '';
+    return `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(name || '')}${rev}`;
+  }
+  // No separate audio file — fall back to the muxed video's own embedded
+  // audio track (see getAudioFileName). Remotion's <Audio> component plays
+  // just the audio track of any media URL, video included, so pointing it at
+  // the same URL as videoSrc works exactly like the export pipeline's
+  // "no separate audioSrc → use the muxed video's embedded audio" fallback.
+  if (project.sync.muxedVideoPath) {
+    const name = project.sync.muxedVideoPath.split('/').pop();
+    return `/api/projects/${projectId}/audio/file?name=${encodeURIComponent(name || '')}&v=${encodeURIComponent(name || '')}`;
+  }
+  return undefined;
 }
 
 // Get the raw file name (for use as clip fileName in the store)
@@ -127,8 +145,14 @@ function getVideoFileName(project: { sync: { muxedVideoPath?: string }; sources:
   return videoSource?.storedName;
 }
 
-function getAudioFileName(project: { sync: { mixedAudioPath?: string; selectedAudioPath?: string } }): string | undefined {
+function getAudioFileName(project: { sync: { mixedAudioPath?: string; selectedAudioPath?: string; muxedVideoPath?: string } }): string | undefined {
   const audioPath = project.sync.mixedAudioPath || project.sync.selectedAudioPath;
-  if (!audioPath) return undefined;
-  return audioPath.split('/').pop();
+  if (audioPath) return audioPath.split('/').pop();
+  // No separate audio file — parts-concat / use-video-directly / restore-
+  // from-muxed projects clear mixedAudioPath/selectedAudioPath because the
+  // audio lives INSIDE the muxed video. Fall back to its own filename so an
+  // a1 clip gets auto-created (pointing at the same file as v1) instead of
+  // silently having no audio clip at all. Mirrors getVideoFileName/getAudioSrc.
+  if (project.sync.muxedVideoPath) return project.sync.muxedVideoPath.split('/').pop();
+  return undefined;
 }

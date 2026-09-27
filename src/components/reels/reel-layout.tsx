@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useReelStore } from '@/stores/reel-store';
 import { useProjectStore } from '@/stores/project-store';
@@ -37,13 +37,32 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
   const currentProject = useProjectStore((s) => s.currentProject);
   const bits = currentProject?.bits ?? [];
   const compositionClips = currentProject?.composition?.clips ?? [];
+  const compositionTracks = currentProject?.composition?.tracks ?? [];
+  // Named compose versions: the bit detector can run against one of them, and
+  // a reel born from those bits keeps that version's cuts (see below).
+  const composeVersions = currentProject?.composition?.versions ?? [];
+  const bitsSource = currentProject?.bitsSource;
+  const bitsVersion = bitsSource?.kind === 'version' ? composeVersions.find((v) => v.id === bitsSource.versionId) : undefined;
+  // The cuts the CURRENT bits were detected against — what the panel measures
+  // coverage with and what a new reel is built from.
+  const bitsClips = bitsVersion ? bitsVersion.clips : compositionClips;
+  const bitsOrigin = bitsVersion ? { versionId: bitsVersion.id, versionLabel: bitsVersion.label } : undefined;
+  const bitsSourceLabel = bitsSource?.kind === 'version'
+    ? (bitsVersion ? `versión «${bitsVersion.label}»` : `versión «${bitsSource.versionLabel ?? '?'}» (ya no existe: se usan los cortes actuales)`)
+    : bitsSource?.kind === 'full' ? 'vídeo completo'
+    : bitsSource?.kind === 'compose' ? 'Compose actual' : undefined;
+  // The active reel's own cuts: its named version when it has one.
+  const activeReel = reels.find((r) => r.id === activeReelId);
+  const activeVersion = activeReel?.composeVersionId ? composeVersions.find((v) => v.id === activeReel.composeVersionId) : undefined;
+  const activeComposeClips = activeVersion ? activeVersion.clips : compositionClips;
 
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [contextMenuId, setContextMenuId] = useState<string | null>(null);
   const [showBitsPanel, setShowBitsPanel] = useState(false);
   const [detectingBits, setDetectingBits] = useState(false);
-  const [bitSource, setBitSource] = useState<'compose' | 'full'>(
+  // 'compose' | 'full' | 'version:<id>'
+  const [bitSource, setBitSource] = useState<string>(
     compositionClips.some((c: { trackId: string }) => c.trackId === 'v1') ? 'compose' : 'full'
   );
   const [bitProvider, setBitProvider] = useState<string>('');
@@ -80,7 +99,8 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
           language: currentProject.transcription.language || 'es',
           context: '',
           provider: bitProvider,
-          source: bitSource,
+          source: bitSource.startsWith('version:') ? 'version' : bitSource,
+          ...(bitSource.startsWith('version:') ? { versionId: bitSource.slice('version:'.length) } : {}),
         }),
       });
 
@@ -108,7 +128,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
             if (event.type === 'progress') {
               setBitProgress(event.message);
             } else if (event.type === 'done' && event.bits) {
-              updateCurrentProject({ bits: event.bits });
+              updateCurrentProject({ bits: event.bits, bitsSource: event.bitsSource });
               setShowBitsPanel(true);
               setBitProgress(`✓ ${event.bits.length} bits detectados`);
             } else if (event.type === 'error') {
@@ -157,19 +177,28 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
+      // Letter shortcuts, layout- and modifier-proof. Two macOS/Shift traps
+      // this avoids: Shift+S reports e.key='S' (uppercase, so === 's' failed →
+      // "split all" never fired), and on macOS Option+V reports e.key='√'
+      // (so Cmd+Option+V for the ripple insert never fired). Fall back to
+      // e.code, which is the physical key, whenever e.key isn't a plain letter.
+      const letter = /^[a-zA-Z]$/.test(e.key)
+        ? e.key.toLowerCase()
+        : (e.code?.startsWith('Key') ? e.code.slice(3).toLowerCase() : '');
+
       if (e.key === ' ') {
         e.preventDefault();
         const store = useReelStore.getState();
         store.setIsPlaying(!store.isPlaying);
       }
 
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      if ((e.ctrlKey || e.metaKey) && letter === 's') {
         e.preventDefault();
         onSave();
       }
 
       // Undo/Redo (Ctrl+Z / Ctrl+Shift+Z)
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+      if ((e.ctrlKey || e.metaKey) && letter === 'z') {
         e.preventDefault();
         const s = useReelStore.getState();
         if (s.activeReelId) {
@@ -177,7 +206,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
           else s.undo(s.activeReelId);
         }
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+      if ((e.ctrlKey || e.metaKey) && letter === 'y') {
         e.preventDefault();
         const s = useReelStore.getState();
         if (s.activeReelId) s.redo(s.activeReelId);
@@ -198,22 +227,31 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
           }
         }
 
-        // Ctrl/Cmd+C = copy selected clips, Ctrl/Cmd+V = paste at playhead
-        if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-          if (store.selectedClipIds.length > 0) {
+        // Ctrl/Cmd+C = copy selection (clips OR subtitles). Works across reels.
+        // Ctrl/Cmd+V = paste at playhead. Shift+Ctrl/Cmd+V = paste "behind"
+        // (appended after the reel's current content).
+        if ((e.ctrlKey || e.metaKey) && letter === 'c') {
+          if (store.selectedClipIds.length > 0 || store.selectedSubtitleIds.length > 0) {
             e.preventDefault();
-            store.copySelectedClips(rid);
+            store.copySelection(rid);
           }
         }
-        if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
-          if (store.canPasteClips()) {
+        // Ctrl/Cmd+Alt+V = INSERT paste (ripple): shifts everything after the
+        // playhead right by the pasted span and brings its subtitles along.
+        if ((e.ctrlKey || e.metaKey) && e.altKey && letter === 'v') {
+          if (store.canPasteClips() || store.canPasteSubtitles()) {
             e.preventDefault();
-            store.pasteClips(rid);
+            store.rippleInsertAtPlayhead(rid);
+          }
+        } else if ((e.ctrlKey || e.metaKey) && letter === 'v') {
+          if (store.canPasteClips() || store.canPasteSubtitles()) {
+            e.preventDefault();
+            store.pasteSelection(rid, e.shiftKey);
           }
         }
 
         // S = split selected clip, Shift+S = split all tracks
-        if (e.key === 's' && !e.ctrlKey && !e.metaKey) {
+        if (letter === 's' && !e.ctrlKey && !e.metaKey) {
           e.preventDefault();
           if (e.shiftKey) {
             store.splitAllAtPlayhead(rid);
@@ -223,7 +261,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
         }
 
         // Q = trim in-point of selected clip to playhead
-        if (e.key === 'q' && !e.ctrlKey && !e.metaKey) {
+        if (letter === 'q' && !e.ctrlKey && !e.metaKey) {
           e.preventDefault();
           const firstClip = store.selectedClipIds[0];
           if (firstClip) {
@@ -232,7 +270,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
         }
 
         // W = trim out-point of selected clip to playhead
-        if (e.key === 'w' && !e.ctrlKey && !e.metaKey) {
+        if (letter === 'w' && !e.ctrlKey && !e.metaKey) {
           e.preventDefault();
           const firstClip = store.selectedClipIds[0];
           if (firstClip) {
@@ -241,7 +279,7 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
         }
 
         // G = collapse gap at playhead, Shift+G = close gap for selected
-        if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey) {
+        if (letter === 'g' && !e.ctrlKey && !e.metaKey) {
           e.preventDefault();
           if (e.shiftKey && store.selectedClipIds.length > 1) {
             store.closeGapForSelected(rid);
@@ -366,10 +404,13 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
             <select
               className="text-[9px] bg-transparent border border-border rounded px-1 py-0.5 text-muted-foreground"
               value={bitSource}
-              onChange={(e) => setBitSource(e.target.value as 'compose' | 'full')}
-              title="Fuente de los segmentos para detectar bits"
+              onChange={(e) => setBitSource(e.target.value)}
+              title="Con qué cortes se detectan los bits: el Compose actual, una versión guardada con nombre en Compose (botón de marcador de su barra), o el vídeo entero sin cortes"
             >
-              <option value="compose">Compose (editado)</option>
+              <option value="compose">Compose (actual)</option>
+              {composeVersions.map((v) => (
+                <option key={v.id} value={`version:${v.id}`}>Versión: {v.label}</option>
+              ))}
               <option value="full">Video completo</option>
             </select>
             {/* Provider selector */}
@@ -442,9 +483,10 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
             <div className="w-[320px] flex-shrink-0 border-l border-border overflow-y-auto">
               <BitsSuggestionPanel
                 bits={bits}
-                compositionClips={compositionClips}
+                compositionClips={bitsClips}
+                sourceLabel={bitsSourceLabel}
                 onCreateReel={(label, startMs, endMs, sourceStartMs, sourceEndMs) => {
-                  createReel(label, startMs, endMs, sourceStartMs, sourceEndMs);
+                  createReel(label, startMs, endMs, sourceStartMs, sourceEndMs, bitsClips, bitsOrigin);
                   setShowBitsPanel(false);
                 }}
               />
@@ -467,7 +509,8 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
               videoSrc={videoSrc}
               audioSrc={audioSrc}
               audioOffsetMs={audioOffsetMs}
-              composeClips={compositionClips}
+              composeClips={activeComposeClips}
+              composeTracks={compositionTracks}
             />
           </div>
 
@@ -476,9 +519,10 @@ export function ReelLayout({ projectId, videoSrc, audioSrc, audioOffsetMs, onSav
             {showBitsPanel && bits.length > 0 ? (
               <BitsSuggestionPanel
                 bits={bits}
-                compositionClips={compositionClips}
+                compositionClips={bitsClips}
+                sourceLabel={bitsSourceLabel}
                 onCreateReel={(label, startMs, endMs, sourceStartMs, sourceEndMs) => {
-                  createReel(label, startMs, endMs, sourceStartMs, sourceEndMs);
+                  createReel(label, startMs, endMs, sourceStartMs, sourceEndMs, bitsClips, bitsOrigin);
                   setShowBitsPanel(false);
                 }}
               />

@@ -1,18 +1,20 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useParams } from 'next/navigation';
 import {
   Play, Pause, Undo2, Redo2, Save,
   ZoomIn, ZoomOut, Scissors, Trash2,
   SkipBack, SkipForward, ChevronLeft, ChevronRight,
   SplitSquareVertical, ChevronsLeftRight, XCircle, ArrowLeftToLine,
-  Shrink, ChevronsLeft, Gauge, RefreshCw, ListRestart,
-  Plus, Bookmark, History, RotateCcw,
+  Shrink, ChevronsLeft, Gauge, RefreshCw, ListRestart, ListPlus,
+  Plus, Bookmark, History, RotateCcw, BetweenHorizontalStart,
   Film, Music, ImageIcon, Type, Layers,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { useComposeStore } from '@/stores/compose-store';
+import { useToast } from '@/hooks/use-toast';
 
 /* ── Editable timecode ──────────────────────────────────────────────── */
 
@@ -198,6 +200,32 @@ export function TimelineControls({ onSave, saving }: TimelineControlsProps) {
   const [addTrackOpen, setAddTrackOpen] = useState(false);
   const addTrackRef = useRef<HTMLDivElement>(null);
 
+  // "Fill subtitle gap": fetch the pristine transcription from disk and rebuild
+  // the deleted stretch under the playhead, remapped to the edited timeline.
+  const params = useParams();
+  const projectId = params?.id as string | undefined;
+  const { toast } = useToast();
+  const [fillingGap, setFillingGap] = useState(false);
+  const fillGapFromOriginalTranscription = useCallback(async () => {
+    if (!projectId) return;
+    setFillingGap(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/transcription/original`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data as { error?: string }).error || `Error ${res.status}`);
+      const result = useComposeStore.getState().fillSubtitleGapAtPlayhead(data.segments);
+      if (result.ok) {
+        toast({ title: `${result.added} subtítulo(s) regenerados`, description: 'Recuperados de la transcripción original y ajustados al timeline.' });
+      } else {
+        toast({ title: 'No se pudo rellenar el hueco', description: result.reason, variant: 'destructive' });
+      }
+    } catch (err) {
+      toast({ title: 'No se pudo rellenar el hueco', description: err instanceof Error ? err.message : undefined, variant: 'destructive' });
+    } finally {
+      setFillingGap(false);
+    }
+  }, [projectId, toast]);
+
   const canSplit = clips.some(
     (c) => currentTimeMs > c.timelineStartMs && currentTimeMs < c.timelineEndMs
   );
@@ -280,10 +308,10 @@ export function TimelineControls({ onSave, saving }: TimelineControlsProps) {
       <Button
         variant="ghost" size="sm" className="h-7 w-7 p-0 text-emerald-400 hover:text-emerald-300"
         onClick={() => {
-          const label = window.prompt('Version label:', `v${versions.length + 1}`);
+          const label = window.prompt('Nombre de la versión (sus cortes y subtítulos se podrán usar en Reels para detectar bits):', `v${versions.length + 1}`);
           if (label) saveVersion(label);
         }}
-        title="Save current state as version"
+        title="Guardar versión con nombre (cortes + subtítulos actuales). Luego pulsa Guardar."
       >
         <Bookmark className="h-3.5 w-3.5" />
       </Button>
@@ -293,7 +321,7 @@ export function TimelineControls({ onSave, saving }: TimelineControlsProps) {
           variant="ghost" size="sm" className="h-7 px-1.5 text-[10px] gap-0.5"
           onClick={() => setVersionMenuOpen(!versionMenuOpen)}
           disabled={versions.length === 0}
-          title="Version history"
+          title="Versiones guardadas: restaurar o borrar"
         >
           <History className="h-3.5 w-3.5" />
           {versions.length > 0 && <span>{versions.length}</span>}
@@ -366,6 +394,16 @@ export function TimelineControls({ onSave, saving }: TimelineControlsProps) {
         <XCircle className="h-3.5 w-3.5" />
       </Button>
 
+      {/* INSERT paste (ripple): shift everything after the playhead right and
+          bring the copied span's subtitles along */}
+      <Button
+        variant="ghost" size="sm" className="h-7 w-7 p-0 text-cyan-400 hover:text-cyan-300"
+        onClick={() => useComposeStore.getState().rippleInsertAtPlayhead()}
+        title="INSERTAR aquí y desplazar todo lo posterior a la derecha (todas las pistas + subtítulos) — Ctrl+Alt+V / ⌘+⌥+V en Mac"
+      >
+        <BetweenHorizontalStart className="h-3.5 w-3.5" />
+      </Button>
+
       <div className="mx-0.5 h-4 w-px bg-border" />
 
       {/* ── Subtitle tools ── */}
@@ -384,6 +422,13 @@ export function TimelineControls({ onSave, saving }: TimelineControlsProps) {
         title="Regenerate subtitles"
       >
         <ListRestart className="h-3.5 w-3.5" />
+      </Button>
+      <Button
+        variant="ghost" size="sm" className="h-7 w-7 p-0 text-yellow-400 hover:text-yellow-300"
+        onClick={fillGapFromOriginalTranscription} disabled={fillingGap}
+        title="Rellenar hueco: regenera los subtítulos borrados bajo el playhead desde la transcripción original, ajustados al timeline"
+      >
+        <ListPlus className="h-3.5 w-3.5" />
       </Button>
 
       <div className="mx-0.5 h-4 w-px bg-border" />

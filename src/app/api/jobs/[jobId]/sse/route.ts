@@ -14,6 +14,11 @@ export async function GET(
     return new Response('Job not found', { status: 404 });
   }
 
+  // Hoisted so cancel() (client disconnected) can tear down immediately —
+  // otherwise the jobManager subscription + heartbeat leak until the next
+  // enqueue throws (up to 15 s per abandoned connection).
+  let cleanup: () => void = () => {};
+
   const stream = new ReadableStream({
     start(controller) {
       const encoder = new TextEncoder();
@@ -21,12 +26,12 @@ export async function GET(
       let unsubscribe: (() => void) | null = null;
       let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
-      function cleanup() {
+      cleanup = function cleanupImpl() {
         if (closed) return;
         closed = true;
         unsubscribe?.();
         if (heartbeatInterval) clearInterval(heartbeatInterval);
-      }
+      };
 
       function send(data: unknown) {
         if (closed) return;
@@ -75,7 +80,8 @@ export async function GET(
       });
     },
     cancel() {
-      // Called when client disconnects — handled by cleanup in start()
+      // Client disconnected — release the subscription/heartbeat right away.
+      cleanup();
     },
   });
 

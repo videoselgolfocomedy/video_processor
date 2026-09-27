@@ -1,10 +1,12 @@
 'use client';
 
-import { useRef, useEffect, useCallback, useState } from 'react';
+import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { useReelStore } from '@/stores/reel-store';
 import { useProjectStore } from '@/stores/project-store';
 import { setReelVideoElement } from './reel-video-ref';
 import { ReelOverlayVideos } from './reel-overlay-videos';
+import { ReelExtraAudio } from './reel-extra-audio';
+import { cropAtTime, clampCropToFrame } from '@/lib/crop-keyframes';
 import { Button } from '@/components/ui/button';
 import { Play, Pause, Crosshair, RotateCcw, SkipBack, SkipForward, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { CompositionClip } from '@/types/project';
@@ -135,27 +137,6 @@ function timelineToSourceMs(
   return null; // In a gap
 }
 
-/**
- * Map absolute source ms → timeline ms (inverse mapping).
- * Returns null if the source position isn't covered by any clip.
- */
-function sourceToTimelineMs(
-  sourceMs: number,
-  clips: CompositionClip[]
-): number | null {
-  const videoClips = clips
-    .filter((c) => c.trackId === 'rv1')
-    .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
-
-  for (const clip of videoClips) {
-    if (sourceMs >= clip.sourceInMs && sourceMs < clip.sourceOutMs) {
-      const offset = sourceMs - clip.sourceInMs;
-      return clip.timelineStartMs + offset;
-    }
-  }
-
-  return null;
-}
 
 /**
  * Find the next clip that starts after the given timeline position.
@@ -226,6 +207,31 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
   const reelDurationMs = reel ? (reel.endMs - reel.startMs) : 0;
   const isTimelinePhase = phase === 'timeline';
 
+  // Setup-phase cut-honoring playback. When the reel's compose range spans
+  // compose cuts (reel.sourceSegments present), the SETUP preview must skip the
+  // removed source material instead of playing a single linear [srcStart,
+  // srcEnd] span. We synthesise virtual rv1 clips from the stored segments and
+  // drive them through the SAME segmented playback path as the timeline phase.
+  // The trim bar + crop box are unaffected.
+  const setupSegmentClips = useMemo<CompositionClip[]>(() => {
+    const segs = reel?.sourceSegments;
+    if (!segs || segs.length === 0) return [];
+    let off = 0;
+    return segs.map((s, i) => {
+      const dur = Math.max(0, s.sourceOutMs - s.sourceInMs);
+      const clip: CompositionClip = {
+        id: `setupseg-${i}`, type: 'video', fileName: '', originalName: '',
+        trackId: 'rv1', timelineStartMs: off, timelineEndMs: off + dur,
+        sourceInMs: s.sourceInMs, sourceOutMs: s.sourceOutMs,
+      };
+      off += dur;
+      return clip;
+    });
+  }, [reel?.sourceSegments]);
+  const setupSegmentClipsRef = useRef<CompositionClip[]>(setupSegmentClips);
+  setupSegmentClipsRef.current = setupSegmentClips;
+  const setupSegmented = !isTimelinePhase && setupSegmentClips.length > 0;
+
   // When a separate audio file (not the muxed's embedded track) drives sound,
   // its currentTime must LEAD the muxed video's currentTime by the mux
   // keyframe-snap offset, or the voice lags the mouth by ~1s. See the prop doc.
@@ -237,6 +243,17 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
     setReelVideoElement(videoRef.current);
     return () => setReelVideoElement(null);
   }, []);
+
+  // Main Audio (ra1) mute — "mesa y ambiente como pistas separadas" silences
+  // the baked mix so only the stem layers (ReelExtraAudio) sound. Applied
+  // immediately here (the tick loop re-asserts it every frame while playing,
+  // and restores the gap-gated volume when unmuted).
+  const ra1Muted = !!reel?.composition.tracks.find((t) => t.id === 'ra1')?.muted;
+  useEffect(() => {
+    const el: HTMLMediaElement | null = audioRef.current ?? videoRef.current;
+    if (!el) return;
+    el.volume = ra1Muted ? 0 : 1;
+  }, [ra1Muted]);
 
   // Sync audio element to video (audio leads video by audioOffsetSec)
   const syncAudio = useCallback(() => {
@@ -282,42 +299,103 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
       const currentSec = video.currentTime;
       const currentSourceMs = currentSec * 1000;
 
-      if (isTimelinePhase) {
-        // Timeline phase: map source time back to timeline time using clips
+      if (isTimelinePhase || setupSegmented) {
+        // Segmented playback. Timeline phase uses the reel's real rv1 clips;
+        // the setup phase of a cut-spanning reel uses the synthesised segment
+        // clips so playback skips the removed material.
+        //
+        // IMPORTANT: we anchor on the ACTIVE clip (the one under the store
+        // playhead) and advance in TIMELINE order — we never inverse-map the
+        // video's source position against ALL clips. After a copy/paste or
+        // ripple insert, two timeline clips share the same SOURCE range, so a
+        // global source→timeline lookup is ambiguous: playback would jump
+        // from the pasted piece to the original's timeline position.
         const freshReel = useReelStore.getState().reels.find((r) => r.id === reelId);
-        const freshClips = freshReel?.composition.clips ?? [];
+        const freshClips = isTimelinePhase
+          ? (freshReel?.composition.clips ?? [])
+          : setupSegmentClipsRef.current;
 
-        const timelineMs = sourceToTimelineMs(currentSourceMs, freshClips);
+        const videoClips = freshClips
+          .filter((c) => c.trackId === 'rv1')
+          .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+        const totalDur = getTimelineDuration(freshClips);
+        const storeTimeMs = useReelStore.getState().currentTimeMs;
+        const active = videoClips.find(
+          (c) => storeTimeMs >= c.timelineStartMs && storeTimeMs < c.timelineEndMs
+        );
 
-        if (timelineMs !== null) {
-          // We're inside a clip — clear any pending gap seek target
-          lastGapSeekSourceMsRef.current = -Infinity;
-          // Update timeline position
-          const totalDur = getTimelineDuration(freshClips);
-          if (timelineMs >= totalDur) {
-            // Loop back to start
-            const firstSourceMs = timelineToSourceMs(0, freshClips, reel.sourceStartMs ?? reel.startMs);
-            if (firstSourceMs !== null) {
-              video.currentTime = firstSourceMs / 1000;
-              if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000 + audioOffsetSec;
+        // Loop back to timeline 0: seek the video to the FIRST clip's in-point.
+        const loopToStart = () => {
+          const firstSourceMs = timelineToSourceMs(0, freshClips, reel.sourceStartMs ?? reel.startMs);
+          if (firstSourceMs !== null) {
+            lastGapSeekSourceMsRef.current = firstSourceMs;
+            video.currentTime = firstSourceMs / 1000;
+            if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000 + audioOffsetSec;
+          }
+          lastTickSetMsRef.current = 0;
+          setCurrentTime(0);
+        };
+
+        if (active) {
+          const overshoot = currentSourceMs - active.sourceOutMs;
+          const inRange = currentSourceMs >= active.sourceInMs - 1 && overshoot < 0;
+          if (inRange) {
+            // Inside the active clip — normal advance along ITS mapping.
+            lastGapSeekSourceMsRef.current = -Infinity;
+            const newMs = Math.max(0, active.timelineStartMs + (currentSourceMs - active.sourceInMs));
+            if (newMs >= totalDur) {
+              loopToStart();
+            } else {
+              lastTickSetMsRef.current = newMs;
+              setCurrentTime(newMs);
             }
-            lastTickSetMsRef.current = 0;
-            setCurrentTime(0);
+          } else if (overshoot >= 0 && overshoot < 800) {
+            // Just played past the active clip's out-point (small overshoot =
+            // a genuine boundary crossing) — advance to the next clip in
+            // TIMELINE order (never by source position).
+            const next = videoClips.find((c) => c.timelineStartMs >= active.timelineEndMs);
+            if (next) {
+              if (Math.abs(next.sourceInMs - currentSourceMs) < 40) {
+                // Source-contiguous neighbor (e.g. split halves) — no seek
+                // needed, keep playing and just remap onto the next clip.
+                lastGapSeekSourceMsRef.current = -Infinity;
+                const newMs = next.timelineStartMs + Math.max(0, currentSourceMs - next.sourceInMs);
+                lastTickSetMsRef.current = newMs;
+                setCurrentTime(newMs);
+              } else {
+                // Discontinuous — seek once (guarded: re-issuing every frame
+                // restarts the seek and never lets it complete).
+                const targetMs = next.sourceInMs;
+                if (Math.abs(lastGapSeekSourceMsRef.current - targetMs) > 1) {
+                  lastGapSeekSourceMsRef.current = targetMs;
+                  video.currentTime = targetMs / 1000;
+                  if (audioRef.current) audioRef.current.currentTime = targetMs / 1000 + audioOffsetSec;
+                }
+                lastTickSetMsRef.current = next.timelineStartMs;
+                setCurrentTime(next.timelineStartMs);
+              }
+            } else {
+              loopToStart();
+            }
           } else {
-            const newMs = Math.max(0, timelineMs);
-            lastTickSetMsRef.current = newMs;
-            setCurrentTime(newMs);
+            // Video source is FAR outside the active clip's range: stale
+            // position (e.g. play pressed with the video parked elsewhere —
+            // typical right after entering timeline phase with a pasted piece
+            // whose source lives deep in the file) or a seek nobody issued.
+            // Position the video at the store playhead WITHIN the active clip
+            // (guarded so we only request it once per target).
+            const targetMs = active.sourceInMs + Math.max(0, storeTimeMs - active.timelineStartMs);
+            if (Math.abs(lastGapSeekSourceMsRef.current - targetMs) > 1) {
+              lastGapSeekSourceMsRef.current = targetMs;
+              video.currentTime = targetMs / 1000;
+              if (audioRef.current) audioRef.current.currentTime = targetMs / 1000 + audioOffsetSec;
+            }
           }
         } else {
-          // Source position is in a gap or past all clips
-          // Find which timeline position we were at and skip to next clip
-          const storeTimeMs = useReelStore.getState().currentTimeMs;
+          // Store playhead sits in a gap (or there are no clips) — skip to the
+          // next clip in timeline order, or loop.
           const nextClip = findNextClipAfter(storeTimeMs, freshClips);
-
           if (nextClip) {
-            // Only issue the seek if we haven't already requested this exact position.
-            // Re-issuing video.currentTime every frame restarts the seek and prevents
-            // the browser from ever completing it → infinite loop.
             const targetMs = nextClip.sourceInMs;
             if (Math.abs(lastGapSeekSourceMsRef.current - targetMs) > 1) {
               lastGapSeekSourceMsRef.current = targetMs;
@@ -327,15 +405,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
             lastTickSetMsRef.current = nextClip.timelineStartMs;
             setCurrentTime(nextClip.timelineStartMs);
           } else {
-            // No more clips — loop to start
-            const firstSourceMs = timelineToSourceMs(0, freshClips, reel.sourceStartMs ?? reel.startMs);
-            if (firstSourceMs !== null) {
-              lastGapSeekSourceMsRef.current = firstSourceMs;
-              video.currentTime = firstSourceMs / 1000;
-              if (audioRef.current) audioRef.current.currentTime = firstSourceMs / 1000 + audioOffsetSec;
-            }
-            lastTickSetMsRef.current = 0;
-            setCurrentTime(0);
+            loopToStart();
           }
         }
       } else {
@@ -362,16 +432,26 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
       // there's no way to hear anything in timeline phase.
       if (isTimelinePhase) {
         const freshReel2 = useReelStore.getState().reels.find((r) => r.id === reelId);
-        const audioClips = freshReel2?.composition.clips.filter(
-          (c) => c.trackId === 'ra1' || c.trackId === 'ra2'
+        // ONLY ra1 gates the main (muxed/separate) audio. Extra-audio tracks
+        // (ra2, etc.) are mixed independently by ReelExtraAudio and must NOT
+        // un-mute the main here — otherwise a pasted extra-audio clip would
+        // keep the video's own audio playing under it.
+        const mainAudioClips = freshReel2?.composition.clips.filter(
+          (c) => c.trackId === 'ra1'
         ) ?? [];
-        if (audioClips.length === 0) {
-          // No explicit audio tracks: let the video play its embedded audio.
+        const ra1Muted = !!freshReel2?.composition.tracks.find((t) => t.id === 'ra1')?.muted;
+        if (ra1Muted) {
+          // Main Audio muted ("mesa y ambiente como pistas separadas"): only
+          // the extra layers (ReelExtraAudio) sound. Export does the same.
+          if (audioRef.current) audioRef.current.volume = 0;
+          else video.volume = 0;
+        } else if (mainAudioClips.length === 0) {
+          // No main audio clips: let the video play its embedded audio.
           if (audioRef.current) audioRef.current.volume = 1;
           else video.volume = 1;
         } else {
           const storeTime = useReelStore.getState().currentTimeMs;
-          const inAudioClip = audioClips.some(
+          const inAudioClip = mainAudioClips.some(
             (c) => storeTime >= c.timelineStartMs && storeTime < c.timelineEndMs
           );
           const vol = inAudioClip ? 1 : 0;
@@ -387,7 +467,7 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
 
     animFrameRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animFrameRef.current);
-  }, [isPlaying, reel, reelId, startSec, endSec, setCurrentTime, syncAudio, isTimelinePhase, audioOffsetSec]);
+  }, [isPlaying, reel, reelId, startSec, endSec, setCurrentTime, syncAudio, isTimelinePhase, setupSegmented, audioOffsetSec]);
 
   // Seek when store currentTimeMs changes externally (user scrub, button, etc.)
   // During playback, skip if the change came from the animation tick to prevent
@@ -401,9 +481,11 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
     // so matching values reliably identify tick-driven updates.
     if (isPlaying && Math.abs(currentTimeMs - lastTickSetMsRef.current) < 1) return;
 
-    const currentClips = reel?.composition.clips ?? [];
+    const currentClips = isTimelinePhase
+      ? (reel?.composition.clips ?? [])
+      : setupSegmentClipsRef.current;
     let targetSec: number;
-    if (isTimelinePhase) {
+    if (isTimelinePhase || setupSegmented) {
       const sourceMs = timelineToSourceMs(currentTimeMs, currentClips, reel?.sourceStartMs ?? reel?.startMs ?? 0);
       if (sourceMs === null) {
         // In a gap — find next clip and seek there
@@ -423,44 +505,74 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
       lastGapSeekSourceMsRef.current = -Infinity;
     }
 
-    // Mute audio during gaps when seeking
+    // Mute audio during gaps when seeking — only ra1 gates the main audio
+    // (ra2+ extra audio is mixed separately by ReelExtraAudio).
     if (audioRef.current && isTimelinePhase) {
       const audioClips = currentClips.filter(
-        (c) => c.trackId === 'ra1' || c.trackId === 'ra2'
+        (c) => c.trackId === 'ra1'
       );
       const inAudioClip = audioClips.some(
         (c) => currentTimeMs >= c.timelineStartMs && currentTimeMs < c.timelineEndMs
       );
-      audioRef.current.volume = inAudioClip ? 1 : 0;
+      const ra1Muted = !!reel?.composition.tracks.find((t) => t.id === 'ra1')?.muted;
+      audioRef.current.volume = inAudioClip && !ra1Muted ? 1 : 0;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTimeMs, startSec, isTimelinePhase, reel?.startMs, reel?.composition.clips, isPlaying]);
+  }, [currentTimeMs, startSec, isTimelinePhase, setupSegmented, reel?.startMs, reel?.composition.clips, reel?.composition.tracks, isPlaying]);
 
   // When reel range changes, ensure video is within range
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !reel) return;
-    if (!isTimelinePhase && (video.currentTime < startSec || video.currentTime > endSec)) {
+    // Linear bounds only apply to the plain (non-segmented) setup preview; a
+    // segmented setup deliberately seeks the video into later source ranges
+    // (the segments), which fall outside [startSec, endSec].
+    if (!isTimelinePhase && !setupSegmented && (video.currentTime < startSec || video.currentTime > endSec)) {
       video.currentTime = startSec;
       if (audioRef.current) audioRef.current.currentTime = startSec + audioOffsetSec;
       setCurrentTime(0);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reel?.startMs, reel?.endMs, startSec, endSec, setCurrentTime, isTimelinePhase]);
+  }, [reel?.startMs, reel?.endMs, startSec, endSec, setCurrentTime, isTimelinePhase, setupSegmented]);
 
   const togglePlay = useCallback(() => {
     setIsPlaying(!isPlaying);
   }, [isPlaying, setIsPlaying]);
 
   // --- Crop overlay drag ---
+  // With crop KEYFRAMES active, a drag upserts the keyframe at the playhead
+  // (Premiere-style auto-keyframe) instead of moving the static crop — so you
+  // scrub, frame the subject, and the animation records itself.
   const handleCropMouseDown = useCallback(
     (e: React.MouseEvent, mode: DragMode) => {
       if (!reel) return;
-      const crop = reel.cropRegion;
+      const rs = useReelStore.getState();
+      const hasKfs = (reel.cropKeyframes?.length ?? 0) > 0;
+      const dragT = rs.currentTimeMs; // freeze the keyframe time at drag start
+      const crop = cropAtTime(reel.cropRegion, reel.cropKeyframes, dragT);
       e.preventDefault();
       e.stopPropagation();
       dragStart.current = { x: e.clientX, y: e.clientY, cx: crop.centerX, cy: crop.centerY, scale: crop.scale };
       setDragMode(mode);
+
+      // One undo entry for the whole drag — pushed lazily on the first actual
+      // movement so a plain click doesn't spend an undo step / clear redo.
+      let snapshotTaken = false;
+      const applyCrop = (updates: Partial<typeof crop>) => {
+        if (hasKfs) {
+          if (!snapshotTaken) {
+            snapshotTaken = true;
+            useReelStore.getState().saveSnapshot();
+          }
+          // Keyframed crops stay fully in-frame so the interpolated window
+          // never leaves the source (parity with the zoompan export).
+          const res = useReelStore.getState().sourceResolution;
+          const next = clampCropToFrame({ ...crop, ...updates }, res?.width ?? 1920, res?.height ?? 1080);
+          useReelStore.getState().upsertCropKeyframeAt(reelId, dragT, next);
+        } else {
+          updateCropRegion(reelId, updates);
+        }
+      };
 
       const handleMouseMove = (ev: MouseEvent) => {
         const container = containerRef.current;
@@ -470,14 +582,14 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
         const dy = (ev.clientY - dragStart.current.y) / rect.height;
 
         if (mode === 'move') {
-          updateCropRegion(reelId, {
+          applyCrop({
             centerX: Math.max(0, Math.min(1, dragStart.current.cx + dx)),
             centerY: Math.max(0, Math.min(1, dragStart.current.cy + dy)),
           });
         } else {
           const scaleChange = mode === 'nw' || mode === 'sw' ? -dy : dy;
           const newScale = Math.max(0.1, Math.min(1.0, dragStart.current.scale + scaleChange));
-          updateCropRegion(reelId, { scale: newScale });
+          applyCrop({ scale: newScale });
         }
       };
 
@@ -495,7 +607,9 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
 
   if (!reel) return null;
 
-  const crop = reel.cropRegion;
+  // Effective crop at the playhead (interpolated when keyframes exist) — the
+  // overlay rect follows the animation.
+  const crop = cropAtTime(reel.cropRegion, reel.cropKeyframes, currentTimeMs);
   const srcW = sourceResolution?.width ?? 1920;
   const srcH = sourceResolution?.height ?? 1080;
   const cropH = crop.scale;
@@ -552,6 +666,8 @@ export function ReelVideoPlayer({ reelId, videoSrc, audioSrc, audioOffsetMs }: R
     <div className="space-y-2">
       {/* Hidden PiP overlay video elements — frame source for canvas previews */}
       <ReelOverlayVideos reelId={reelId} />
+      {/* Hidden extra-audio elements — mixed layers played live */}
+      <ReelExtraAudio reelId={reelId} />
       {/* Video with crop overlay */}
       <div
         ref={containerRef}

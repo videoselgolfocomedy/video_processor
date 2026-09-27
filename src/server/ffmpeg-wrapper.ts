@@ -3,10 +3,20 @@ import { promisify } from 'util';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import { buildAnimatedCropFilter } from '../lib/crop-keyframes';
+import { buildDuckVolumeExpr } from './audio-duck';
+import type { BoardDuckRegion } from '@/types/project';
 
 const execFileAsync = promisify(execFile);
 
-function getFFmpegPath(): string {
+/** '#RRGGBB' -> '0xRRGGBB', FFmpeg's own hex color notation (avoids any
+ * ambiguity with '#' inside a filter_complex graph string). Passes through
+ * already-FFmpeg-style values ('0x...', named colors like 'black') unchanged. */
+function toFFmpegColor(hex: string): string {
+  return hex.startsWith('#') ? `0x${hex.slice(1)}` : hex;
+}
+
+export function getFFmpegPath(): string {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     return require('ffmpeg-static') as string;
@@ -357,6 +367,10 @@ export interface RenderVideoOptions {
   cropRegion?: { centerX: number; centerY: number; scale: number };
   sourceWidth?: number;
   sourceHeight?: number;
+  /** Letterbox/pillarbox fill color (hex, e.g. '#000000'). Defaults to black.
+   * Matches CompositionState.backgroundColor so the export never diverges
+   * from what the live preview shows. */
+  backgroundColor?: string;
   onProgress?: (percent: number) => void;
 }
 
@@ -430,7 +444,7 @@ export function renderVideo(options: RenderVideoOptions): {
       `scale=${options.width}:${options.height}:force_original_aspect_ratio=decrease`
     );
     filters.push(
-      `pad=${options.width}:${options.height}:(ow-iw)/2:(oh-ih)/2`
+      `pad=${options.width}:${options.height}:(ow-iw)/2:(oh-ih)/2:color=${toFFmpegColor(options.backgroundColor ?? '#000000')}`
     );
   }
 
@@ -598,6 +612,19 @@ export interface VideoOverlayInput {
   opacity: number;     // 0-1
 }
 
+export interface ExtraAudioInput {
+  filePath: string;
+  startMs: number;     // where the clip begins on the concat output timeline
+  endMs: number;       // where it ends
+  sourceInMs: number;  // seek into the audio file
+  volume: number;      // 0-1 (or higher) gain for this layer
+  fadeInMs?: number;   // fade-in ramp length at the clip start (0 = none)
+  fadeInCurve?: string; // FFmpeg afade curve name (tri/exp/log/qsin)
+  /** Volume automation inside this segment, already shifted to the segment's
+   *  own clock (t = 0 at its first sample) — see toDuckRegions in clip-gain. */
+  gainRegions?: BoardDuckRegion[];
+}
+
 export interface ClipTransform {
   scale: number;     // 1 = original; >1 zoom in; <1 zoom out
   x: number;         // -1..1 fraction of output width (positive = shift right)
@@ -613,13 +640,28 @@ export interface RenderReelOptions {
    * t=0 differs. See SyncState.muxedAudioOffsetMs and the longer note on
    * RenderVideoOptions.audioSourceOffsetMs. */
   audioSourceOffsetMs?: number;
-  clips: { sourceInMs: number; sourceOutMs: number; transform?: ClipTransform }[];
+  clips: {
+    sourceInMs: number;
+    sourceOutMs: number;
+    transform?: ClipTransform;
+    /** Premiere-style transition INTO the next clip (xfade with pre-roll
+     * handle material — total duration preserved). See CompositionClip. */
+    transitionAfter?: { type: string; durationMs: number };
+  }[];
   /** Audio clips mapped to the video concat timeline — specifies silent gaps */
   audioClipRanges?: { startMs: number; endMs: number }[];
+  /** The main audio track (a1 / ra1) is MUTED in the editor: silence it
+   * entirely — the sound then comes only from `extraAudio` (e.g. the mesa +
+   * ambiente stems). Preview/export parity for the track mute button. */
+  muteMainAudio?: boolean;
   /** Image overlays to burn into the video */
   imageOverlays?: ImageOverlayInput[];
   /** Video (PiP) overlays composited over the main video for a time range */
   videoOverlays?: VideoOverlayInput[];
+  /** Extra audio layers (pasted clips, music, SFX) mixed ADDITIVELY on top of
+   * the main reel audio. Each plays from its own file at its source offset,
+   * delayed to its timeline position. Mirrors the live ReelExtraAudio preview. */
+  extraAudio?: ExtraAudioInput[];
   assFilePath?: string;
   fontsDirPath?: string;
   outputPath: string;
@@ -629,6 +671,12 @@ export interface RenderReelOptions {
   crf: number;
   audioBitrate: string;
   cropRegion?: { centerX: number; centerY: number; scale: number };
+  /** Animated crop keyframes (times in OUTPUT/reel-timeline ms). When present
+   * (≥1 keyframe) the 9:16 window pans/zooms between keyframes: clips are
+   * joined at full source size and a zoompan filter applies the interpolated
+   * window AFTER the join. The static cropRegion is only the fallback outside
+   * the keyframed range. See src/lib/crop-keyframes.ts. */
+  cropKeyframes?: { id: string; timeMs: number; centerX: number; centerY: number; scale: number }[];
   sourceWidth?: number;
   sourceHeight?: number;
   /** Source color characteristics. When .isHdr=true, an HDR→SDR tone-mapping
@@ -639,6 +687,13 @@ export interface RenderReelOptions {
    * supports 10-bit yuv420p10le + HDR tags so iPhone HLG sources are
    * preserved end-to-end and play back identically to the camera-original. */
   codec?: 'h264' | 'h265';
+  /** Fill color behind the video wherever it doesn't cover the full canvas —
+   * letterbox/pillarbox bars, the area revealed by a zoom-out transform, or a
+   * rotated clip's exposed corners. Hex (e.g. '#000000'), defaults to black.
+   * Only used by the TRANSFORM pipeline (any clip with scale/x/y/rotation) —
+   * the no-transform pipeline never shows a background layer. Matches
+   * CompositionState.backgroundColor so preview and export never diverge. */
+  backgroundColor?: string;
   onProgress?: (percent: number) => void;
 }
 
@@ -656,22 +711,54 @@ export function renderReelVideo(options: RenderReelOptions): {
   const { clips } = options;
   const hasAudio = !!options.audioInputPath;
 
+  // ── Transitions (Premiere-style) ──────────────────────────────────────
+  // clip[i-1].transitionAfter plays INTO clip i over pre-roll ("handle")
+  // material taken from BEFORE clip i's source in-point, so the transition
+  // ends exactly at the cut and the output duration — and every downstream
+  // timing (subtitles, audio ranges, overlays) — is preserved. The handle is
+  // capped by the material actually available before the in-point and by the
+  // clips' own lengths; with no usable handle the cut stays plain.
+  const XFADE_NAME: Record<string, string> = {
+    dissolve: 'fade', wipe: 'wipeleft', slide: 'slideleft', zoom: 'zoomin',
+  };
+  const transPrerollMs: number[] = clips.map(() => 0); // pre-roll baked into clip i's VIDEO input
+  const transXfade: (string | null)[] = clips.map(() => null); // xfade name INTO clip i
+  for (let i = 1; i < clips.length; i++) {
+    const t = clips[i - 1].transitionAfter;
+    if (!t || !XFADE_NAME[t.type] || !(t.durationMs > 0)) continue;
+    const d = Math.floor(Math.min(
+      t.durationMs,
+      Math.max(0, clips[i].sourceInMs),                       // available handle
+      clips[i - 1].sourceOutMs - clips[i - 1].sourceInMs,     // prev clip length
+      clips[i].sourceOutMs - clips[i].sourceInMs,             // this clip length
+    ));
+    if (d < 100) continue;
+    transPrerollMs[i] = d;
+    transXfade[i] = XFADE_NAME[t.type];
+  }
+  const anyTransition = transXfade.some(Boolean);
+
   // Each clip gets its own input pair (video + audio) with -ss fast-seek.
   // This avoids the slow sequential decode that trim= causes.
   // Input layout: [v0, a0, v1, a1, v2, a2, ...] or [v0, v1, ...] if no separate audio
   const audioOffsetSec = (options.audioSourceOffsetMs ?? 0) / 1000;
   for (let i = 0; i < clips.length; i++) {
     const clip = clips[i];
+    // Transition pre-roll: extend the VIDEO input backwards so the incoming
+    // xfade has handle material. The separate AUDIO input keeps the exact
+    // seek (no pre-roll); when audio rides the video input, the pre-roll is
+    // atrim'd off in the filter graph.
+    const preSec = transPrerollMs[i] / 1000;
     const seekSec = clip.sourceInMs / 1000;
     const durSec = (clip.sourceOutMs - clip.sourceInMs) / 1000;
 
     // Video input with seek
-    args.push('-ss', String(seekSec), '-t', String(durSec), '-i', options.videoInputPath);
+    args.push('-ss', (seekSec - preSec).toFixed(3), '-t', Math.max(0.001, durSec + preSec).toFixed(3), '-i', options.videoInputPath);
 
     // Audio input with seek. Offset by audioSourceOffsetMs so muxed-video and
     // separate-audio sources line up — see comment on RenderReelOptions.
     if (hasAudio) {
-      args.push('-ss', String(seekSec + audioOffsetSec), '-t', String(durSec), '-i', options.audioInputPath!);
+      args.push('-ss', (seekSec + audioOffsetSec).toFixed(3), '-t', Math.max(0.001, durSec).toFixed(3), '-i', options.audioInputPath!);
     }
   }
 
@@ -743,9 +830,28 @@ export function renderReelVideo(options: RenderReelOptions): {
     args.push('-ss', String(seekSec), '-t', String(durSec), '-i', vo.filePath);
   }
 
+  // Extra audio inputs — added after the video overlay inputs. Each is seeked
+  // into its source and limited to its timeline span; it gets delayed and
+  // mixed into the audio output below.
+  const extraAudio = options.extraAudio ?? [];
+  const firstExtraAudioInputIdx = firstVideoOverlayInputIdx + videoOverlays.length;
+  for (const ea of extraAudio) {
+    const seekSec = Math.max(0, ea.sourceInMs / 1000);
+    const durSec = Math.max(0.05, (ea.endMs - ea.startMs) / 1000);
+    args.push('-ss', String(seekSec), '-t', String(durSec), '-i', ea.filePath);
+  }
+
+  // Animated crop: with keyframes the 9:16 window pans/zooms over time, so it
+  // must be applied AFTER the joined chain (zoompan over reel-output time) —
+  // the per-clip static crop is skipped entirely.
+  const animatedCrop = !!(
+    options.cropKeyframes && options.cropKeyframes.length > 0 &&
+    options.cropRegion && options.sourceWidth && options.sourceHeight
+  );
+
   // Build crop filter string
   let cropFilter = '';
-  if (options.cropRegion && options.sourceWidth && options.sourceHeight) {
+  if (options.cropRegion && options.sourceWidth && options.sourceHeight && !animatedCrop) {
     const srcW = options.sourceWidth;
     const srcH = options.sourceHeight;
     const { centerX, centerY, scale } = options.cropRegion;
@@ -776,6 +882,7 @@ export function renderReelVideo(options: RenderReelOptions): {
 
   const Wout = options.width;
   const Hout = options.height;
+  const bgColor = toFFmpegColor(options.backgroundColor ?? '#000000');
 
   // Are any clips using a per-clip transform? We use the heavier per-clip pipeline
   // (pre-scale + format normalization + optional overlay-on-black) ONLY when at
@@ -785,6 +892,72 @@ export function renderReelVideo(options: RenderReelOptions): {
   // transform — was washing out the colors on iPhone footage because of how
   // FFmpeg's scale + color filter sources interact with limited-range source.
   const anyTransform = clips.some((c) => !isIdentityTransform(c.transform));
+
+  // 16:9 work canvas at source size (even dims) — shared by the WYSIWYG
+  // transform branch and the animated-crop pipeline.
+  const workW = options.sourceWidth ? Math.max(2, Math.ceil(options.sourceWidth / 2) * 2) : Wout;
+  const workH = options.sourceHeight ? Math.max(2, Math.ceil(options.sourceHeight / 2) * 2) : Hout;
+
+  // Animated-crop chain, applied to the JOINED full-size stream: normalize to
+  // CFR first (zoompan's per-frame time drives the keyframe interpolation),
+  // then pad to the output aspect + zoompan the keyframed window to Wout×Hout.
+  const animCropChain = animatedCrop
+    ? `fps=${options.fps},settb=AVTB,` +
+      buildAnimatedCropFilter(
+        options.cropRegion!,
+        options.cropKeyframes!,
+        workW,
+        workH,
+        Wout,
+        Hout,
+        options.fps,
+        bgColor,
+      ) +
+      ',setsar=1'
+    : '';
+
+  // Audio pre-chain per clip: when audio rides the (pre-roll-extended) video
+  // input, drop the transition pre-roll so the audio timeline stays exact.
+  const audioPre = (i: number): string =>
+    !hasAudio && transPrerollMs[i] > 0
+      ? `atrim=start=${(transPrerollMs[i] / 1000).toFixed(3)},`
+      : '';
+
+  // Join the per-clip [v0..vN-1] streams honoring transitions: plain cuts use
+  // concat, transition cuts use xfade over the pre-roll (offset = real
+  // accumulated duration − handle, so the transition ENDS exactly at the cut
+  // and the chain length always equals the sum of real clip durations).
+  // Returns the final video label. Requires every [v{i}] to share size/format.
+  const emitVideoJoin = (): string => {
+    for (let i = 0; i < clips.length; i++) {
+      // xfade needs matching timebases and CFR streams. fps FIRST, settb
+      // LAST: the fps filter outputs tb=1/fps, while concat (used for the
+      // plain cuts in the chain) outputs 1/AV_TIME_BASE — if a concat feeds
+      // an xfade whose other input is a fresh clip, mismatched timebases
+      // kill the graph ("input link timebases do not match"). Normalizing
+      // every clip to AVTB after fps keeps ALL junctions at 1/1000000.
+      filterParts.push(`[v${i}]fps=${options.fps},settb=AVTB[v${i}f]`);
+    }
+    let chain = 'v0f';
+    let accMs = clips[0].sourceOutMs - clips[0].sourceInMs;
+    let k = 0;
+    for (let i = 1; i < clips.length; i++) {
+      const durMs = clips[i].sourceOutMs - clips[i].sourceInMs;
+      const next = `vch${k++}`;
+      if (transXfade[i]) {
+        const off = ((accMs - transPrerollMs[i]) / 1000).toFixed(3);
+        const dur = (transPrerollMs[i] / 1000).toFixed(3);
+        filterParts.push(`[${chain}][v${i}f]xfade=transition=${transXfade[i]}:duration=${dur}:offset=${off}[${next}]`);
+      } else {
+        filterParts.push(`[${chain}][v${i}f]concat=n=2:v=1:a=0[${next}]`);
+      }
+      chain = next;
+      accMs += durMs;
+    }
+    const audioInputs = clips.map((_, i) => `[a${i}]`).join('');
+    filterParts.push(`${audioInputs}concat=n=${clips.length}:v=0:a=1[outa]`);
+    return chain;
+  };
 
   let videoLabel: string;
 
@@ -799,11 +972,24 @@ export function renderReelVideo(options: RenderReelOptions): {
       const vidIdx = i * inputsPerClip;
       const audIdx = hasAudio ? vidIdx + 1 : vidIdx;
       filterParts.push(`[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter}[v${i}]`);
-      filterParts.push(`[${audIdx}:a]asetpts=PTS-STARTPTS[a${i}]`);
+      filterParts.push(`[${audIdx}:a]${audioPre(i)}asetpts=PTS-STARTPTS[a${i}]`);
     }
-    const concatInputs = clips.map((_, i) => `[v${i}][a${i}]`).join('');
-    filterParts.push(`${concatInputs}concat=n=${clips.length}:v=1:a=1[outv][outa]`);
-    filterParts.push(`[outv]scale=${Wout}:${Hout}[scaled]`);
+    if (anyTransition) {
+      const chain = emitVideoJoin();
+      filterParts.push(
+        animatedCrop
+          ? `[${chain}]${animCropChain}[scaled]`
+          : `[${chain}]scale=${Wout}:${Hout}[scaled]`
+      );
+    } else {
+      const concatInputs = clips.map((_, i) => `[v${i}][a${i}]`).join('');
+      filterParts.push(`${concatInputs}concat=n=${clips.length}:v=1:a=1[outv][outa]`);
+      filterParts.push(
+        animatedCrop
+          ? `[outv]${animCropChain}[scaled]`
+          : `[outv]scale=${Wout}:${Hout}[scaled]`
+      );
+    }
     videoLabel = 'scaled';
   } else {
     // ── TRANSFORM PIPELINE ────────────────────────────────────────────
@@ -819,31 +1005,35 @@ export function renderReelVideo(options: RenderReelOptions): {
       const vidIdx = i * inputsPerClip;
       const audIdx = hasAudio ? vidIdx + 1 : vidIdx;
 
-      filterParts.push(
-        `[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter},scale=${Wout}:${Hout}:force_original_aspect_ratio=decrease,pad=${Wout}:${Hout}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p[v${i}_pre]`
-      );
+      const hasCrop = !!(options.cropRegion && options.sourceWidth && options.sourceHeight);
 
-      if (isIdentityTransform(clip.transform)) {
-        filterParts.push(`[v${i}_pre]setpts=PTS[v${i}]`);
-      } else {
+      if (hasCrop && !isIdentityTransform(clip.transform)) {
+        // ── WYSIWYG: transform FIRST (in 16:9 SOURCE space), THEN crop ──
+        // The reel crop selector is drawn over the CSS-transformed video, so
+        // its coordinates live in the POST-transform 16:9 frame. Cropping the
+        // raw source and rotating the patch afterwards (the old order) sampled
+        // a completely different region whenever the compose clip carried a
+        // rotation (e.g. a sideways-recorded video straightened with 90°).
+        // Also: x/y here are fractions of the 16:9 work canvas — matching the
+        // compose editor's semantics for the inherited transform.
         const t = clip.transform!;
         const s = t.scale ?? 1;
         const x = t.x ?? 0;
         const y = t.y ?? 0;
         const rotDeg = t.rotation ?? 0;
-        const durSec = ((clip.sourceOutMs - clip.sourceInMs) / 1000).toFixed(3);
+        // Include the transition pre-roll (if any) so the color canvas doesn't
+        // end before the extended input does (overlay eof_action=endall).
+        const durSec = ((clip.sourceOutMs - clip.sourceInMs + transPrerollMs[i]) / 1000).toFixed(3);
 
-        // [v_pre] is exactly Wout×Hout, so scaled dims are known in absolute px
-        // (even, for libx264). Compute everything against the known canvas so
-        // rotation's expanded bounding box and the overlay offset stay exact.
-        const sw = Math.max(2, Math.round((Wout * s) / 2) * 2);
-        const sh = Math.max(2, Math.round((Hout * s) / 2) * 2);
+        filterParts.push(
+          `[${vidIdx}:v]setpts=PTS-STARTPTS,scale=${workW}:${workH}:force_original_aspect_ratio=decrease,pad=${workW}:${workH}:(ow-iw)/2:(oh-ih)/2:color=${bgColor},setsar=1,format=yuv420p[v${i}_norm]`
+        );
 
+        const sw = Math.max(2, Math.round((workW * s) / 2) * 2);
+        const sh = Math.max(2, Math.round((workH * s) / 2) * 2);
         let frameLabel = `v${i}_zoom`;
-        filterParts.push(`[v${i}_pre]scale=${sw}:${sh}[v${i}_zoom]`);
+        filterParts.push(`[v${i}_norm]scale=${sw}:${sh}[v${i}_zoom]`);
 
-        // Bounding box after rotation (so corners aren't clipped by the rotate
-        // filter itself — the canvas overlay + the user's zoom handle the rest).
         let bw = sw;
         let bh = sh;
         if (Math.abs(rotDeg) > 0.001) {
@@ -852,29 +1042,96 @@ export function renderReelVideo(options: RenderReelOptions): {
           const absSin = Math.abs(Math.sin(rad));
           bw = Math.max(2, Math.ceil((sw * absCos + sh * absSin) / 2) * 2);
           bh = Math.max(2, Math.ceil((sw * absSin + sh * absCos) / 2) * 2);
-          // FFmpeg rotate: positive angle = clockwise (matches the CSS preview).
-          // ow/oh expand the output so the whole rotated frame is kept; fill the
-          // exposed corners with black (they land on the black canvas anyway).
-          filterParts.push(`[v${i}_zoom]rotate=a=${rad.toFixed(6)}:ow=${bw}:oh=${bh}:c=black[v${i}_rot]`);
+          filterParts.push(`[v${i}_zoom]rotate=a=${rad.toFixed(6)}:ow=${bw}:oh=${bh}:c=${bgColor}[v${i}_rot]`);
           frameLabel = `v${i}_rot`;
         }
 
-        // Center the (possibly rotated) frame on the canvas, then apply the
-        // translate. With no rotation bw=sw so this reduces to the old formula.
-        const offsetX = Math.round((Wout - bw) / 2 + x * Wout);
-        const offsetY = Math.round((Hout - bh) / 2 + y * Hout);
+        const offsetX = Math.round((workW - bw) / 2 + x * workW);
+        const offsetY = Math.round((workH - bh) / 2 + y * workH);
 
-        // Black canvas. format=yuv420p chained (not as option — that throws on FFmpeg 6.x).
-        filterParts.push(`color=c=black:s=${Wout}x${Hout}:r=${options.fps}:d=${durSec},format=yuv420p[v${i}_bg]`);
-        filterParts.push(`[v${i}_bg][${frameLabel}]overlay=x=${offsetX}:y=${offsetY}:eof_action=endall,format=yuv420p,setsar=1[v${i}]`);
+        filterParts.push(`color=c=${bgColor}:s=${workW}x${workH}:r=${options.fps}:d=${durSec},format=yuv420p[v${i}_bg]`);
+        // Transformed 16:9 frame → crop the 9:16 window (same math/space as the
+        // canvas previews) → scale to the output. In animated-crop mode the
+        // clip stays at work-canvas size: the keyframed window is applied to
+        // the JOINED chain (animCropChain) after concat/xfade.
+        const wysiwygTail = animatedCrop ? '' : `${cropFilter},scale=${Wout}:${Hout}`;
+        filterParts.push(
+          `[v${i}_bg][${frameLabel}]overlay=x=${offsetX}:y=${offsetY}:eof_action=endall${wysiwygTail},format=yuv420p,setsar=1[v${i}]`
+        );
+      } else {
+        // Animated-crop mode: pre-scale to the WORK canvas (source 16:9) so
+        // every clip matches the WYSIWYG-transformed ones — the 9:16 window is
+        // cut from the joined chain afterwards. Otherwise: straight to output.
+        const preW = animatedCrop ? workW : Wout;
+        const preH = animatedCrop ? workH : Hout;
+        filterParts.push(
+          `[${vidIdx}:v]setpts=PTS-STARTPTS${cropFilter},scale=${preW}:${preH}:force_original_aspect_ratio=decrease,pad=${preW}:${preH}:(ow-iw)/2:(oh-ih)/2:color=${bgColor},setsar=1,format=yuv420p[v${i}_pre]`
+        );
+
+        if (isIdentityTransform(clip.transform)) {
+          filterParts.push(`[v${i}_pre]setpts=PTS[v${i}]`);
+        } else {
+          const t = clip.transform!;
+          const s = t.scale ?? 1;
+          const x = t.x ?? 0;
+          const y = t.y ?? 0;
+          const rotDeg = t.rotation ?? 0;
+          // Include the transition pre-roll (if any) so the color canvas doesn't
+          // end before the extended input does (overlay eof_action=endall).
+          const durSec = ((clip.sourceOutMs - clip.sourceInMs + transPrerollMs[i]) / 1000).toFixed(3);
+
+          // [v_pre] is exactly Wout×Hout, so scaled dims are known in absolute px
+          // (even, for libx264). Compute everything against the known canvas so
+          // rotation's expanded bounding box and the overlay offset stay exact.
+          const sw = Math.max(2, Math.round((Wout * s) / 2) * 2);
+          const sh = Math.max(2, Math.round((Hout * s) / 2) * 2);
+
+          let frameLabel = `v${i}_zoom`;
+          filterParts.push(`[v${i}_pre]scale=${sw}:${sh}[v${i}_zoom]`);
+
+          // Bounding box after rotation (so corners aren't clipped by the rotate
+          // filter itself — the canvas overlay + the user's zoom handle the rest).
+          let bw = sw;
+          let bh = sh;
+          if (Math.abs(rotDeg) > 0.001) {
+            const rad = (rotDeg * Math.PI) / 180;
+            const absCos = Math.abs(Math.cos(rad));
+            const absSin = Math.abs(Math.sin(rad));
+            bw = Math.max(2, Math.ceil((sw * absCos + sh * absSin) / 2) * 2);
+            bh = Math.max(2, Math.ceil((sw * absSin + sh * absCos) / 2) * 2);
+            // FFmpeg rotate: positive angle = clockwise (matches the CSS preview).
+            // ow/oh expand the output so the whole rotated frame is kept; fill the
+            // exposed corners with black (they land on the black canvas anyway).
+            filterParts.push(`[v${i}_zoom]rotate=a=${rad.toFixed(6)}:ow=${bw}:oh=${bh}:c=${bgColor}[v${i}_rot]`);
+            frameLabel = `v${i}_rot`;
+          }
+
+          // Center the (possibly rotated) frame on the canvas, then apply the
+          // translate. With no rotation bw=sw so this reduces to the old formula.
+          const offsetX = Math.round((Wout - bw) / 2 + x * Wout);
+          const offsetY = Math.round((Hout - bh) / 2 + y * Hout);
+
+          // Black canvas. format=yuv420p chained (not as option — that throws on FFmpeg 6.x).
+          filterParts.push(`color=c=${bgColor}:s=${Wout}x${Hout}:r=${options.fps}:d=${durSec},format=yuv420p[v${i}_bg]`);
+          filterParts.push(`[v${i}_bg][${frameLabel}]overlay=x=${offsetX}:y=${offsetY}:eof_action=endall,format=yuv420p,setsar=1[v${i}]`);
+        }
       }
 
-      filterParts.push(`[${audIdx}:a]asetpts=PTS-STARTPTS[a${i}]`);
+      filterParts.push(`[${audIdx}:a]${audioPre(i)}asetpts=PTS-STARTPTS[a${i}]`);
     }
 
-    const concatInputs = clips.map((_, i) => `[v${i}][a${i}]`).join('');
-    filterParts.push(`${concatInputs}concat=n=${clips.length}:v=1:a=1[outv][outa]`);
-    videoLabel = 'outv';
+    if (anyTransition) {
+      videoLabel = emitVideoJoin();
+    } else {
+      const concatInputs = clips.map((_, i) => `[v${i}][a${i}]`).join('');
+      filterParts.push(`${concatInputs}concat=n=${clips.length}:v=1:a=1[outv][outa]`);
+      videoLabel = 'outv';
+    }
+    if (animatedCrop) {
+      // Joined chain is at work-canvas size — apply the keyframed 9:16 window.
+      filterParts.push(`[${videoLabel}]${animCropChain}[vanim]`);
+      videoLabel = 'vanim';
+    }
   }
 
   // Apply image overlays (between scale and ASS subtitles)
@@ -955,7 +1212,10 @@ export function renderReelVideo(options: RenderReelOptions): {
 
   // Apply audio muting for gaps if audioClipRanges are provided
   let audioLabel = '[outa]';
-  if (options.audioClipRanges && options.audioClipRanges.length > 0) {
+  if (options.muteMainAudio) {
+    filterParts.push(`[outa]volume=0[finala]`);
+    audioLabel = '[finala]';
+  } else if (options.audioClipRanges && options.audioClipRanges.length > 0) {
     // Build volume expression: volume=1 during audio clips, 0 during gaps
     // Use between() for each audio range, sum > 0 means audio is active
     const enableParts = options.audioClipRanges.map((r) => {
@@ -967,6 +1227,53 @@ export function renderReelVideo(options: RenderReelOptions): {
     const enableExpr = enableParts.join('+');
     filterParts.push(`[outa]volume=if(${enableExpr}\\,1\\,0):eval=frame[finala]`);
     audioLabel = '[finala]';
+  }
+
+  // Mix in extra audio layers (additive). Each extra input is resampled to a
+  // common format, gained, and delayed to its timeline start, then amix'd with
+  // the main audio using normalize=0 so volumes SUM (true overlay) instead of
+  // being averaged down. duration=first keeps the output the reel's length.
+  if (extraAudio.length > 0) {
+    // Upmix with pan, NOT aformat: swresample's mono→stereo takes FC at
+    // 1/√2 per side (measured −3.0 dB), so the mono main audio of a parts
+    // project (and any mono layer, e.g. the mesa/ambiente stems) used to lose
+    // 3 dB the moment an extra layer existed. pan keeps stereo as-is and
+    // copies mono to both sides at unity (verified both ways).
+    const toStereo = 'pan=stereo|FL=FL+FC|FR=FR+FC';
+    filterParts.push(
+      `${audioLabel}aresample=48000,${toStereo}[amain]`
+    );
+    const mixLabels = ['[amain]'];
+    extraAudio.forEach((ea, k) => {
+      const inIdx = firstExtraAudioInputIdx + k;
+      const delayMs = Math.max(0, Math.round(ea.startMs));
+      const vol = ea.volume ?? 1;
+      // The clip's own volume zones. `t` here is still clip-relative (this sits
+      // BEFORE adelay, which is what moves the layer onto the output clock), so
+      // the region times need no further shift. No zones → no filter, so a clip
+      // without automation renders the exact same graph as before.
+      const gainExpr = buildDuckVolumeExpr(ea.gainRegions);
+      const gainChain = gainExpr ? `,volume='${gainExpr}':eval=frame` : '';
+      // afade (st=0, relative to this trimmed input's start) BEFORE adelay so
+      // the ramp lands at the clip's timeline start, not at t=0 of the reel.
+      let fadeChain = '';
+      if (ea.fadeInMs && ea.fadeInMs > 0) {
+        const fadeSec = (ea.fadeInMs / 1000).toFixed(3);
+        const curve = ea.fadeInCurve || 'tri';
+        fadeChain = `,afade=t=in:st=0:d=${fadeSec}:curve=${curve}`;
+      }
+      filterParts.push(
+        `[${inIdx}:a]aresample=48000,${toStereo},volume=${vol}${gainChain}${fadeChain},adelay=${delayMs}:all=1[ea${k}]`
+      );
+      mixLabels.push(`[ea${k}]`);
+    });
+    // Layers SUM (normalize=0) — the same transparent limiter the part mix
+    // uses catches the rare over (mesa + ambiente stems at ×1 reproduce the
+    // mix, which was limited exactly like this) instead of hard-clipping.
+    filterParts.push(
+      `${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=first:normalize=0,alimiter=limit=0.95:attack=5:release=50[amixed]`
+    );
+    audioLabel = '[amixed]';
   }
 
   args.push('-filter_complex', filterParts.join(';'));

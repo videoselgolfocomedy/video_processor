@@ -20,8 +20,9 @@ export async function GET() {
 /**
  * POST /api/projects/[id]/bits
  * Detect comedy bits from segments (no subtitle corrections).
- * Body: { language, context?, provider, source: 'full' | 'compose' }
- * Returns streaming ndjson with progress + final bits.
+ * Body: { language, context?, provider, source: 'full' | 'compose' | 'version', versionId? }
+ * 'version' detects against a NAMED compose version (its clips + subtitles)
+ * instead of the live timeline. Returns streaming ndjson with progress + final bits.
  */
 export async function POST(
   request: NextRequest,
@@ -34,22 +35,32 @@ export async function POST(
   }
 
   const body = await request.json();
-  const { language, context, provider, source } = body as {
+  const { language, context, provider, source, versionId } = body as {
     language: string;
     context?: string;
     provider: string;
-    source: 'full' | 'compose';
+    source: 'full' | 'compose' | 'version';
+    versionId?: string;
   };
 
+  // A named compose version: its own cuts and its own subtitles (both on that
+  // version's timeline, exactly like the live compose + transcription pair).
+  const version = source === 'version'
+    ? (project.composition?.versions ?? []).find((v) => v.id === versionId)
+    : undefined;
+  if (source === 'version' && !version) {
+    return NextResponse.json({ error: 'Versión de Compose no encontrada' }, { status: 400 });
+  }
+
   // Get compose v1 clips sorted by timeline position
-  const composeClips = (project.composition?.clips ?? [])
+  const composeClips = ((version ? version.clips : project.composition?.clips) ?? [])
     .filter((c: { trackId: string }) => c.trackId === 'v1')
     .sort((a: { timelineStartMs: number }, b: { timelineStartMs: number }) => a.timelineStartMs - b.timelineStartMs);
 
   // Get segments — transcription.segments are already in compose timeline time
   // (compose saves them back in compose time domain after editing)
-  let segments = project.transcription.segments;
-  if (source === 'compose' && composeClips.length > 0) {
+  let segments = version ? version.subtitleSegments : project.transcription.segments;
+  if ((source === 'compose' || version) && composeClips.length > 0) {
     // Segments are already in compose time — just filter out any that fall outside compose clips
     const maxCompose = Math.max(...composeClips.map((c: { timelineEndMs: number }) => c.timelineEndMs));
     segments = segments.filter((seg) => seg.endMs > 0 && seg.startMs < maxCompose);
@@ -78,7 +89,7 @@ export async function POST(
 
         // When bits are from compose, add sourceStartMs/sourceEndMs so reels can
         // seek to the correct position in the muxed video
-        const enrichedBits = (source === 'compose' && composeClips.length > 0)
+        const enrichedBits = ((source === 'compose' || version) && composeClips.length > 0)
           ? bits.map((bit) => {
               // Reverse map: compose time → source time
               let srcStart = bit.startMs;
@@ -95,11 +106,17 @@ export async function POST(
             })
           : bits;
 
-        // Save bits to project
-        await updateProject(id, { bits: enrichedBits });
+        // Save bits to project, with WHICH cuts they were detected against so
+        // the reels panel can label them and build reels from the same cuts.
+        const bitsSource = {
+          kind: version ? 'version' as const : source === 'compose' && composeClips.length > 0 ? 'compose' as const : 'full' as const,
+          ...(version ? { versionId: version.id, versionLabel: version.label } : {}),
+          detectedAt: new Date().toISOString(),
+        };
+        await updateProject(id, { bits: enrichedBits, bitsSource });
 
         controller.enqueue(
-          encoder.encode(JSON.stringify({ type: 'done', bits: enrichedBits }) + '\n')
+          encoder.encode(JSON.stringify({ type: 'done', bits: enrichedBits, bitsSource }) + '\n')
         );
       } catch (err) {
         controller.enqueue(
