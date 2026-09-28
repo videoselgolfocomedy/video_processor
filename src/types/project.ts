@@ -146,6 +146,10 @@ export interface ProjectPart {
   /** Leveler knee set by hand (dBFS): voice below it is left alone. Unset =
    * room floor + 2 (the ramp straddles the floor). */
   boardLevelKneeDb?: number;
+  /** Leveler soft knee: dB under the gain of the quietest voice at which the
+   * pauses are left (6–60, default 18). 60 = the old hard knee (pauses back to
+   * the raw level). Ignored with the mesa gate on. */
+  boardLevelSilenceDepthDb?: number;
   /** Voice-duck shape extras (see ambientSidechainDuckFilters):
    *  attack = ms the ambient takes to drop once voice is detected (5–500,
    *  default 15); hold = ms it stays ducked AFTER the voice stops before the

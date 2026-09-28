@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ZoomIn, ZoomOut } from 'lucide-react';
-import { computeLevelStats, fmtDelta, type LevelStats } from '@/lib/level-stats';
+import { computeLevelStats, continuousGainDb, fmtDelta, gainScale, type LevelStats } from '@/lib/level-stats';
 
 interface EnvelopeData {
   envelope: number[];
@@ -186,37 +186,43 @@ export function TrackRow({
     }
     // APPLIED GAIN line (amber), the same read-out the editing timeline draws
     // on the stem tracks: 20·log10(processed ÷ original) per column over the
-    // peaks, only where the original is above −50 dBFS, on a −36…+24 dB scale
-    // with a dotted 0 dB. It makes a duck/attenuation read as a dip and a
+    // peaks, CONTINUOUS (it holds its value through digital silence instead of
+    // breaking — see continuousGainDb), on a −36…+24 dB scale with a dotted
+    // 0 dB. It makes a duck/attenuation read as a dip and a
     // raise as a bump even when the two waveforms look alike.
     if (behindOffsetSec != null && behindEnv && behindEnv.hop_ms > 0) {
       const bh = behindEnv.hop_ms;
       const b0 = Math.floor((behindOffsetSec * 1000 + vStart) / bh);
       const bn = Math.max(1, Math.floor(spanMs / bh));
       const bStep = Math.max(1, Math.floor(bn / w));
-      const LO = -36, HI = 24;
-      const yOf = (db: number) => h - ((Math.max(LO, Math.min(HI, db)) - LO) / (HI - LO)) * h;
+      const origPeak = new Float32Array(w);
+      for (let x = 0; x < w; x++) {
+        const j0 = b0 + Math.floor((x / w) * bn);
+        let orig = 0;
+        for (let i = Math.max(0, j0); i < Math.min(behindEnv.envelope.length, j0 + bStep); i++) orig = Math.max(orig, behindEnv.envelope[i] ?? 0);
+        origPeak[x] = orig;
+      }
+      const appliedDb = continuousGainDb(origPeak, procPeak);
+      const { lo: LO, hi: HI } = gainScale(appliedDb, -36, 24);
+      const yOf = (db: number) => h - 1 - ((Math.max(LO, Math.min(HI, db)) - LO) / (HI - LO)) * (h - 2);
       ctx.setLineDash([2, 3]);
       ctx.strokeStyle = 'rgba(251,191,36,0.35)';
       ctx.beginPath(); ctx.moveTo(0, yOf(0)); ctx.lineTo(w, yOf(0)); ctx.stroke();
       ctx.setLineDash([]);
       ctx.strokeStyle = 'rgba(251,191,36,0.9)';
       ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      let pen = false;
-      for (let x = 0; x < w; x++) {
-        const j0 = b0 + Math.floor((x / w) * bn);
-        let orig = 0;
-        for (let i = j0; i < Math.min(behindEnv.envelope.length, j0 + bStep); i++) orig = Math.max(orig, behindEnv.envelope[i] ?? 0);
-        if (orig < 0.00316 || procPeak[x] <= 0) { pen = false; continue; }
-        const y = yOf(20 * Math.log10(procPeak[x] / orig));
-        if (pen) ctx.lineTo(x, y); else { ctx.moveTo(x, y); pen = true; }
+      if (appliedDb) {
+        ctx.beginPath();
+        for (let x = 0; x < w; x++) {
+          const y = yOf(appliedDb[x]);
+          if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
       ctx.lineWidth = 1;
       ctx.fillStyle = 'rgba(251,191,36,0.8)';
-      ctx.fillText('+24', w - 20, yOf(24) + 9);
-      ctx.fillText('−36', w - 20, yOf(-36) - 2);
+      ctx.fillText(`+${HI}`, w - 20, yOf(HI) + 9);
+      ctx.fillText(`−${Math.abs(LO)}`, w - 20, yOf(LO) - 2);
       ctx.fillText('0 dB gan.', w - 42, yOf(0) - 2);
     }
     // Playhead is a separate absolutely-positioned div (below), NOT drawn

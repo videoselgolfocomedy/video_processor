@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { useProjectStore } from '@/stores/project-store';
 import { useEnvelope, type EnvelopeData } from '@/lib/envelope-cache';
 import type { AmbientPlan } from '@/lib/ambient-plan';
+import { continuousGainDb, gainScale } from '@/lib/level-stats';
 
 /** Sync & Mix's reference colour: the ORIGINAL signal, dimmed, behind the result. */
 const ORIGINAL_COLOR = 'rgba(148,163,184,0.45)';
@@ -12,8 +13,6 @@ const ORIGINAL_COLOR = 'rgba(148,163,184,0.45)';
 const GAIN_COLOR = 'rgba(251,191,36,0.95)';
 const GAIN_REF_COLOR = 'rgba(251,191,36,0.45)';
 const GAIN_MIN_DB = -36, GAIN_MAX_DB = 30;
-/** Below this original peak (≈ −50 dBFS) the ratio is noise, not a gain. */
-const GAIN_FLOOR = 0.003;
 
 /**
  * The audio inside a timeline clip, drawn like the Sync & Mix rows: the same
@@ -138,8 +137,11 @@ export function ClipWaveform({
     // every change the chain made (je-je cuts, leveler, ducking, raises, mix
     // volume) reads directly as the line's distance from the dashed 0 dB.
     if (rawPeaks && procPeaks) {
+      // CONTINUOUS: it never breaks in the quiet stretches (continuousGainDb).
+      const appliedDb = planDb ? null : continuousGainDb(rawPeaks, procPeaks, gain);
+      const { lo: LO, hi: HI } = gainScale(appliedDb, GAIN_MIN_DB, GAIN_MAX_DB);
       const yOf = (db: number) => {
-        const t = (Math.min(GAIN_MAX_DB, Math.max(GAIN_MIN_DB, db)) - GAIN_MIN_DB) / (GAIN_MAX_DB - GAIN_MIN_DB);
+        const t = (Math.min(HI, Math.max(LO, db)) - LO) / (HI - LO);
         return h - 1 - t * (h - 2);
       };
       const y0 = yOf(0);
@@ -151,18 +153,14 @@ export function ClipWaveform({
       // forecast it is not drawn at all: a raise the user just deleted must
       // not linger as a dim bump in the middle of the track; the forecast
       // line is the truth until Aplicar makes it real.
-      if (!planDb) {
+      if (appliedDb) {
         ctx.setLineDash([]);
         ctx.strokeStyle = GAIN_COLOR;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        let pen = false;
         for (let x = 0; x < w; x++) {
-          const r = rawPeaks[x], q = procPeaks[x];
-          if (r < GAIN_FLOOR || q <= 0) { pen = false; continue; }
-          const db = 20 * Math.log10((q * gain) / r);
-          const y = yOf(db);
-          if (pen) ctx.lineTo(x, y); else { ctx.moveTo(x, y); pen = true; }
+          const y = yOf(appliedDb[x]);
+          if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         }
         ctx.stroke();
       }
@@ -181,8 +179,8 @@ export function ClipWaveform({
       ctx.fillStyle = GAIN_COLOR;
       ctx.font = '8px sans-serif';
       ctx.fillText('0 dB', labelX, y0 - 2);
-      ctx.fillText(`+${GAIN_MAX_DB}`, labelX, 8);
-      ctx.fillText(`${GAIN_MIN_DB}`, labelX, h - 2);
+      ctx.fillText(`+${HI}`, labelX, 8);
+      ctx.fillText(`${LO}`, labelX, h - 2);
       if (planDb) {
         ctx.fillStyle = GAIN_COLOR;
         ctx.font = 'bold 9px sans-serif';

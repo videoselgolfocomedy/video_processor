@@ -89,6 +89,9 @@ export async function PATCH(
   if (body.boardLevelKneeDb !== undefined && body.boardLevelKneeDb !== null && typeof body.boardLevelKneeDb !== 'number') {
     return NextResponse.json({ error: 'boardLevelKneeDb debe ser un número o null' }, { status: 400 });
   }
+  if (body.boardLevelSilenceDepthDb !== undefined && body.boardLevelSilenceDepthDb !== null && typeof body.boardLevelSilenceDepthDb !== 'number') {
+    return NextResponse.json({ error: 'boardLevelSilenceDepthDb debe ser un número o null' }, { status: 400 });
+  }
   if (body.boardLevelCeilingDb !== undefined && typeof body.boardLevelCeilingDb !== 'number') {
     return NextResponse.json({ error: 'boardLevelCeilingDb debe ser un número' }, { status: 400 });
   }
@@ -184,6 +187,8 @@ export async function PATCH(
     if (typeof body.boardLevelCeilingDb === 'number') next.boardLevelCeilingDb = Math.max(-12, Math.min(-1, body.boardLevelCeilingDb));
     if (body.boardLevelKneeDb === null) next.boardLevelKneeDb = undefined;
     else if (typeof body.boardLevelKneeDb === 'number') next.boardLevelKneeDb = Math.max(-80, Math.min(-20, body.boardLevelKneeDb));
+    if (body.boardLevelSilenceDepthDb === null) next.boardLevelSilenceDepthDb = undefined;
+    else if (typeof body.boardLevelSilenceDepthDb === 'number') next.boardLevelSilenceDepthDb = Math.max(6, Math.min(60, body.boardLevelSilenceDepthDb));
     if (typeof body.ambientDuckOnVoice === 'boolean') next.ambientDuckOnVoice = body.ambientDuckOnVoice;
     if (typeof body.ambientVoiceDuckDb === 'number') next.ambientVoiceDuckDb = Math.max(1, Math.min(60, body.ambientVoiceDuckDb));
     if (typeof body.ambientVoiceReleaseMs === 'number') next.ambientVoiceReleaseMs = Math.max(50, Math.min(3000, body.ambientVoiceReleaseMs));

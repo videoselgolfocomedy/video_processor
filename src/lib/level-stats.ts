@@ -63,3 +63,45 @@ export function fmtDelta(after: number, before: number): string {
   const d = after - before;
   return `${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(1)}`;
 }
+
+/**
+ * Applied gain per column (processed ÷ original, dB) as a CONTINUOUS series.
+ * Columns where the ratio cannot be computed (digital silence on either side)
+ * hold the nearest known value instead of breaking the line: on a mesa
+ * recorded low the original sits under −50 dBFS most of the time and a line
+ * that only existed above that level vanished exactly where the chain does
+ * the most (pauses, quiet words). Returns null when no column is measurable.
+ */
+export function continuousGainDb(orig: ArrayLike<number>, proc: ArrayLike<number>, procGain = 1): Float32Array | null {
+  const n = Math.min(orig.length, proc.length);
+  const out = new Float32Array(n);
+  const MIN = 1e-5; // −100 dBFS: below it the peaks are rounding, not signal
+  let first = -1;
+  let last = 0;
+  for (let x = 0; x < n; x++) {
+    const r = orig[x], q = proc[x] * procGain;
+    if (r >= MIN && q >= MIN) {
+      last = 20 * Math.log10(q / r);
+      if (first < 0) first = x;
+    }
+    out[x] = last;
+  }
+  if (first < 0) return null;
+  for (let x = 0; x < first; x++) out[x] = out[first];
+  return out;
+}
+
+/**
+ * Vertical scale (dB) for the applied-gain line: the default window, widened
+ * in 6 dB steps when the gain goes beyond it — a mesa recorded low gets +45 dB
+ * and a line clamped to a +24 top sat glued to the edge, invisible.
+ */
+export function gainScale(db: ArrayLike<number> | null, lo: number, hi: number): { lo: number; hi: number } {
+  if (!db || !db.length) return { lo, hi };
+  let mn = Infinity, mx = -Infinity;
+  for (let i = 0; i < db.length; i++) { const v = db[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+  return {
+    lo: Math.max(-72, Math.min(lo, Math.floor((mn - 3) / 6) * 6)),
+    hi: Math.min(72, Math.max(hi, Math.ceil((mx + 3) / 6) * 6)),
+  };
+}

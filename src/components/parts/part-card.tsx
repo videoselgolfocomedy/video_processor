@@ -162,6 +162,8 @@ export function PartCard({
   // complaint). Same local-draft + blur-commit pattern as crop keyframes.
   const [ceilingStr, setCeilingStr] = useState(String(part.boardLevelCeilingDb ?? -3));
   const [kneeStr, setKneeStr] = useState(part.boardLevelKneeDb != null ? String(part.boardLevelKneeDb) : '');
+  const [silenceStr, setSilenceStr] = useState(part.boardLevelSilenceDepthDb != null ? String(part.boardLevelSilenceDepthDb) : '');
+  useEffect(() => setSilenceStr(part.boardLevelSilenceDepthDb != null ? String(part.boardLevelSilenceDepthDb) : ''), [part.boardLevelSilenceDepthDb]);
   const [duckDbStr, setDuckDbStr] = useState(String(part.ambientVoiceDuckDb ?? 8));
   const [releaseMsStr, setReleaseMsStr] = useState(String(part.ambientVoiceReleaseMs ?? 400));
   const [anticipateMsStr, setAnticipateMsStr] = useState(String(part.ambientVoiceAnticipateMs ?? 200));
@@ -1043,6 +1045,25 @@ export function PartCard({
                       className="h-7 w-16 text-xs"
                     />
                     <span className="text-[10px] text-muted-foreground">dB{part.boardLevelKneeDb == null && part.boardNoiseFloorDb != null ? ` (auto: sala ${part.boardNoiseFloorDb.toFixed(0)} + 4)` : ''}</span>
+                    <label className="text-[10px] text-muted-foreground" title="Codo suavizado: en las pausas la mesa NO vuelve a su nivel crudo (eso sonaba a «mute» tras una voz subida +40 dB); se queda este número de dB por debajo de la subida de la voz, así queda un fondo de sala continuo. Menos dB = más fondo (y más soplido); más dB = pausas más limpias. 60 = como antes (corte total). Con la puerta de mesa activa no se aplica.">
+                      Fondo en silencios
+                    </label>
+                    <Input
+                      type="number" step={1} min={6} max={60}
+                      value={silenceStr}
+                      placeholder="18"
+                      onChange={(e) => setSilenceStr(e.target.value)}
+                      onFocus={(e) => e.target.select()}
+                      onKeyDown={commitOnEnter}
+                      onBlur={() => {
+                        const t = silenceStr.trim();
+                        if (!t) { if (part.boardLevelSilenceDepthDb != null) patchAndRefresh({ boardLevelSilenceDepthDb: null }); return; }
+                        commitDraftNumber('boardLevelSilenceDepthDb', silenceStr, 6, 60, part.boardLevelSilenceDepthDb ?? 18, setSilenceStr);
+                      }}
+                      disabled={isProcessing || !!part.boardGate}
+                      className="h-7 w-16 text-xs"
+                    />
+                    <span className="text-[10px] text-muted-foreground">dB bajo la voz{part.boardGate ? ' (no se aplica con la puerta)' : part.boardLevelSilenceDepthDb == null ? ' (auto: 18)' : ''}</span>
                     {(() => {
                       const R = part.boardLevelRatio ?? 2;
                       const C = part.boardLevelCeilingDb ?? -3;
@@ -1070,6 +1091,7 @@ export function PartCard({
                         ceilingDb={part.boardLevelCeilingDb ?? -3}
                         noiseFloorDb={part.boardNoiseFloorDb}
                         kneeDb={part.boardLevelKneeDb}
+                        silenceDepthDb={part.boardLevelSilenceDepthDb}
                         gated={!!part.boardSpeechLevel && !!part.boardGate}
                         raw={boardRawStats}
                       />

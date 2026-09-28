@@ -32,7 +32,7 @@ export function describeBoardChain(part: ProjectPart): string {
       const keepOpen = (part.boardKeepOpenRegions ?? []).filter((r) => r.enabled).length;
       if (keepOpen > 0) steps.push(`${keepOpen} zona(s) de mesa siempre abierta`);
     }
-    steps.push(`nivelado ${part.boardLevelRatio ?? 2}:1 → techo ${part.boardLevelCeilingDb ?? -3} dB${anchor}${part.boardLevelKneeDb != null ? `, suelo de voz ${part.boardLevelKneeDb} dB` : ', suelo de voz = sala+4'}`);
+    steps.push(`nivelado ${part.boardLevelRatio ?? 2}:1 → techo ${part.boardLevelCeilingDb ?? -3} dB${anchor}${part.boardLevelKneeDb != null ? `, suelo de voz ${part.boardLevelKneeDb} dB` : ', suelo de voz = sala+4'}${part.boardGate ? '' : `, fondo en silencios ${part.boardLevelSilenceDepthDb ?? 18} dB bajo la voz`}`);
     steps.push(`limitador ${Math.min((part.boardLevelCeilingDb ?? -3) + 1, -0.5)} dB`);
   } else {
     const g = part.boardGainDb ?? 0;

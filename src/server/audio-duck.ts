@@ -124,6 +124,8 @@ export function buildVoiceLevelerFilter(opts: {
   gated?: boolean;
   /** User knee (see levelerCurvePoints.kneeDb). */
   kneeDb?: number;
+  /** Soft knee depth (see levelerCurvePoints.silenceDepthDb). */
+  silenceDepthDb?: number;
 }): string {
   // Loudest speech ≈ mean + 18 dB (LEVELER_CREST_DB). Measured on the user's
   // real mesa: the whole-night integrated loudness sits ~18 dB under the

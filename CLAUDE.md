@@ -291,6 +291,29 @@ Any change to the color pipeline is a minefield. Lessons learned
   `sync.muxedVideoPath` then any video source's embedded audio, so
   transcription (local OR Groq) works straight from an imported video —
   ffmpeg extracts the audio in convertForWhisper/convertForGroq.
+- **Codo suavizado del nivelador (`boardLevelSilenceDepthDb`, 6–60, def 18)** —
+  por debajo del suelo de voz la curva ya NO vuelve a ganancia 0: se queda
+  `depth` dB bajo la ganancia de la voz más floja (`levelerCurvePoints`,
+  lib/leveler-curve.ts), y la rampa acaba EN el ruido de sala medido
+  (acotado a suelo de voz −3…−12). Motivo: mesa grabada muy baja (24-sep: voz
+  fuerte −39, sala −67 → voz +42…+52 dB) y cada pausa caía 40+ dB en 6 dB de
+  entrada — «parece un mute total». Medido con FFmpeg real (seno, curva de esa
+  parte): entrada −67 → antes −63, ahora −33; −75 → antes −75, ahora −41; la
+  voz (≥ −55) sale idéntica. 60 = codo antiguo. NO se aplica con la puerta de
+  mesa (`gated`). La descripción de cadena añade «fondo en silencios N dB bajo
+  la voz», así que las partes niveladas ya mezcladas marcan «ajustes
+  cambiados» una vez (correcto: su próxima mezcla suena distinta). La voz del
+  duck de ambiente NO se ve afectada: se decide con la mesa cruda (cross-mic).
+- **Línea ámbar de ganancia aplicada: continua y con escala automática** —
+  `continuousGainDb` + `gainScale` (lib/level-stats.ts), usadas por
+  track-row.tsx y clip-waveform.tsx. Antes se cortaba donde el original bajaba
+  de −50 dBFS (casi siempre en una mesa baja) y se pegaba al borde con
+  ganancias > +24/+30. Ahora mantiene el último valor en silencio digital y
+  la escala se ensancha de 6 en 6 dB (tope ±72).
+- **Panel de rellenos y tramo de vídeo** — `partUsedRanges` (lib/part-trims.ts)
+  da el trozo de cada archivo que la mezcla usa; el panel descarta propuestas
+  del detector fuera de él y sombrea cabeza Y cola. El detector sigue
+  analizando el archivo entero.
 - **Partes (multi video+board pairs)** — `/project/[id]/parts` page +
   `project.parts[]` (`ProjectPart` in types) + `partsConcat`. Each part =
   one video source + one board-audio source, processed by

@@ -4,10 +4,17 @@
  * picture IS the filter. Anchored to the measured integrated loudness I:
  *   · loudest voice (≈ I + CREST) → ceiling C
  *   · below it: differences divided by `ratio` (quiet lines get MORE boost)
- *   · knee to unity between I−18 and I−26 (room noise untouched)
+ *   · under the voice floor the gain does NOT fall back to zero: it settles
+ *     `silenceDepthDb` under the gain of the quietest voice (soft knee), so a
+ *     pause keeps a bed of room instead of reading as a muted track
  *   · gentle 8:1 stop above the crest (claps) — the limiter finishes the job
  */
 export const LEVELER_CREST_DB = 18;
+/** Default soft-knee depth: the room sits this far under the voice's gain. */
+export const LEVELER_SILENCE_DEPTH_DB = 18;
+export const LEVELER_SILENCE_DEPTH_MIN = 6;
+/** At this depth (≥ any real gain) the knee is the old one: unity under the floor. */
+export const LEVELER_SILENCE_DEPTH_MAX = 60;
 
 export interface LevelerCurveOpts {
   meanLUFS: number;
@@ -27,6 +34,35 @@ export interface LevelerCurveOpts {
   /** USER knee: input level (dBFS) below which the voice is left alone (vLo);
    *  the ramp to unity is 6 dB under it. Overrides the floor-derived knee. */
   kneeDb?: number;
+  /** SOFT KNEE: how far under the gain of the quietest voice (the gain at the
+   *  knee) everything below the voice floor is left. The old curve went back
+   *  to UNITY there — with a low-recorded mesa (voice +42…+52 dB) a pause
+   *  dropped 40+ dB in 6 dB of input and the track read as muted ("parece que
+   *  ha habido un mute total"). Default 18; 60 = the old hard knee. Ignored
+   *  with the mesa gate on (the gate IS the chosen silence). */
+  silenceDepthDb?: number;
+}
+
+export interface LevelerCurveInfo {
+  pts: Array<[number, number]>;
+  /** Voice floor: input level from which the full curve applies. */
+  vLo: number;
+  /** Bottom of the ramp: from here down the gain is constant (`silenceGainDb`). */
+  gLo: number;
+  /** Loudest voice (→ ceiling). */
+  vHi: number;
+  /** Gain of the quietest voice (at vLo), dB. */
+  kneeGainDb: number;
+  /** Gain left under the ramp, dB (0 = hard knee / unity). */
+  silenceGainDb: number;
+}
+
+/** The curve with its landmarks (what the drawing labels). */
+export function levelerCurve(opts: LevelerCurveOpts): LevelerCurveInfo {
+  const pts = levelerCurvePoints(opts);
+  const [gLo, gOut] = pts[1];
+  const [vLo, vOut] = pts[2];
+  return { pts, vLo, gLo, vHi: pts[4][0], kneeGainDb: vOut - vLo, silenceGainDb: gOut - gLo };
 }
 
 /** Breakpoints [inDb, outDb] in ascending input order (compand `points`). */
@@ -65,6 +101,24 @@ export function levelerCurvePoints(opts: LevelerCurveOpts): Array<[number, numbe
   vLo = Math.min(vLo, I - 2);
   gLo = Math.min(gLo, vLo - 2);
   const f = (x: number) => C - (vHi - x) / R;
+  // Soft knee: the gain under the floor settles `depth` below the knee's gain.
+  const depth = Math.max(LEVELER_SILENCE_DEPTH_MIN, Math.min(LEVELER_SILENCE_DEPTH_MAX, opts.silenceDepthDb ?? LEVELER_SILENCE_DEPTH_DB));
+  const silenceGain = opts.gated ? 0 : Math.max(0, f(vLo) - vLo - depth);
+  if (silenceGain > 0) {
+    // The ramp ends ON the measured room when it is within reach, so the room
+    // itself gets exactly the floor gain (3–12 dB under the voice floor).
+    if (opts.noiseFloorDb != null && Number.isFinite(opts.noiseFloorDb)) {
+      gLo = Math.min(vLo - 3, Math.max(vLo - 12, opts.noiseFloorDb));
+    }
+    return [
+      [-90, -90 + silenceGain],
+      [gLo, gLo + silenceGain],
+      [vLo, f(vLo)],
+      [I, f(I)],
+      [vHi, C],
+      [20, C + (20 - vHi) / 8],
+    ];
+  }
   return [
     [-90, -90],
     [gLo, gLo],

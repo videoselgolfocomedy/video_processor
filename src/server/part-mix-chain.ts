@@ -238,6 +238,7 @@ export function buildPartMixFilter(o: PartMixFilterOptions): PartMixFilterResult
       noiseFloorDb: o.boardNoiseFloorDb ?? undefined,
       gated: !!o.boardGateCurve,
       kneeDb: part.boardLevelKneeDb,
+      silenceDepthDb: part.boardLevelSilenceDepthDb,
     }));
     log.push(`leveler: ratio ${levelRatio}:1, ceiling ${levelCeilingDb} dB (anchored at ${meanLUFS} LUFS, room ${o.boardNoiseFloorDb ?? '?'} dB${o.boardGateCurve ? ', gated: knee under the floor' : ''})`);
     if (o.boardGateCurve) log.push(`mesa gate: pre-computed voice mask (input ${o.boardGateCurve.inputIndex}) multiplies the board before the leveler`);
