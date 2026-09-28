@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useMemo, useState } from 'react';
-import { partTrims } from '@/lib/part-trims';
+import { partTrims, partUsedRanges } from '@/lib/part-trims';
 import { useParams } from 'next/navigation';
 import { useProjectStore } from '@/stores/project-store';
 import { BoardDuckingPanel } from '@/components/audio/board-ducking-panel';
@@ -277,7 +277,8 @@ export function PartsMixPanels({ getEditorConcatMs, stems }: PartsMixPanelsProps
               envelopeUrl={`/api/projects/${projectId}/audio/envelope?name=${encodeURIComponent(boardWav)}`}
               detectUrl={`/api/projects/${projectId}/parts/${part.id}/detect-fillers`}
               initialRegions={part.boardDuckRegions ?? []}
-              boardTrimMs={Math.max(0, part.alignmentOffsetMs ?? 0)}
+              boardTrimMs={partUsedRanges(part).board.startMs}
+              usedEndMs={partUsedRanges(part).board.endMs}
               disabled={busy}
               applyLabel="Aplicar (re-mezclar audio)"
               applyHint="Baja la mesa y regenera solo el audio de esta parte — el vídeo no se reescribe (segundos)."
@@ -308,7 +309,8 @@ export function PartsMixPanels({ getEditorConcatMs, stems }: PartsMixPanelsProps
             detectUrl={`/api/projects/${projectId}/audio/envelope?name=${encodeURIComponent(cameraWav)}`}
             envelopeUrl={`/api/projects/${projectId}/audio/envelope?name=${encodeURIComponent(cameraWav)}`}
             initialRegions={part.ambientBoostRegions ?? []}
-            boardTrimMs={Math.max(0, -(part.alignmentOffsetMs ?? 0))}
+            boardTrimMs={partUsedRanges(part).ambient.startMs}
+            usedEndMs={partUsedRanges(part).ambient.endMs}
             disabled={busy}
             applyLabel="Aplicar (re-mezclar audio)"
             applyHint="Sube el ambiente (público) de esta parte con fade y regenera solo el audio — la voz de mesa queda intacta y el vídeo no se reescribe."

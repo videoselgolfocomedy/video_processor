@@ -27,6 +27,23 @@ export function partTrims(part: Pick<ProjectPart, 'alignmentOffsetMs' | 'videoRa
   return { boardTrimMs, ambientTrimMs, capMs };
 }
 
+/**
+ * The stretch of each source file the part's mix actually plays, on the file's
+ * own clock. The end is the video range's cap, else the mixed duration; absent
+ * when neither is known yet (never mixed, whole video).
+ */
+export function partUsedRanges(part: Pick<ProjectPart, 'alignmentOffsetMs' | 'videoRangeMs' | 'muxedDurationMs'>): {
+  board: { startMs: number; endMs?: number };
+  ambient: { startMs: number; endMs?: number };
+} {
+  const { boardTrimMs, ambientTrimMs, capMs } = partTrims(part);
+  const lenMs = capMs ?? (part.muxedDurationMs && part.muxedDurationMs > 0 ? part.muxedDurationMs : null);
+  return {
+    board: { startMs: boardTrimMs, endMs: lenMs != null ? boardTrimMs + lenMs : undefined },
+    ambient: { startMs: ambientTrimMs, endMs: lenMs != null ? ambientTrimMs + lenMs : undefined },
+  };
+}
+
 /** Identity of a video range for "was the picture cut for this?" checks. */
 export function videoRangeKey(part: Pick<ProjectPart, 'videoRangeMs'>): string {
   const r = part.videoRangeMs;

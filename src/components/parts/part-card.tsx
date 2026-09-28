@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState, type KeyboardEvent } from 'react';
-import { partTrims } from '@/lib/part-trims';
+import { partTrims, partUsedRanges } from '@/lib/part-trims';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -933,7 +933,8 @@ export function PartCard({
                       envelopeUrl={`/api/projects/${projectId}/audio/envelope?name=${encodeURIComponent(`part_${part.id.slice(0, 8)}_board.wav`)}`}
                       detectUrl={`/api/projects/${projectId}/parts/${part.id}/detect-fillers`}
                       initialRegions={part.boardDuckRegions ?? []}
-                      boardTrimMs={Math.max(0, part.alignmentOffsetMs ?? 0)}
+                      boardTrimMs={partUsedRanges(part).board.startMs}
+                      usedEndMs={partUsedRanges(part).board.endMs}
                       durationMsFallback={part.muxedDurationMs}
                       disabled={isProcessing}
                       applyLabel="Aplicar y re-mezclar"

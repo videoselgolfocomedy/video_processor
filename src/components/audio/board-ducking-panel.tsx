@@ -45,6 +45,11 @@ interface BoardDuckingPanelProps {
   detectUrl: string;
   initialRegions: BoardDuckRegion[];
   boardTrimMs: number;
+  /** End of the stretch of this file the mix actually uses (ms in the file's
+   *  own clock). Absent = until the file ends. With a video range the mesa is
+   *  the whole night and the part only a piece of it: detector proposals
+   *  outside [boardTrimMs, usedEndMs] are dropped and the tail is shaded. */
+  usedEndMs?: number;
   durationMsFallback?: number;
   disabled?: boolean;
   onSave: (regions: BoardDuckRegion[]) => Promise<boolean>;
@@ -208,7 +213,7 @@ const MemoRegionList = ({ ...props }: RegionListProps) => useMemo(
 );
 
 export function BoardDuckingPanel({
-  projectId, boardUrl, fillersUrl, detectUrl, initialRegions, boardTrimMs,
+  projectId, boardUrl, fillersUrl, detectUrl, initialRegions, boardTrimMs, usedEndMs,
   durationMsFallback = 0, disabled, onSave, applyLabel, applyHint, onApplied, getEditorBoardMs,
   mode = 'duck', envelopeUrl,
 }: BoardDuckingPanelProps) {
@@ -234,8 +239,15 @@ export function BoardDuckingPanel({
   const [detectProgress, setDetectProgress] = useState<number | null>(null);
   const [detectMsg, setDetectMsg] = useState('');
 
+  const usedEnd = usedEndMs != null && usedEndMs > boardTrimMs ? usedEndMs : Infinity;
   const initialJson = JSON.stringify(initialRegions);
-  useEffect(() => { setRegions(JSON.parse(initialJson)); }, [initialJson]);
+  useEffect(() => {
+    // Unreviewed detector proposals outside the used stretch are noise (the
+    // mix never plays them); anything the user marked or drew is kept.
+    setRegions((JSON.parse(initialJson) as BoardDuckRegion[]).filter((r) =>
+      r.source === 'manual' || r.enabled || r.rejected ||
+      (r.endMs > boardTrimMs && r.startMs < usedEnd)));
+  }, [initialJson, boardTrimMs, usedEnd]);
 
   const durationMs = useMemo(
     () => (fillers ? fillers.duration_s * 1000 : durationMsFallback),
@@ -316,7 +328,7 @@ export function BoardDuckingPanel({
       const overlapsExisting = (s: number, e: number) =>
         prev.some((k) => Math.min(e, k.endMs) - Math.max(s, k.startMs) > 0);
       const fresh: BoardDuckRegion[] = proposals
-        .filter((p) => p.end_ms > boardTrimMs)
+        .filter((p) => p.end_ms > boardTrimMs && p.start_ms < usedEnd)
         .filter((p) => !overlapsExisting(p.start_ms, p.end_ms))
         .map((p) => ({
           id: uuidv4(),
@@ -330,7 +342,7 @@ export function BoardDuckingPanel({
         }));
       return [...prev, ...fresh].sort((a, b) => a.startMs - b.startMs);
     });
-  }, [defaultAtten, boardTrimMs]);
+  }, [defaultAtten, boardTrimMs, usedEnd]);
 
   // --- Detection job ---------------------------------------------------------
   // `learn` = true runs the example-based search: enabled regions are the good
@@ -379,10 +391,10 @@ export function BoardDuckingPanel({
     const d = await loadFillers();
     if (d) {
       mergeProposals(d);
-      const n = (d.regions ?? []).filter((r) => r.end_ms > boardTrimMs).length;
+      const n = (d.regions ?? []).filter((r) => r.end_ms > boardTrimMs && r.start_ms < usedEnd).length;
       toast({ title: 'Detección lista', description: `${n} zona(s) propuesta(s) — actívalas para atenuarlas.` });
     }
-  }, [loadFillers, mergeProposals, boardTrimMs, toast]);
+  }, [loadFillers, mergeProposals, boardTrimMs, usedEnd, toast]);
   const onDetectError = useCallback((e: string) => {
     setDetectJobId(null);
     setDetectProgress(null);
@@ -500,6 +512,24 @@ export function BoardDuckingPanel({
         ctx.fillText('no usado (recortado)', 4, 12);
       }
     }
+    // …and the tail past the end of the used stretch.
+    if (usedEnd < vEnd) {
+      const x1 = Math.max(0, (usedEnd - vStart) / msPerPx);
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(x1, 0, cssW - x1, cssH);
+      ctx.strokeStyle = 'rgba(148,163,184,0.5)';
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x1, 0);
+      ctx.lineTo(x1, cssH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (cssW - x1 > 120) {
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '10px sans-serif';
+        ctx.fillText('no usado (recortado)', x1 + 4, 12);
+      }
+    }
 
     // Region bands
     for (const r of regions) {
@@ -532,7 +562,7 @@ export function BoardDuckingPanel({
       ctx.lineTo(x, cssH);
       ctx.stroke();
     }
-  }, [view, durationMs, fillers, envNorm, regions, selectedId, dragBand, audioMs, boardTrimMs, isBoost]);
+  }, [view, durationMs, fillers, envNorm, regions, selectedId, dragBand, audioMs, boardTrimMs, usedEnd, isBoost]);
 
   useEffect(() => { draw(); }, [draw]);
   useEffect(() => {
