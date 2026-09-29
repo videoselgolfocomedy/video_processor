@@ -394,23 +394,43 @@ export async function getProject(id: string): Promise<ProjectState | null> {
   }
 }
 
+// Every write is read-modify-write of ONE json file, and the callers patch
+// different top-level keys (reels autosave, compose save, bit detection,
+// reconcile-media, part jobs…). Unserialized, two of them overlapping meant the
+// second wrote back the first one's key as it had READ it — a saved reel or
+// composition silently reverted. Writes are chained per project id (on
+// globalThis: Next bundles this module once per route) and land through a
+// temp file + rename, so a reader never sees a half-written json.
+const writeChains: Map<string, Promise<unknown>> =
+  ((globalThis as unknown as { __projectWriteChains?: Map<string, Promise<unknown>> }).__projectWriteChains ??= new Map());
+
 export async function updateProject(
   id: string,
   updates: Partial<ProjectState>
 ): Promise<ProjectState | null> {
-  const project = await getProject(id);
-  if (!project) return null;
+  const prev = writeChains.get(id) ?? Promise.resolve();
+  const next = prev
+    .catch(() => {}) // a failed predecessor must not poison the chain
+    .then(async () => {
+      const project = await getProject(id);
+      if (!project) return null;
 
-  const updated = {
-    ...project,
-    ...updates,
-    id: project.id, // Prevent id change
-    createdAt: project.createdAt, // Prevent createdAt change
-    updatedAt: new Date().toISOString(),
-  };
+      const updated = {
+        ...project,
+        ...updates,
+        id: project.id, // Prevent id change
+        createdAt: project.createdAt, // Prevent createdAt change
+        updatedAt: new Date().toISOString(),
+      };
 
-  await fs.writeFile(projectJsonPath(id), JSON.stringify(updated, null, 2));
-  return updated;
+      const target = projectJsonPath(id);
+      const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+      await fs.writeFile(tmp, JSON.stringify(updated, null, 2));
+      await fs.rename(tmp, target);
+      return updated;
+    });
+  writeChains.set(id, next);
+  return next;
 }
 
 export async function deleteProject(id: string): Promise<boolean> {

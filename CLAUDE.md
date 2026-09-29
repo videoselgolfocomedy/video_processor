@@ -228,8 +228,8 @@ Any change to the color pipeline is a minefield. Lessons learned
   `startMs/endMs` if a clamp/remap is done without updating words. See
   `splitByWords` in `subtitle-utils.ts` and `clampSegmentToBounds` —
   defensive code is in place but be careful when adding new mutations.
-- **Compose does NOT autosave** — Save / Ctrl+S only (verified in the
-  browser). Reels autosaves with a 3 s debounce; destructive ops save
+- **Compose does NOT autosave while editing** — Save / Ctrl+S, plus a save
+  on LEAVING the page when dirty. Reels autosaves with a 3 s debounce; destructive ops save
   immediately. Right-click delete on reel tabs requires a confirm dialog
   — there is no X button (intentional, prevents accidents).
 - **Reel video player** had a long history of feedback loops between
@@ -291,6 +291,31 @@ Any change to the color pipeline is a minefield. Lessons learned
   `sync.muxedVideoPath` then any video source's embedded audio, so
   transcription (local OR Groq) works straight from an imported video —
   ffmpeg extracts the audio in convertForWhisper/convertForGroq.
+- **Pérdida de cambios al pasar de Compose a Reels (cuatro vías cerradas)** —
+  (1) la versión con nombre (marcador) solo vivía en memoria hasta pulsar
+  Save: ahora el marcador llama a `onSave()` al momento. (2) Compose NO tiene
+  autosave mientras editas, pero ahora GUARDA AL SALIR si hay cambios
+  (cleanup del effect en compose-layout; navegar por el menú es client-side y
+  no dispara `beforeunload`), y Reels vacía su debounce de 3 s al salir.
+  `handleSave` de Compose lee el store EN EL MOMENTO (`getState()`), no los
+  valores capturados por el render. (3) `currentProject` vive en un store
+  compartido y al llegar a una página es todavía la copia que pidió la página
+  ANTERIOR: compose/page y reels/page cargaban de ella e ignoraban el fetch
+  fresco, y el siguiente guardado escribía lo viejo encima. Ahora esperan al
+  fetch (`fresh`) antes de cargar. (4) `updateProject` era leer-modificar-
+  escribir sin cola: dos guardados solapados (bits, autosave de reels,
+  compose, reconcile-media) se pisaban claves entre sí. Ahora va encadenado
+  por id de proyecto (mapa en `globalThis`, Next empaqueta el módulo por
+  ruta) y escribe con fichero temporal + rename. Además el PATCH de
+  `/api/projects/[id]` FUSIONA `transcription` (Compose manda solo
+  `{segments}` y un reemplazo plano tiraba idioma y restricciones).
+  Verificado: tsc/eslint y carga de ambas páginas; el guardado al salir y el
+  del marcador NO se probaron de extremo a extremo.
+- **Silueta de las cajas de ganancia** — la meseta se coloca con el reloj del
+  PROPIO tramo (`srcStartMs` en `sourceRangeToTimelineSpans`), no con
+  `sourceMsToTimelineMs` (primer clip que muestra ese instante: con un tramo
+  repetido en la pista la rampa ocupaba toda la caja). La referencia fiable
+  de lo que suena es la línea ámbar, no la silueta.
 - **Codo suavizado del nivelador (`boardLevelSilenceDepthDb`, 6–60, def 18)** —
   por debajo del suelo de voz la curva ya NO vuelve a ganancia 0: se queda
   `depth` dB bajo la ganancia de la voz más floja (`levelerCurvePoints`,

@@ -15,13 +15,21 @@ export default function ComposePage() {
   const [loaded, setLoaded] = useState(false);
 
   // Fetch project data
+  // `currentProject` outlives the page (shared store): on arrival it is still
+  // the copy fetched by the PREVIOUS page, without whatever was saved since.
+  // Loading from it and ignoring the fresh fetch showed the old state — and
+  // the next Save wrote it over the newer one on disk.
+  const [fresh, setFresh] = useState(false);
   useEffect(() => {
-    fetchProject(projectId);
+    let alive = true;
+    setFresh(false);
+    void fetchProject(projectId).finally(() => { if (alive) setFresh(true); });
+    return () => { alive = false; };
   }, [projectId, fetchProject]);
 
   // Load composition into store when project is ready
   useEffect(() => {
-    if (!currentProject || loaded) return;
+    if (!currentProject || loaded || !fresh || currentProject.id !== projectId) return;
 
     const durationMs = getDurationMs(currentProject);
 
@@ -44,7 +52,7 @@ export default function ComposePage() {
       currentProject.sync.muxedAudioOffsetMs ?? 0,
     );
     setLoaded(true);
-  }, [currentProject, loaded, loadComposition]);
+  }, [currentProject, loaded, fresh, projectId, loadComposition]);
 
   if (!currentProject || !loaded) {
     return (

@@ -309,9 +309,11 @@ export function TimelineControls({ onSave, saving }: TimelineControlsProps) {
         variant="ghost" size="sm" className="h-7 w-7 p-0 text-emerald-400 hover:text-emerald-300"
         onClick={() => {
           const label = window.prompt('Nombre de la versión (sus cortes y subtítulos se podrán usar en Reels para detectar bits):', `v${versions.length + 1}`);
-          if (label) saveVersion(label);
+          // Persisted at once: a version that only lived in memory was lost
+          // by going to Reels without pressing Save first.
+          if (label) { saveVersion(label); onSave(); }
         }}
-        title="Guardar versión con nombre (cortes + subtítulos actuales). Luego pulsa Guardar."
+        title="Guardar versión con nombre (cortes + subtítulos actuales). Se guarda en el proyecto al momento."
       >
         <Bookmark className="h-3.5 w-3.5" />
       </Button>

@@ -100,7 +100,6 @@ export function ComposeLayout({
   const isPartsProject = (currentProject?.parts?.length ?? 0) > 0 &&
     !selectedAudioName && !!currentProject?.sync.muxedVideoPath;
 
-  const getCompositionState = useComposeStore((s) => s.getCompositionState);
   const subtitleSegments = useComposeStore((s) => s.subtitleSegments);
   const markClean = useComposeStore((s) => s.markClean);
   const selectedClipIds = useComposeStore((s) => s.selectedClipIds);
@@ -119,7 +118,6 @@ export function ComposeLayout({
   const setSubtitlePreset = useComposeStore((s) => s.setSubtitlePreset);
   const setSubtitleConstraints = useComposeStore((s) => s.setSubtitleConstraints);
   const regenerateSubtitles = useComposeStore((s) => s.regenerateSubtitles);
-  const versions = useComposeStore((s) => s.versions);
 
   // Determine what the first selected clip is (for right panel context)
   const firstSelectedClip = useMemo(() => {
@@ -137,29 +135,36 @@ export function ComposeLayout({
     return 'subtitles' as const;
   }, [firstSelectedClip]);
 
+  // Reads the store AT CALL TIME (not the values captured by the last render):
+  // the version button saves right after adding the version, and the page
+  // saves on its way out — both run before React has re-rendered.
   const handleSave = useCallback(async () => {
+    const st = useComposeStore.getState();
+    const body = JSON.stringify({
+      ...st.getCompositionState(),
+      subtitleStyle: st.subtitleStyle,
+      subtitleStylePreset: st.subtitleStylePreset,
+      subtitleConstraints: st.subtitleConstraints,
+      versions: st.versions,
+    });
+    const segments = st.subtitleSegments;
     setSaving(true);
     try {
-      const compositionState = getCompositionState();
-      await fetch(`/api/projects/${projectId}/compose`, {
+      const put = await fetch(`/api/projects/${projectId}/compose`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...compositionState,
-          subtitleStyle: storeSubtitleStyle,
-          subtitleStylePreset,
-          subtitleConstraints,
-          versions,
-        }),
+        body,
       });
+      if (!put.ok) throw new Error(`compose ${put.status}`);
 
-      await fetch(`/api/projects/${projectId}`, {
+      const patch = await fetch(`/api/projects/${projectId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          transcription: { segments: subtitleSegments },
+          transcription: { segments },
         }),
       });
+      if (!patch.ok) throw new Error(`transcription ${patch.status}`);
 
       markClean();
     } catch (err) {
@@ -167,7 +172,18 @@ export function ComposeLayout({
     } finally {
       setSaving(false);
     }
-  }, [projectId, getCompositionState, subtitleSegments, markClean, storeSubtitleStyle, subtitleStylePreset, subtitleConstraints, versions]);
+  }, [projectId, markClean]);
+
+  // Leaving Compose with unsaved work (menu click = client-side navigation, no
+  // "unsaved changes" prompt) used to DROP it silently — cuts, subtitles and
+  // any version just bookmarked. Save on the way out, then refresh the shared
+  // project so the next page does not start from the copy fetched before.
+  useEffect(() => {
+    return () => {
+      if (!useComposeStore.getState().dirty) return;
+      void handleSave().then(() => fetchProject(projectId));
+    };
+  }, [handleSave, fetchProject, projectId]);
 
   // Keyboard shortcuts
   useEffect(() => {

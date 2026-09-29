@@ -8,7 +8,7 @@ import { useToast } from '@/hooks/use-toast';
 import { applyPendingParts } from '@/lib/remix-ducking';
 import {
   partWindows, placeRegions, timelineMsToSourceMs, partWindowAtConcatMs,
-  concatMsToWavMs, wavMsToConcatMs, sourceRangeToTimelineSpans, sourceMsToTimelineMs,
+  concatMsToWavMs, wavMsToConcatMs, sourceRangeToTimelineSpans,
   type RegionKind, type PlacedRegion, type PartWindow,
 } from '@/lib/audio-region-map';
 import type { BoardDuckRegion, CompositionClip } from '@/types/project';
@@ -558,10 +558,14 @@ export function RegionBands({ kind }: { kind: RegionKind }) {
           const left = toPx(sp.startMs);
           const width = Math.max(2, (sp.endMs - sp.startMs) * zoomLevel);
           if (left + width < -100 || left > viewportWidthPx + 100) return null;
-          // Plateau inside this span (timeline px, relative to the span).
-          const tA = sourceMsToTimelineMs(videoClips, plA), tB = sourceMsToTimelineMs(videoClips, plB);
-          const pa = Math.max(0, ((tA ?? sp.startMs) - sp.startMs) * zoomLevel);
-          const pb = Math.min(width, ((tB ?? sp.endMs) - sp.startMs) * zoomLevel);
+          // Plateau inside this span (px, relative to the span), placed with
+          // the span's OWN source clock. It used to go through
+          // sourceMsToTimelineMs, which answers with the FIRST clip showing
+          // that source time: with the same stretch on the timeline twice
+          // (a duplicated or pasted clip) the plateau landed on the other
+          // copy and the ramp was drawn across the whole box.
+          const pa = Math.max(0, (plA - sp.srcStartMs) * zoomLevel);
+          const pb = Math.min(width, Math.max(0, (plB - sp.srcStartMs) * zoomLevel));
           const rampIn = Math.max(0, Math.min(width, pa)), rampOut = Math.max(0, width - Math.max(pb, pa));
           return (
             <div

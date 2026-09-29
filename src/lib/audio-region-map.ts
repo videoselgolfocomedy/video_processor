@@ -99,15 +99,17 @@ export function sourceRangeToTimelineSpans(
   clips: CompositionClip[],
   srcStartMs: number,
   srcEndMs: number,
-): Array<{ startMs: number; endMs: number }> {
-  const out: Array<{ startMs: number; endMs: number }> = [];
+): Array<{ startMs: number; endMs: number; srcStartMs: number }> {
+  const out: Array<{ startMs: number; endMs: number; srcStartMs: number }> = [];
   if (srcEndMs <= srcStartMs) return out;
   for (const c of clips) {
     const a = Math.max(srcStartMs, c.sourceInMs);
     const b = Math.min(srcEndMs, c.sourceOutMs);
     if (b <= a) continue;
     const t0 = c.timelineStartMs + (a - c.sourceInMs);
-    out.push({ startMs: t0, endMs: t0 + (b - a) });
+    // srcStartMs: the source time at the span's left edge, so anything drawn
+    // INSIDE the span is placed by this clip's own mapping.
+    out.push({ startMs: t0, endMs: t0 + (b - a), srcStartMs: a });
   }
   return out.sort((x, y) => x.startMs - y.startMs);
 }

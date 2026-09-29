@@ -20,6 +20,13 @@ export async function PATCH(
   const { id } = await params;
   try {
     const body = await request.json();
+    // `transcription` is merged one level deep: Compose saves only
+    // `{ segments }`, and a plain replace dropped language, constraints and
+    // everything else stored next to them.
+    if (body?.transcription && typeof body.transcription === 'object') {
+      const current = await getProject(id);
+      if (current) body.transcription = { ...current.transcription, ...body.transcription };
+    }
     const updated = await updateProject(id, body);
     if (!updated) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });

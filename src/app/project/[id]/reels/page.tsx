@@ -17,12 +17,20 @@ export default function ReelsPage() {
   const [loaded, setLoaded] = useState(false);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // `currentProject` outlives the page (shared store): on arrival it is still
+  // the copy fetched by the PREVIOUS page. Installing the reels from it and
+  // ignoring the fresh fetch showed reels without the latest edits — and the
+  // next autosave wrote that old list over the newer one on disk.
+  const [fresh, setFresh] = useState(false);
   useEffect(() => {
-    fetchProject(projectId);
+    let alive = true;
+    setFresh(false);
+    void fetchProject(projectId).finally(() => { if (alive) setFresh(true); });
+    return () => { alive = false; };
   }, [projectId, fetchProject]);
 
   useEffect(() => {
-    if (!currentProject) return;
+    if (!currentProject || !fresh || currentProject.id !== projectId) return;
 
     const videoSource = currentProject.sources.find((s) => s.type === 'video');
     const sourceRes = videoSource?.resolution ?? null;
@@ -68,7 +76,7 @@ export default function ReelsPage() {
       // navigation was a real regression.
       refreshBaseSegments(baseSegs, durationMs);
     }
-  }, [currentProject, loaded, loadReels, refreshBaseSegments, setComposeVersions]);
+  }, [currentProject, fresh, projectId, loaded, loadReels, refreshBaseSegments, setComposeVersions]);
 
   const handleSave = useCallback(async () => {
     const reels = useReelStore.getState().reels;
@@ -99,6 +107,8 @@ export default function ReelsPage() {
     return () => {
       unsub();
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      // Leaving inside the 3 s debounce dropped the last edits: flush them.
+      if (useReelStore.getState().dirty) void handleSave();
     };
   }, [handleSave]);
 
