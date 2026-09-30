@@ -109,7 +109,7 @@ function ExportItem({
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between">
           <p className="text-sm font-medium">
-            {preset?.name || record.presetId}
+            {record.label || preset?.name || record.presetId}
           </p>
           {isActive && progress > 0 && (
             <span className="text-xs text-muted-foreground">
@@ -131,6 +131,11 @@ function ExportItem({
         )}
         {isActive && progress === 0 && (
           <p className="text-xs text-muted-foreground">Iniciando...</p>
+        )}
+        {record.concatOf && record.concatOf.length > 0 && (
+          <p className="text-[10px] text-muted-foreground truncate" title={record.concatOf.map((c, i) => `${i + 1}. ${c.projectName} — ${c.fileName}`).join('\n')}>
+            {record.concatOf.map((c, i) => `${i + 1}. ${c.projectName}`).join(' → ')}
+          </p>
         )}
         {record.status === 'error' && record.error && (
           <p className="text-xs text-destructive">{record.error}</p>

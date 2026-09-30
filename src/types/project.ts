@@ -702,6 +702,18 @@ export interface ExportRecord {
   error?: string;
   targetType: 'youtube' | 'reel';
   reelId?: string;
+  /** Display name for exports that are not a preset render (e.g. a join). */
+  label?: string;
+  /** Join of finished exports (this or other projects), in playback order. */
+  concatOf?: ConcatExportItem[];
+}
+
+/** One piece of a joined export: a finished YouTube export of some project. */
+export interface ConcatExportItem {
+  projectId: string;
+  projectName: string;
+  exportId: string;
+  fileName: string;
 }
 
 // --- Composition Timeline ---

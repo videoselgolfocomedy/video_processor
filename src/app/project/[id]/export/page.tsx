@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { useProjectStore } from '@/stores/project-store';
 import { ExportPanel } from '@/components/export/export-panel';
 import { RenderQueue } from '@/components/export/render-queue';
+import { ConcatExportsCard } from '@/components/export/concat-exports-card';
 import { useToast } from '@/hooks/use-toast';
 import { getPresetById } from '@/config/subtitle-styles';
 import { Button } from '@/components/ui/button';
@@ -153,6 +154,9 @@ export default function ExportPage() {
           onExport={handleExportReel}
         />
       )}
+
+      {/* Join finished exports (this + other projects) into one upload */}
+      <ConcatExportsCard projectId={projectId} onStarted={() => fetchProject(projectId)} />
 
       <RenderQueue
         exports={currentProject.exports}
