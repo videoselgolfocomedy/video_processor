@@ -8,13 +8,14 @@ import {
   SkipBack, SkipForward, ChevronLeft, ChevronRight,
   SplitSquareVertical, ChevronsLeftRight, XCircle, ArrowLeftToLine,
   Shrink, ChevronsLeft, Gauge, RefreshCw, ListRestart, ListPlus,
-  Plus, Bookmark, History, RotateCcw, BetweenHorizontalStart,
+  Plus, BetweenHorizontalStart,
   Film, Music, ImageIcon, Type, Layers,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { useComposeStore } from '@/stores/compose-store';
 import { useToast } from '@/hooks/use-toast';
+import { ComposeVersionsMenu } from './compose-versions-menu';
 
 /* ── Editable timecode ──────────────────────────────────────────────── */
 
@@ -157,7 +158,8 @@ function SpeedSelector() {
 /* ── Main controls bar ──────────────────────────────────────────────── */
 
 interface TimelineControlsProps {
-  onSave: () => void;
+  /** Resolves false when the save did not reach disk (the versions menu reports it). */
+  onSave: () => Promise<boolean> | void;
   saving: boolean;
 }
 
@@ -190,13 +192,6 @@ export function TimelineControls({ onSave, saving }: TimelineControlsProps) {
   const syncSubtitlesToClips = useComposeStore((s) => s.syncSubtitlesToClips);
   const regenerateSubtitles = useComposeStore((s) => s.regenerateSubtitles);
   const addTrack = useComposeStore((s) => s.addTrack);
-  const saveVersion = useComposeStore((s) => s.saveVersion);
-  const restoreVersion = useComposeStore((s) => s.restoreVersion);
-  const deleteVersion = useComposeStore((s) => s.deleteVersion);
-  const versions = useComposeStore((s) => s.versions);
-
-  const [versionMenuOpen, setVersionMenuOpen] = useState(false);
-  const versionBtnRef = useRef<HTMLButtonElement>(null);
   const [addTrackOpen, setAddTrackOpen] = useState(false);
   const addTrackRef = useRef<HTMLDivElement>(null);
 
@@ -249,15 +244,6 @@ export function TimelineControls({ onSave, saving }: TimelineControlsProps) {
     return () => window.removeEventListener('click', handler);
   }, [addTrackOpen]);
 
-  useEffect(() => {
-    if (!versionMenuOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (versionBtnRef.current && !versionBtnRef.current.contains(e.target as Node)) setVersionMenuOpen(false);
-    };
-    window.addEventListener('click', handler);
-    return () => window.removeEventListener('click', handler);
-  }, [versionMenuOpen]);
-
   const goToStart = () => setCurrentTime(0);
   const goToEnd = () => setCurrentTime(durationMs);
   const framePrev = () => setCurrentTime(Math.max(0, currentTimeMs - 100));
@@ -304,65 +290,8 @@ export function TimelineControls({ onSave, saving }: TimelineControlsProps) {
         <Redo2 className="h-3.5 w-3.5" />
       </Button>
 
-      {/* ── Versions ── */}
-      <Button
-        variant="ghost" size="sm" className="h-7 w-7 p-0 text-emerald-400 hover:text-emerald-300"
-        onClick={() => {
-          const label = window.prompt('Nombre de la versión (sus cortes y subtítulos se podrán usar en Reels para detectar bits):', `v${versions.length + 1}`);
-          // Persisted at once: a version that only lived in memory was lost
-          // by going to Reels without pressing Save first.
-          if (label) { saveVersion(label); onSave(); }
-        }}
-        title="Guardar versión con nombre (cortes + subtítulos actuales). Se guarda en el proyecto al momento."
-      >
-        <Bookmark className="h-3.5 w-3.5" />
-      </Button>
-      <div className="relative">
-        <Button
-          ref={versionBtnRef}
-          variant="ghost" size="sm" className="h-7 px-1.5 text-[10px] gap-0.5"
-          onClick={() => setVersionMenuOpen(!versionMenuOpen)}
-          disabled={versions.length === 0}
-          title="Versiones guardadas: restaurar o borrar"
-        >
-          <History className="h-3.5 w-3.5" />
-          {versions.length > 0 && <span>{versions.length}</span>}
-        </Button>
-        {versionMenuOpen && versions.length > 0 && (
-          <div className="absolute top-full left-0 mt-1 bg-popover border border-border rounded-md shadow-lg py-1 min-w-[200px] z-50 max-h-[300px] overflow-y-auto">
-            {versions.map((v) => (
-              <div key={v.id} className="flex items-center gap-2 px-3 py-1.5 hover:bg-muted text-xs group">
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium truncate">{v.label}</div>
-                  <div className="text-[10px] text-muted-foreground">
-                    {new Date(v.createdAt).toLocaleString()} &middot; {v.clips.length} clips &middot; {v.subtitleSegments.length} subs
-                  </div>
-                </div>
-                <Button
-                  variant="ghost" size="sm" className="h-6 w-6 p-0 opacity-0 group-hover:opacity-100"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (window.confirm(`Restore version "${v.label}"? Current state will be saved to undo.`)) {
-                      restoreVersion(v.id);
-                      setVersionMenuOpen(false);
-                    }
-                  }}
-                  title="Restore this version"
-                >
-                  <RotateCcw className="h-3 w-3" />
-                </Button>
-                <Button
-                  variant="ghost" size="sm" className="h-6 w-6 p-0 text-red-400 opacity-0 group-hover:opacity-100"
-                  onClick={(e) => { e.stopPropagation(); deleteVersion(v.id); }}
-                  title="Delete this version"
-                >
-                  <Trash2 className="h-3 w-3" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      {/* ── Versions (save as / list / load / delete — all persisted at once) ── */}
+      <ComposeVersionsMenu onSave={onSave} saving={saving} />
 
       <div className="mx-0.5 h-4 w-px bg-border" />
 

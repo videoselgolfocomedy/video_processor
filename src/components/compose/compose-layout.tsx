@@ -138,7 +138,7 @@ export function ComposeLayout({
   // Reads the store AT CALL TIME (not the values captured by the last render):
   // the version button saves right after adding the version, and the page
   // saves on its way out — both run before React has re-rendered.
-  const handleSave = useCallback(async () => {
+  const handleSave = useCallback(async (): Promise<boolean> => {
     const st = useComposeStore.getState();
     const body = JSON.stringify({
       ...st.getCompositionState(),
@@ -167,12 +167,21 @@ export function ComposeLayout({
       if (!patch.ok) throw new Error(`transcription ${patch.status}`);
 
       markClean();
+      return true;
     } catch (err) {
+      // Say it out loud: a silent failure left the user thinking the montage
+      // was on disk when it only lived in this tab.
       console.error('Save error:', err);
+      toast({
+        title: 'No se pudo guardar el montaje',
+        description: `${err instanceof Error ? err.message : 'Error desconocido'}. Sigue sin guardar: vuelve a pulsar Save (Ctrl+S) antes de salir de Compose.`,
+        variant: 'destructive',
+      });
+      return false;
     } finally {
       setSaving(false);
     }
-  }, [projectId, markClean]);
+  }, [projectId, markClean, toast]);
 
   // Leaving Compose with unsaved work (menu click = client-side navigation, no
   // "unsaved changes" prompt) used to DROP it silently — cuts, subtitles and

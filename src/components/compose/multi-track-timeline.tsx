@@ -12,7 +12,7 @@ import { TimelineTrack } from './timeline-track';
 import { TimelineControls } from './timeline-controls';
 
 interface MultiTrackTimelineProps {
-  onSave: () => void;
+  onSave: () => Promise<boolean> | void;
   saving: boolean;
 }
 
